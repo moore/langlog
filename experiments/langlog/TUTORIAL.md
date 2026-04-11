@@ -1,6 +1,9 @@
 # Langlog Tutorial
 
-This tutorial introduces the current Langlog prototype as it exists today: a parser-first compiler front end with span-rich syntax errors. You can already write `.llg` files and run them through `langlog check`, even though execution and most semantic analysis are still ahead of the project.
+This tutorial introduces the current Langlog prototype as it exists today: a
+parser-first compiler front end with span-rich syntax errors. You can already
+write `.llg` files and run them through `langlog check`, even though execution
+and most semantic analysis are still ahead of the project.
 
 Use these docs together:
 
@@ -15,7 +18,9 @@ The first useful workflow is syntax checking:
 cargo run -p langlog-driver --bin langlog -- check examples/tutorial.llg
 ```
 
-If the file parses, the driver reports how many top-level items were checked. If the file is malformed, it prints a labeled source error with line and column information.
+If the file parses, the driver reports how many top-level items were checked. If
+the file is malformed, it prints a labeled source error with line and column
+information.
 
 ## 2. Write Your First Function
 
@@ -31,9 +36,12 @@ Important details:
 
 - Parameters use `name: Type`.
 - Return types use `-> Type`.
-- The last expression in a block can be returned implicitly by leaving off the semicolon.
+- The last expression in a block can be returned implicitly by leaving off the
+  semicolon.
 
-Even though Langlog is inspired by Rust syntax, it is a separate language experiment. The goal is not Rust compatibility. The goal is a smaller language that can eventually prove stronger reliability properties.
+Even though Langlog is inspired by Rust syntax, it is a separate language
+experiment. The goal is not Rust compatibility. The goal is a smaller language
+that can eventually prove stronger reliability properties.
 
 ## 3. Bind Values With `let`
 
@@ -53,7 +61,8 @@ Current parser rules:
 - Initializers are optional.
 - `mut` is optional.
 
-Semantic rules for mutability are not implemented yet, so `mut` is currently syntax with future meaning.
+Semantic rules for mutability are not implemented yet, so `mut` is currently
+syntax with future meaning.
 
 ## 4. Use Arrays And Loops
 
@@ -77,11 +86,14 @@ fn sum(values: [u32; 4]) -> u32 {
 }
 ```
 
-Right now, the parser accepts any expression after `in`. The long-term language design is stricter: loops will have to be bounded. That semantic restriction is planned, but not enforced by the parser alone.
+Right now, the parser accepts any expression after `in`. The long-term language
+design is stricter: loops will have to be bounded. That semantic restriction is
+planned, but not enforced by the parser alone.
 
 ## 5. State Facts With `observe`
 
-One of Langlog’s core ideas is that programs should be able to state facts the proof engine can use later. The syntax for that is `observe`:
+One of Langlog’s core ideas is that programs should be able to state facts the
+proof engine can use later. The syntax for that is `observe`:
 
 ```langlog
 fn bounded(total: u32) -> u32 {
@@ -96,7 +108,8 @@ Today:
 - it appears in the AST
 - it does not yet drive proof checking
 
-Later, `observe` will help discharge obligations such as overflow safety and bounds safety.
+Later, `observe` will help discharge obligations such as overflow safety and
+bounds safety.
 
 ## 6. Branch With `if`
 
@@ -114,7 +127,8 @@ fn clamp_flag(total: u32) -> u32 {
 }
 ```
 
-In the current front end, `if` is parsed as a statement. It is not yet an expression form.
+In the current front end, `if` is parsed as a statement. It is not yet an
+expression form.
 
 ## 7. Use `match`
 
@@ -141,7 +155,8 @@ Current pattern support is intentionally small:
 - `true`
 - `false`
 
-That is enough to start shaping the AST and later semantic passes without pretending the pattern language is finished.
+That is enough to start shaping the AST and later semantic passes without
+pretending the pattern language is finished.
 
 ## 8. Read Parser Errors
 
@@ -161,7 +176,8 @@ error: expected a parameter name
   |           ^ identifier expected here
 ```
 
-That error quality matters because the same span system will later be used by name-resolution, type-checking, and proof diagnostics.
+That error quality matters because the same span system will later be used by
+name-resolution, type-checking, and proof diagnostics.
 
 ## 9. A Complete Example
 

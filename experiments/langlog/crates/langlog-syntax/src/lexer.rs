@@ -13,6 +13,8 @@ pub fn lex(path: impl Into<std::path::PathBuf>, contents: impl Into<String>) -> 
     lex_source(SourceFile::new(path, contents))
 }
 
+//= SPEC.md#llg-lex-01-comments-and-token-spans
+//# The lexer MUST attach a byte span to every emitted token.
 pub fn lex_source(source: SourceFile) -> LexedSource {
     Lexer::new(source).lex()
 }
@@ -168,6 +170,8 @@ impl Lexer {
     }
 
     fn skip_line_comment(&mut self) {
+        //= SPEC.md#llg-lex-01-comments-and-token-spans
+        //# The lexer MUST ignore line comments beginning with `//`.
         self.bump_char();
         self.bump_char();
 
@@ -180,6 +184,10 @@ impl Lexer {
     }
 
     fn skip_block_comment(&mut self) {
+        //= SPEC.md#llg-lex-01-comments-and-token-spans
+        //# The lexer MUST ignore block comments delimited by `/*` and `*/`.
+        //= SPEC.md#llg-lex-01-comments-and-token-spans
+        //# The lexer MUST support nested block comments.
         let start = self.offset;
         self.bump_char();
         self.bump_char();
@@ -208,12 +216,20 @@ impl Lexer {
 
         let span = self.source.span(start, self.source.len());
         self.diagnostics.push(
+            //= SPEC.md#llg-lex-01-comments-and-token-spans
+            //# The lexer MUST report an error for an unterminated block comment.
             Diagnostic::error("unterminated block comment")
                 .with_label(Label::primary(span, "comment starts here")),
         );
     }
 
     fn lex_identifier_or_keyword(&mut self) {
+        //= SPEC.md#llg-lex-02-identifiers-and-literals
+        //# Identifiers MUST begin with an ASCII letter or `_` and MAY continue with ASCII letters, digits, or `_`.
+        //= SPEC.md#llg-lex-03-reserved-keywords
+        //# The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `true`, and `false`.
+        //= SPEC.md#llg-lex-02-identifiers-and-literals
+        //# Boolean literals MUST include `true` and `false`.
         let start = self.offset;
         self.bump_char();
 
@@ -248,6 +264,8 @@ impl Lexer {
     }
 
     fn lex_integer(&mut self) {
+        //= SPEC.md#llg-lex-02-identifiers-and-literals
+        //# Integer literals MUST be parsed as unsigned base-10 integers.
         let start = self.offset;
         self.bump_char();
 
@@ -259,7 +277,9 @@ impl Lexer {
         let text = self.source.span_text(span).unwrap_or_default();
 
         match text.parse::<u64>() {
-            Ok(value) => self.tokens.push(Token::new(TokenKind::IntLiteral(value), span)),
+            Ok(value) => self
+                .tokens
+                .push(Token::new(TokenKind::IntLiteral(value), span)),
             Err(_) => {
                 self.diagnostics.push(
                     Diagnostic::error("integer literal does not fit in `u64`")
@@ -327,6 +347,9 @@ mod tests {
         let lexed = lex("bad.llg", "@");
 
         assert_eq!(lexed.diagnostics.len(), 1);
-        assert_eq!(lexed.tokens.last().map(|token| token.tag()), Some(TokenTag::Eof));
+        assert_eq!(
+            lexed.tokens.last().map(|token| token.tag()),
+            Some(TokenTag::Eof)
+        );
     }
 }

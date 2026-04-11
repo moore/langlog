@@ -1,7 +1,7 @@
 use crate::ast::{
     AssignStmt, BinaryOp, Block, ElseBranch, Expr, ExprKind, ExprStmt, ForStmt, Function,
-    GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveStmt,
-    Param, Pattern, PatternKind, ReturnStmt, Stmt, Type, TypeKind, UnaryOp,
+    GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveStmt, Param,
+    Pattern, PatternKind, ReturnStmt, Stmt, Type, TypeKind, UnaryOp,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -18,9 +18,9 @@ pub struct ParsedModule {
 
 impl ParsedModule {
     pub fn has_errors(&self) -> bool {
-        self.diagnostics.iter().any(|diagnostic| {
-            matches!(diagnostic.severity, crate::diagnostic::Severity::Error)
-        })
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.severity, crate::diagnostic::Severity::Error))
     }
 }
 
@@ -65,6 +65,8 @@ impl<'a> Parser<'a> {
         self.diagnostics
     }
 
+    //= SPEC.md#llg-syn-01-top-level-functions
+    //# A phase 1 source file MUST contain only function items at the top level.
     fn parse_module(&mut self) -> Module {
         let mut items = Vec::new();
 
@@ -87,6 +89,10 @@ impl<'a> Parser<'a> {
         self.parse_function().map(Item::Function)
     }
 
+    //= SPEC.md#llg-syn-01-top-level-functions
+    //# A function item MUST use Rust-like syntax with `fn`, a name, a parameter list, and a block body.
+    //= SPEC.md#llg-syn-01-top-level-functions
+    //# The current parser allows the return type to be omitted in phase 1.
     fn parse_function(&mut self) -> Option<Function> {
         let start = self.expect_tag(TokenTag::Fn, "expected `fn` to start a function")?;
         let name = self.expect_identifier("expected a function name")?;
@@ -136,6 +142,10 @@ impl<'a> Parser<'a> {
         Some(params)
     }
 
+    //= SPEC.md#llg-type-01-phase-1-types
+    //# The parser MUST accept unit, named, tuple, fixed-array, and generic application type forms.
+    //= SPEC.md#llg-rel-01-collections-and-relations
+    //# The language MUST parse capacity-bounded `Set<T, N>` and `Map<K, V, N>` types.
     fn parse_type(&mut self) -> Option<Type> {
         match self.current_tag() {
             TokenTag::LParen => self.parse_tuple_or_grouped_type(),
@@ -151,7 +161,10 @@ impl<'a> Parser<'a> {
     fn parse_tuple_or_grouped_type(&mut self) -> Option<Type> {
         let start = self.expect_tag(TokenTag::LParen, "expected `(`")?;
         if self.bump_if(TokenTag::RParen) {
-            return Some(Type::new(start.span.cover(self.previous_span())?, TypeKind::Unit));
+            return Some(Type::new(
+                start.span.cover(self.previous_span())?,
+                TypeKind::Unit,
+            ));
         }
 
         let first = self.parse_type()?;
@@ -174,6 +187,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array_type(&mut self) -> Option<Type> {
+        //= SPEC.md#llg-type-01-phase-1-types
+        //# A fixed-array type MUST use the form `[T; N]`.
         let start = self.expect_tag(TokenTag::LBracket, "expected `[`")?;
         let element = self.parse_type()?;
         self.expect_tag(TokenTag::Semi, "expected `;` in array type")?;
@@ -191,6 +206,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_named_or_applied_type(&mut self) -> Option<Type> {
+        //= SPEC.md#llg-type-01-phase-1-types
+        //# `Set<T, N>` and `Map<K, V, N>` MUST carry explicit capacity arguments in the source type.
         let base = self.expect_identifier("expected a type name")?;
         if !self.bump_if(TokenTag::Lt) {
             return Some(Type::new(base.span, TypeKind::Named(base)));
@@ -199,7 +216,9 @@ impl<'a> Parser<'a> {
         let mut args = Vec::new();
         loop {
             if self.at(TokenTag::IntLiteral) {
-                args.push(GenericArg::Const(self.expect_int_literal("expected a const generic")?));
+                args.push(GenericArg::Const(
+                    self.expect_int_literal("expected a const generic")?,
+                ));
             } else {
                 args.push(GenericArg::Type(self.parse_type()?));
             }
@@ -215,10 +234,50 @@ impl<'a> Parser<'a> {
 
         let end = self.expect_tag(TokenTag::Gt, "expected `>` to close generic arguments")?;
         let span = base.span.cover(end.span).unwrap_or(base.span);
+        self.validate_builtin_type_application(&base, &args, span);
         Some(Type::new(span, TypeKind::Applied { base, args }))
     }
 
+    fn validate_builtin_type_application(
+        &mut self,
+        base: &Spanned<String>,
+        args: &[GenericArg],
+        span: Span,
+    ) {
+        let valid = match base.value.as_str() {
+            "Set" => matches!(args, [GenericArg::Type(_), GenericArg::Const(_)]),
+            "Map" => matches!(
+                args,
+                [
+                    GenericArg::Type(_),
+                    GenericArg::Type(_),
+                    GenericArg::Const(_)
+                ]
+            ),
+            _ => true,
+        };
+
+        if valid {
+            return;
+        }
+
+        let message = match base.value.as_str() {
+            "Set" => "`Set` requires a value type and an explicit capacity, as in `Set<T, N>`",
+            "Map" => {
+                "`Map` requires key type, value type, and explicit capacity, as in `Map<K, V, N>`"
+            }
+            _ => return,
+        };
+
+        self.diagnostics.push(
+            Diagnostic::error(message)
+                .with_label(Label::primary(span, "invalid built-in type application")),
+        );
+    }
+
     fn parse_block(&mut self) -> Option<Block> {
+        //= SPEC.md#llg-syn-02-statements
+        //# A statement form that requires a semicolon MUST reject the form if the semicolon is absent.
         let start = self.expect_tag(TokenTag::LBrace, "expected `{` to start a block")?;
         let mut statements = Vec::new();
         let mut trailing_expr = None;
@@ -269,7 +328,10 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            self.error_current("expected `;` or `}` after expression", "expression ends here");
+            self.error_current(
+                "expected `;` or `}` after expression",
+                "expression ends here",
+            );
             self.synchronize_statement();
         }
 
@@ -295,6 +357,8 @@ impl<'a> Parser<'a> {
         )
     }
 
+    //= SPEC.md#llg-syn-02-statements
+    //# The parser MUST accept `let`, assignment, expression, `if`, `match`, `for`, `return`, and `observe` statements.
     fn parse_statement(&mut self) -> Option<Stmt> {
         match self.current_tag() {
             TokenTag::Let => self.parse_let_statement().map(Stmt::Let),
@@ -311,6 +375,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_let_statement(&mut self) -> Option<LetStmt> {
+        //= SPEC.md#llg-syn-02-statements
+        //# The current parser allows a `let` statement to include `mut`, a type annotation, and an initializer.
         let start = self.expect_tag(TokenTag::Let, "expected `let`")?;
         let mutable = self.bump_if(TokenTag::Mut);
         let name = self.expect_identifier("expected a binding name")?;
@@ -386,7 +452,11 @@ impl<'a> Parser<'a> {
                 MatchBody::Expr(expr) => expr.span,
             };
             let span = pattern.span.cover(end_span).unwrap_or(pattern.span);
-            arms.push(MatchArm { span, pattern, body });
+            arms.push(MatchArm {
+                span,
+                pattern,
+                body,
+            });
 
             if !self.bump_if(TokenTag::Comma) {
                 break;
@@ -468,6 +538,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# The parser MUST accept integer literals, boolean literals, names, tuples, arrays, blocks, grouped expressions, unary operators, binary operators, calls, and indexing expressions.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Postfix call and indexing MUST bind tighter than unary operators.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Unary operators MUST bind tighter than multiplicative operators.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Multiplicative operators MUST bind tighter than additive operators.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Additive operators MUST bind tighter than comparison operators.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Comparison operators MUST bind tighter than equality operators.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Equality operators MUST bind tighter than logical and.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Logical and MUST bind tighter than logical or.
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //# Logical or MUST bind tighter than range construction.
     fn parse_expression(&mut self, min_binding_power: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
         lhs = self.parse_postfix(lhs)?;
@@ -710,10 +798,11 @@ impl<'a> Parser<'a> {
 
     fn error_expected(&mut self, tag: TokenTag, message: &str) {
         let current = self.current();
-        self.diagnostics.push(
-            Diagnostic::error(message)
-                .with_label(Label::primary(current.span, format!("expected {}", tag.describe()))),
-        );
+        self.diagnostics
+            .push(Diagnostic::error(message).with_label(Label::primary(
+                current.span,
+                format!("expected {}", tag.describe()),
+            )));
     }
 
     fn error_current(&mut self, message: &str, label: &str) {
@@ -814,7 +903,10 @@ fn sum(values: [u32; 4]) -> u32 {
         let Item::Function(function) = &parsed.module.items[0];
         assert_eq!(function.name.value, "sum");
         assert_eq!(function.params.len(), 1);
-        assert!(matches!(function.return_type.as_ref().map(|ty| &ty.kind), Some(TypeKind::Named(_))));
+        assert!(matches!(
+            function.return_type.as_ref().map(|ty| &ty.kind),
+            Some(TypeKind::Named(_))
+        ));
         assert_eq!(function.body.statements.len(), 4);
 
         assert!(matches!(&function.body.statements[0], Stmt::Let(_)));

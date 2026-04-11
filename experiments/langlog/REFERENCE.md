@@ -1,6 +1,8 @@
 # Langlog Reference Manual
 
-Status: parser reference for the current experimental front end. This document describes the surface language accepted by `langlog check` today. It does not promise that every parsed program already has full semantic checking behind it.
+Status: parser reference for the current experimental front end. This document
+describes the surface language accepted by `langlog check` today. It does not
+promise that every parsed program already has full semantic checking behind it.
 
 See also:
 
@@ -36,7 +38,8 @@ See also:
 
 Reserved keywords in the current language:
 
-`fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `true`, `false`
+`fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`,
+`true`, `false`
 
 ## Items
 
@@ -52,7 +55,8 @@ Notes:
 
 - The return type is optional in the parser.
 - Functions with no meaningful value should use `()`.
-- Recursion is a language-level non-goal, but recursion rejection is part of later semantic checking rather than parsing.
+- Recursion is a language-level non-goal, but recursion rejection is part of
+  later semantic checking rather than parsing.
 
 ## Statements
 
@@ -156,7 +160,8 @@ return;
 observe total <= 1000;
 ```
 
-`observe` records an explicit fact in the source program. The parser accepts it now. Its proof behavior will be implemented later.
+`observe` records an explicit fact in the source program. The parser accepts it
+now. Its proof behavior will be implemented later.
 
 ## Patterns
 
@@ -271,8 +276,11 @@ The parser currently accepts:
 Notes:
 
 - Generic arguments may be either types or integer constants.
-- The parser accepts user-written names such as `MyType`, but name resolution does not exist yet.
-- Capacity-bounded `Set` and `Map` are parsed now because they are central to the language design, even though collection semantics are still ahead of the current implementation.
+- The parser accepts user-written names such as `MyType`, but name resolution
+  does not exist yet.
+- Capacity-bounded `Set` and `Map` are parsed now because they are central to
+  the language design, even though collection semantics are still ahead of the
+  current implementation.
 
 ## Diagnostics
 
@@ -293,7 +301,8 @@ error: expected a parameter name
   |          ^ identifier expected here
 ```
 
-The current renderer is intentionally minimal, but the span model is designed to grow toward richer Rust-style diagnostics.
+The current renderer is intentionally minimal, but the span model is designed to
+grow toward richer Rust-style diagnostics.
 
 ## Current Limits
 
@@ -303,4 +312,5 @@ These are important current limits, not future promises:
 - Field access and method syntax do not exist yet.
 - String literals do not exist yet.
 - Assignment targets are not semantically validated yet.
-- Type checking, name resolution, recursion rejection, and proof checking are still in progress.
+- Type checking, name resolution, recursion rejection, and proof checking are
+  still in progress.
