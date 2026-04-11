@@ -6,7 +6,7 @@ Langlog is an experimental standalone language focused on reliability properties
 
 - Current phase: `M1 Lexer and parser to AST`
 - Last completed milestone: `M0 Workspace bootstrap`
-- Next concrete task: Define the source-file layout, token kinds, span representation, and parser entrypoints in `langlog-syntax`.
+- Next concrete task: Define the token set and implement the lexer on top of the new span and diagnostic infrastructure in `langlog-syntax`.
 - Current blockers: None. LLVM tooling is intentionally deferred until after executable MIR semantics exist.
 
 ## Milestones
@@ -24,7 +24,8 @@ Exit criteria: the directory layout exists, the workspace builds, and this plan 
 ### M1 Lexer and parser to AST
 
 - [ ] Define the source file structure for items, statements, and expressions.
-- [ ] Implement spans, tokens, and lexer diagnostics.
+- [x] Implement spans and source mapping infrastructure.
+- [ ] Implement tokens, lexer, and lexer diagnostics.
 - [ ] Implement an AST for the phase 1 language surface.
 - [ ] Build a parser with useful recovery at item and statement boundaries.
 - [ ] Expose `langlog check <file>` parsing with span-rich syntax errors.
@@ -91,10 +92,12 @@ Exit criteria: MIR lowers to LLVM IR and native binaries can be produced.
 
 - Standalone compiler, not proc macros.
 - Rust-like syntax for the first language surface.
+- `SPEC.md` is the authoritative draft language spec for phase 1 decisions.
 - Diagnostics-only front end before execution backends.
 - Potentially failing arithmetic and indexing are proof-required, not silently runtime-checked.
 - Proof facts come from both control flow and explicit `observe`.
 - Capacity-bounded `Set` and `Map` are part of the early type system.
+- Parsing uses a handwritten lexer plus recursive-descent parser with Pratt-style expression parsing.
 - The long-term runtime model is a single event loop with bounded handlers.
 - LLVM is deferred until MIR semantics and the runtime model are stable.
 - `journel.md` stays at the repository root as the idea journal.

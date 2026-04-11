@@ -1,20 +1,12 @@
-use std::path::PathBuf;
+pub mod diagnostic;
+pub mod span;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFile {
-    pub path: PathBuf,
-    pub contents: String,
-}
+pub use diagnostic::{Diagnostic, Label, LabelStyle, Severity};
+pub use span::{ByteOffset, FileId, SourceFile, SourceLocation, Span, Spanned};
 
-impl SourceFile {
-    pub fn new(path: impl Into<PathBuf>, contents: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            contents: contents.into(),
-        }
-    }
-}
-
-pub fn parse(path: impl Into<PathBuf>, contents: impl Into<String>) -> SourceFile {
+pub fn parse(
+    path: impl Into<std::path::PathBuf>,
+    contents: impl Into<String>,
+) -> SourceFile {
     SourceFile::new(path, contents)
 }
