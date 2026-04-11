@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/langlog-driver",
+    "crates/langlog-syntax",
+    "crates/langlog-sema",
+    "crates/langlog-proof",
+]
+resolver = "2"

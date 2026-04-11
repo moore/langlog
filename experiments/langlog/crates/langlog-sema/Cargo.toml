@@ -1,0 +1,10 @@
+[package]
+name = "langlog-sema"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+langlog-syntax = { path = "../langlog-syntax" }
+
+[lib]
+path = "src/lib.rs"

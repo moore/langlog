@@ -1,0 +1,1 @@
+/home/moore/devel/langlog/experiments/langlog/target/debug/langlog: /home/moore/devel/langlog/experiments/langlog/crates/langlog-driver/src/main.rs /home/moore/devel/langlog/experiments/langlog/crates/langlog-proof/src/lib.rs /home/moore/devel/langlog/experiments/langlog/crates/langlog-sema/src/lib.rs /home/moore/devel/langlog/experiments/langlog/crates/langlog-syntax/src/lib.rs

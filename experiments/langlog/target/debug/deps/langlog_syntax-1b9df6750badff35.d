@@ -1,0 +1,7 @@
+/home/moore/devel/langlog/experiments/langlog/target/debug/deps/langlog_syntax-1b9df6750badff35.d: crates/langlog-syntax/src/lib.rs
+
+/home/moore/devel/langlog/experiments/langlog/target/debug/deps/liblanglog_syntax-1b9df6750badff35.rlib: crates/langlog-syntax/src/lib.rs
+
+/home/moore/devel/langlog/experiments/langlog/target/debug/deps/liblanglog_syntax-1b9df6750badff35.rmeta: crates/langlog-syntax/src/lib.rs
+
+crates/langlog-syntax/src/lib.rs:

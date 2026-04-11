@@ -1,0 +1,10 @@
+[package]
+name = "langlog-proof"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+langlog-sema = { path = "../langlog-sema" }
+
+[lib]
+path = "src/lib.rs"
