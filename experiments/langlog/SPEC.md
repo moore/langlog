@@ -2,6 +2,11 @@
 
 Status: draft 0. This document is the working specification for the phase 1 front end. If implementation and this file disagree, update one of them before proceeding.
 
+User-facing docs:
+
+- [REFERENCE.md](./REFERENCE.md)
+- [TUTORIAL.md](./TUTORIAL.md)
+
 ## Goals
 
 Langlog is a standalone systems language experiment focused on reliability properties that should be enforced structurally rather than by convention:
@@ -53,7 +58,7 @@ Phase 1 ends after parsing, semantic analysis, and proof checking. Execution is 
 
 Reserved keywords for phase 1:
 
-`fn`, `let`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `true`, `false`
+`fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `true`, `false`
 
 Reserved type names for phase 1:
 

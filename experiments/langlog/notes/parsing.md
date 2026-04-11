@@ -43,10 +43,13 @@ src/
 
 The exact filenames may change, but the separation of responsibilities should remain.
 
-## Immediate Next Steps
+## Current Status
 
-1. Define the phase 1 token set and keyword table on top of the span model.
-2. Implement the lexer with byte-span output and diagnostic stubs.
-3. Define AST nodes for items, statements, expressions, and types.
-4. Implement top-level and block parsing before filling in the full expression grammar.
-5. Keep parser nodes spanned from the start instead of backfilling locations later.
+The handwritten lexer, token model, AST, and first parser pass now exist in `langlog-syntax`. `langlog check <file>` can parse the smoke example and emit labeled syntax diagnostics for malformed input.
+
+## Follow-On Parser Work
+
+1. Split `parser.rs` into smaller modules once HIR work stabilizes the syntax surface.
+2. Improve recovery around malformed match arms and nested expressions.
+3. Add richer secondary labels and notes once semantic diagnostics begin to reference multiple spans.
+4. Keep every new syntax node spanned from construction time; do not backfill spans later.

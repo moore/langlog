@@ -1,10 +1,10 @@
-use langlog_syntax::SourceFile;
+use langlog_syntax::ParsedModule;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedProgram {
-    pub source: SourceFile,
+    pub parsed: ParsedModule,
 }
 
-pub fn analyze(source: SourceFile) -> CheckedProgram {
-    CheckedProgram { source }
+pub fn analyze(parsed: ParsedModule) -> CheckedProgram {
+    CheckedProgram { parsed }
 }

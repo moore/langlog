@@ -1,3 +1,4 @@
 # Examples
 
-This directory is reserved for sample Langlog programs once the parser and checker can consume source files.
+- `smoke.llg` is the smallest parser smoke test.
+- `tutorial.llg` is the sample file used by `TUTORIAL.md`.

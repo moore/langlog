@@ -1,0 +1,26 @@
+fn sum(values: [u32; 4]) -> u32 {
+    let mut total: u32 = 0;
+
+    for value in values {
+        total = total + value;
+    }
+
+    if total > 100 {
+        observe total < 1000;
+    } else {
+        observe total >= 0;
+    }
+
+    total
+}
+
+fn choose(flag: bool) -> u32 {
+    let mut value: u32 = 0;
+
+    match flag {
+        true => { value = 1; },
+        false => { value = 2; }
+    }
+
+    value
+}

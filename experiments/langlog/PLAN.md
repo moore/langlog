@@ -4,9 +4,9 @@ Langlog is an experimental standalone language focused on reliability properties
 
 ## Current Status
 
-- Current phase: `M1 Lexer and parser to AST`
-- Last completed milestone: `M0 Workspace bootstrap`
-- Next concrete task: Define the token set and implement the lexer on top of the new span and diagnostic infrastructure in `langlog-syntax`.
+- Current phase: `M2 HIR plus semantic checks`
+- Last completed milestone: `M1 Lexer and parser to AST`
+- Next concrete task: Define the HIR surface and lower the current AST into it, starting with function signatures, blocks, and expression forms already supported by `langlog-syntax`.
 - Current blockers: None. LLVM tooling is intentionally deferred until after executable MIR semantics exist.
 
 ## Milestones
@@ -23,12 +23,12 @@ Exit criteria: the directory layout exists, the workspace builds, and this plan 
 
 ### M1 Lexer and parser to AST
 
-- [ ] Define the source file structure for items, statements, and expressions.
+- [x] Define the source file structure for items, statements, and expressions.
 - [x] Implement spans and source mapping infrastructure.
-- [ ] Implement tokens, lexer, and lexer diagnostics.
-- [ ] Implement an AST for the phase 1 language surface.
-- [ ] Build a parser with useful recovery at item and statement boundaries.
-- [ ] Expose `langlog check <file>` parsing with span-rich syntax errors.
+- [x] Implement tokens, lexer, and lexer diagnostics.
+- [x] Implement an AST for the phase 1 language surface.
+- [x] Build a parser with useful recovery at item and statement boundaries.
+- [x] Expose `langlog check <file>` parsing with span-rich syntax errors.
 
 Exit criteria: `langlog check <file>` can lex and parse a single source file into AST and report parse errors with precise spans.
 
