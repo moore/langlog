@@ -219,3 +219,29 @@ impl TokenTag {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{TokenKind, TokenTag};
+
+    #[test]
+    fn token_kind_describe_handles_identifiers_and_literals() {
+        assert_eq!(
+            TokenKind::Identifier("name".into()).describe(),
+            "identifier"
+        );
+        assert_eq!(TokenKind::IntLiteral(7).describe(), "integer literal");
+        assert_eq!(TokenKind::Fn.describe(), "`fn`");
+    }
+
+    #[test]
+    fn token_tag_describe_covers_symbols_and_eof() {
+        assert_eq!(TokenTag::Underscore.describe(), "`_`");
+        assert_eq!(TokenTag::BangEq.describe(), "`!=`");
+        assert_eq!(TokenTag::LtEq.describe(), "`<=`");
+        assert_eq!(TokenTag::GtEq.describe(), "`>=`");
+        assert_eq!(TokenTag::Slash.describe(), "`/`");
+        assert_eq!(TokenTag::Percent.describe(), "`%`");
+        assert_eq!(TokenTag::Eof.describe(), "end of file");
+    }
+}

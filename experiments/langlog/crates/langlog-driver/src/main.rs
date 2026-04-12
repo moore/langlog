@@ -163,6 +163,8 @@ mod tests {
     use std::process;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use langlog_syntax::{Diagnostic, Label, SourceFile};
+
     struct TempSource {
         path: PathBuf,
     }
@@ -230,5 +232,17 @@ mod tests {
         assert!(rendered.contains("broken.llg:1:10"));
         assert!(rendered.contains("fn main( {"));
         assert!(rendered.contains("^"));
+    }
+
+    #[test]
+    fn render_diagnostics_underlines_the_full_primary_span() {
+        let source = SourceFile::new("diagnostic.llg", "observe count;\n");
+        let span = source.span(8, 13);
+        let diagnostic = Diagnostic::error("example error")
+            .with_label(Label::primary(span, "spans the whole name"));
+
+        let rendered = render_diagnostics(&source, &[diagnostic]);
+
+        assert!(rendered.contains("^^^^^ spans the whole name"));
     }
 }

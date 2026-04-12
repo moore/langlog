@@ -28,17 +28,23 @@ run_duvet() {
     duvet report --require-tests true
 }
 
+run_cargo_mutants() {
+    echo "==> cargo mutants $*"
+    cargo mutants "$@"
+}
+
 usage() {
     cat <<'EOF'
 Usage: ./tasks.sh [task...]
 
 Tasks:
-  all      Run everything: cargo fmt, markdown formatting, cargo test, cargo clippy, duvet
+  all      Run the default fast checks: cargo fmt, markdown formatting, cargo test, cargo clippy, duvet
   fmt      Run cargo fmt and markdown formatting
   test     Run cargo test
   clippy   Run cargo clippy
   md       Run markdown formatting
   duvet    Run duvet report with test coverage required
+  mutants  Run cargo-mutants with the checked-in configuration
 EOF
 }
 
@@ -66,6 +72,9 @@ run_task() {
             ;;
         duvet)
             run_duvet
+            ;;
+        mutants)
+            run_cargo_mutants
             ;;
         -h|--help|help)
             usage

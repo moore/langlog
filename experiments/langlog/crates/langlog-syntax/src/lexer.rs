@@ -352,4 +352,20 @@ mod tests {
             Some(TokenTag::Eof)
         );
     }
+
+    #[test]
+    fn lexes_standalone_underscore_as_wildcard_token() {
+        let lexed = lex("wildcard.llg", "_");
+
+        assert!(lexed.diagnostics.is_empty());
+        assert_eq!(lexed.tokens[0].tag(), TokenTag::Underscore);
+    }
+
+    #[test]
+    fn invalid_character_diagnostic_marks_the_offending_character() {
+        let lexed = lex("bad.llg", "@");
+
+        let label = &lexed.diagnostics[0].labels[0];
+        assert_eq!(lexed.source.span_text(label.span), Some("@"));
+    }
 }

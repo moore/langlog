@@ -270,7 +270,7 @@ impl SourceFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{ByteOffset, FileId, SourceFile};
+    use super::{ByteOffset, FileId, SourceFile, Span};
 
     #[test]
     fn source_file_tracks_lines_and_locations() {
@@ -295,5 +295,57 @@ mod tests {
 
         assert_eq!(source.span_text(span), Some("count"));
         assert_eq!(source.line_span(1), Some(source.span(0, 23)));
+    }
+
+    #[test]
+    fn span_and_source_lengths_match_the_underlying_text() {
+        let source = SourceFile::new("demo.llg", "abc");
+        let non_empty = source.span(0, 2);
+        let empty = source.span(2, 2);
+
+        assert_eq!(non_empty.len(), 2);
+        assert!(!non_empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert_eq!(source.len(), 3);
+        assert!(!source.is_empty());
+
+        let empty_source = SourceFile::new("empty.llg", "");
+        assert_eq!(empty_source.len(), 0);
+        assert!(empty_source.is_empty());
+    }
+
+    #[test]
+    fn source_file_rejects_foreign_spans_and_invalid_locations() {
+        let source = SourceFile::with_id(FileId::new(7), "demo.llg", "hé\n");
+        let foreign = Span::new(FileId::new(9), ByteOffset::new(0), ByteOffset::new(1));
+
+        assert_eq!(source.span_text(foreign), None);
+        assert!(source
+            .location(ByteOffset::new(source.len() as u32))
+            .is_some());
+        assert_eq!(source.location(ByteOffset::new(2)), None);
+        assert_eq!(source.location(ByteOffset::new(99)), None);
+    }
+
+    #[test]
+    fn source_file_line_helpers_trim_crlf_endings() {
+        let source = SourceFile::new("demo.llg", "one\r\ntwo\r\n");
+
+        assert_eq!(source.line_text(1), Some("one"));
+        assert_eq!(source.line_text(2), Some("two"));
+        assert_eq!(source.line_text(3), Some(""));
+        assert_eq!(
+            source.line_span(1).and_then(|span| source.span_text(span)),
+            Some("one")
+        );
+        assert_eq!(
+            source.line_span(2).and_then(|span| source.span_text(span)),
+            Some("two")
+        );
+        assert_eq!(
+            source.line_span(3).and_then(|span| source.span_text(span)),
+            Some("")
+        );
     }
 }

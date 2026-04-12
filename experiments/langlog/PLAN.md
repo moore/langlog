@@ -15,8 +15,9 @@ allocation.
   supported by `langlog-syntax`.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
-- Project task runner: use `./tasks.sh` in `experiments/langlog/` to run
-  formatting, tests, clippy, and Duvet in one place.
+- Project task runner: use `./tasks.sh` in `experiments/langlog/` to run the
+  default fast checks in one place. `cargo-mutants` is available as a separate
+  `./tasks.sh mutants` gate because it is intentionally slower.
 - Formatting defaults: `rustfmt` and `rumdl` are both pinned to a 100-column
   line length so requirement text stays stable across Rust and Markdown tooling.
 

@@ -879,7 +879,32 @@ impl<'a> Parser<'a> {
 mod tests {
     use crate::ast::{BinaryOp, ExprKind, Item, PatternKind, Stmt, TypeKind};
     use crate::lexer::lex;
-    use crate::parser::parse_lexed;
+    use crate::parser::{parse_lexed, ParsedModule};
+
+    fn parse_ok(source: &str) -> ParsedModule {
+        let parsed = parse_lexed(lex("parser-test.llg", source));
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        parsed
+    }
+
+    fn parse_err(source: &str) -> ParsedModule {
+        let parsed = parse_lexed(lex("parser-test.llg", source));
+        assert!(parsed.has_errors(), "expected parse errors");
+        parsed
+    }
+
+    fn first_function(parsed: &ParsedModule) -> &crate::ast::Function {
+        match &parsed.module.items[0] {
+            Item::Function(function) => function,
+        }
+    }
+
+    fn expr_stmt(stmt: &Stmt) -> &crate::ast::Expr {
+        match stmt {
+            Stmt::Expr(stmt) => &stmt.expr,
+            other => panic!("expected expression statement, got {other:?}"),
+        }
+    }
 
     #[test]
     fn parses_a_function_with_core_statements() {
@@ -934,5 +959,242 @@ fn sum(values: [u32; 4]) -> u32 {
 
         assert!(parsed.has_errors());
         assert!(!parsed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn distinguishes_grouped_and_tuple_types() {
+        let grouped = parse_ok("fn main(value: (u32)) {}");
+        let tuple = parse_ok("fn main(value: (u32, bool)) {}");
+        let singleton = parse_ok("fn main(value: (u32,)) {}");
+        let triple = parse_ok("fn main(value: (u32, bool, u8)) {}");
+
+        assert!(matches!(
+            &first_function(&grouped).params[0].ty.kind,
+            TypeKind::Named(name) if name.value == "u32"
+        ));
+        assert!(matches!(
+            &first_function(&tuple).params[0].ty.kind,
+            TypeKind::Tuple(elements) if elements.len() == 2
+        ));
+        assert!(matches!(
+            &first_function(&singleton).params[0].ty.kind,
+            TypeKind::Tuple(elements) if elements.len() == 1
+        ));
+        assert!(matches!(
+            &first_function(&triple).params[0].ty.kind,
+            TypeKind::Tuple(elements) if elements.len() == 3
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_set_and_map_type_applications() {
+        let invalid_set = parse_err("fn main(value: Set<u32>) {}");
+        let invalid_map = parse_err("fn main(value: Map<u32, u32>) {}");
+
+        assert!(invalid_set.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("`Set` requires a value type and an explicit capacity")));
+        assert!(invalid_map.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("`Map` requires key type, value type, and explicit capacity")));
+    }
+
+    #[test]
+    fn parses_match_patterns_and_trailing_commas() {
+        let parsed = parse_ok(
+            r#"
+fn main() {
+    match 1 {
+        _ => 0,
+        7 => 1,
+        false => 2,
+    }
+}
+"#,
+        );
+
+        let stmt = &first_function(&parsed).body.statements[0];
+        let Stmt::Match(match_stmt) = stmt else {
+            panic!("expected match statement, got {stmt:?}");
+        };
+
+        assert_eq!(match_stmt.arms.len(), 3);
+        assert!(matches!(
+            match_stmt.arms[0].pattern.kind,
+            PatternKind::Wildcard
+        ));
+        assert!(matches!(
+            match_stmt.arms[1].pattern.kind,
+            PatternKind::Int(7)
+        ));
+        assert!(matches!(
+            match_stmt.arms[2].pattern.kind,
+            PatternKind::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn parses_additional_binary_operators_with_left_associativity() {
+        let parsed = parse_ok(
+            r#"
+fn main() {
+    1 != 2;
+    3 <= 4;
+    5 >= 6;
+    8 - 4 - 2;
+    20 / 5 % 2;
+}
+"#,
+        );
+        let statements = &first_function(&parsed).body.statements;
+
+        assert!(matches!(
+            expr_stmt(&statements[0]).kind,
+            ExprKind::Binary {
+                op: BinaryOp::NotEq,
+                ..
+            }
+        ));
+        assert!(matches!(
+            expr_stmt(&statements[1]).kind,
+            ExprKind::Binary {
+                op: BinaryOp::LtEq,
+                ..
+            }
+        ));
+        assert!(matches!(
+            expr_stmt(&statements[2]).kind,
+            ExprKind::Binary {
+                op: BinaryOp::GtEq,
+                ..
+            }
+        ));
+
+        match &expr_stmt(&statements[3]).kind {
+            ExprKind::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                assert!(matches!(right.kind, ExprKind::Int(2)));
+                assert!(matches!(
+                    left.kind,
+                    ExprKind::Binary {
+                        op: BinaryOp::Sub,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected left-associated subtraction, got {other:?}"),
+        }
+
+        match &expr_stmt(&statements[4]).kind {
+            ExprKind::Binary {
+                op: BinaryOp::Rem,
+                left,
+                right,
+            } => {
+                assert!(matches!(right.kind, ExprKind::Int(2)));
+                assert!(matches!(
+                    left.kind,
+                    ExprKind::Binary {
+                        op: BinaryOp::Div,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected remainder expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinguishes_grouped_and_tuple_expressions() {
+        let parsed = parse_ok(
+            r#"
+fn main() {
+    (1);
+    (1,);
+    (1, 2, 3);
+    ();
+}
+"#,
+        );
+        let statements = &first_function(&parsed).body.statements;
+
+        assert!(matches!(
+            expr_stmt(&statements[0]).kind,
+            ExprKind::Grouped(_)
+        ));
+        assert!(matches!(
+            &expr_stmt(&statements[1]).kind,
+            ExprKind::Tuple(elements) if elements.len() == 1
+        ));
+        assert!(matches!(
+            &expr_stmt(&statements[2]).kind,
+            ExprKind::Tuple(elements) if elements.len() == 3
+        ));
+        assert!(matches!(
+            &expr_stmt(&statements[3]).kind,
+            ExprKind::Tuple(elements) if elements.is_empty()
+        ));
+    }
+
+    #[test]
+    fn recovers_after_a_broken_statement_before_the_next_keyword() {
+        let parsed = parse_err(
+            r#"
+fn main() {
+    1
+    let value = 2;
+}
+"#,
+        );
+        let statements = &first_function(&parsed).body.statements;
+
+        assert_eq!(statements.len(), 1);
+        assert!(matches!(statements[0], Stmt::Let(_)));
+    }
+
+    #[test]
+    fn recovers_after_a_broken_statement_before_a_semicolon() {
+        let parsed = parse_err(
+            r#"
+fn main() {
+    let value = ;
+    observe true;
+}
+"#,
+        );
+        let statements = &first_function(&parsed).body.statements;
+
+        assert_eq!(statements.len(), 1);
+        assert!(matches!(statements[0], Stmt::Observe(_)));
+    }
+
+    #[test]
+    fn recovers_after_a_broken_statement_before_the_next_expression() {
+        let parsed = parse_err(
+            r#"
+fn main() {
+    let value = ;
+    7;
+}
+"#,
+        );
+        let statements = &first_function(&parsed).body.statements;
+
+        assert_eq!(statements.len(), 1);
+        assert!(matches!(statements[0], Stmt::Expr(_)));
+    }
+
+    #[test]
+    fn missing_let_semicolon_before_rbrace_does_not_cascade_errors() {
+        let parsed = parse_err("fn main() { let value = 1 }");
+
+        assert_eq!(parsed.module.items.len(), 1);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(parsed.diagnostics[0]
+            .message
+            .contains("expected `;` after `let` statement"));
     }
 }
