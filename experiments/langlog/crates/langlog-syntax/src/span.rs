@@ -348,4 +348,16 @@ mod tests {
             Some("")
         );
     }
+
+    #[test]
+    fn empty_source_still_has_an_empty_first_line() {
+        let source = SourceFile::new("empty.llg", "");
+
+        assert_eq!(source.line_count(), 1);
+        assert_eq!(source.line_text(1), Some(""));
+        assert_eq!(
+            source.line_span(1).and_then(|span| source.span_text(span)),
+            Some("")
+        );
+    }
 }

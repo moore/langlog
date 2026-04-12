@@ -115,11 +115,7 @@ impl TokenKind {
     }
 
     pub fn describe(&self) -> Cow<'static, str> {
-        match self {
-            Self::Identifier(_) => Cow::Borrowed("identifier"),
-            Self::IntLiteral(_) => Cow::Borrowed("integer literal"),
-            _ => self.tag().describe(),
-        }
+        self.tag().describe()
     }
 }
 
