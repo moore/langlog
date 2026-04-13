@@ -16,6 +16,7 @@ pub enum BindingKind {
 struct Binding {
     kind: BindingKind,
     span: Span,
+    loop_bound: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,7 @@ impl<'a> Analyzer<'a> {
                 .or_insert(Binding {
                     kind: BindingKind::Item,
                     span: function.name.span,
+                    loop_bound: false,
                 });
         }
     }
@@ -125,6 +127,7 @@ impl<'a> Analyzer<'a> {
                 Binding {
                     kind: BindingKind::Param,
                     span: param.name.span,
+                    loop_bound: is_bounded_iterable_type(&param.ty),
                 },
             );
         }
@@ -159,6 +162,12 @@ impl<'a> Analyzer<'a> {
                     Binding {
                         kind: BindingKind::Local,
                         span: stmt.name.span,
+                        loop_bound: stmt.ty.as_ref().is_some_and(is_bounded_iterable_type)
+                            || stmt
+                                .value
+                                .as_ref()
+                                .and_then(|expr| self.iterable_bound(expr, scopes))
+                                .unwrap_or(false),
                     },
                 );
             }
@@ -197,6 +206,9 @@ impl<'a> Analyzer<'a> {
             }
             Stmt::For(stmt) => {
                 self.analyze_expr(&stmt.iterable, scopes, function);
+                if matches!(self.iterable_bound(&stmt.iterable, scopes), Some(false)) {
+                    self.report_unbounded_iteration(stmt.iterable.span);
+                }
                 scopes.push();
                 self.bind_pattern(&stmt.binding, scopes);
                 self.analyze_block(&stmt.body, scopes, function);
@@ -220,6 +232,7 @@ impl<'a> Analyzer<'a> {
                 Binding {
                     kind: BindingKind::Local,
                     span: name.span,
+                    loop_bound: false,
                 },
             );
         }
@@ -258,7 +271,8 @@ impl<'a> Analyzer<'a> {
                     callee_binding,
                     Some(Binding {
                         kind: BindingKind::Item,
-                        span
+                        span,
+                        ..
                     }) if span == function.name.span
                 ) {
                     self.report_direct_recursion(function, callee.span);
@@ -407,6 +421,39 @@ impl<'a> Analyzer<'a> {
                 )),
         );
     }
+
+    fn iterable_bound(&self, expr: &Expr, scopes: &ScopeStack) -> Option<bool> {
+        match &expr.kind {
+            ExprKind::Array(_) => Some(true),
+            ExprKind::Binary { op, .. } if *op == langlog_syntax::ast::BinaryOp::Range => {
+                Some(true)
+            }
+            ExprKind::Grouped(expr) => self.iterable_bound(expr, scopes),
+            ExprKind::Name(name) => scopes
+                .lookup(name.value.as_str())
+                .or_else(|| self.items.get(name.value.as_str()).copied())
+                .map(|binding| binding.loop_bound),
+            ExprKind::Int(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Tuple(_)
+            | ExprKind::Block(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. } => Some(false),
+            ExprKind::Binary { .. } => Some(false),
+        }
+    }
+
+    fn report_unbounded_iteration(&mut self, iterable_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("unbounded iteration is not allowed in phase 1").with_label(
+                Label::primary(
+                    iterable_span,
+                    "iterable is outside the bounded phase 1 loop model",
+                ),
+            ),
+        );
+    }
 }
 
 fn name_span(expr: &Expr) -> Span {
@@ -414,6 +461,16 @@ fn name_span(expr: &Expr) -> Span {
         ExprKind::Name(name) => name.span,
         ExprKind::Grouped(expr) => name_span(expr),
         other => panic!("expected name-like callee expression, got {other:?}"),
+    }
+}
+
+fn is_bounded_iterable_type(ty: &langlog_syntax::ast::Type) -> bool {
+    match &ty.kind {
+        langlog_syntax::ast::TypeKind::Array { .. } => true,
+        langlog_syntax::ast::TypeKind::Applied { base, .. } => {
+            matches!(base.value.as_str(), "Set" | "Map")
+        }
+        _ => false,
     }
 }
 

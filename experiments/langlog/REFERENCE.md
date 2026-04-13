@@ -145,7 +145,9 @@ Rules:
 - `for` is currently parsed as a statement.
 - The loop binding uses the pattern grammar described below.
 - The iterable is currently any expression syntactically.
-- Later semantic checking will restrict loops to bounded forms.
+- Semantic checking restricts loops to bounded forms.
+- Phase 1 bounded loops allow range expressions, array literals, and bindings
+  backed by fixed arrays or explicit-capacity `Set`/`Map` values.
 
 ### `return`
 

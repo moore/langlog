@@ -152,8 +152,10 @@ properties that should be enforced structurally rather than by convention:
 
 - The semantic phase MUST reject direct recursion.
 - The semantic phase MUST reject indirect recursion.
-- The semantic phase MUST reject unbounded iteration forms that are outside the
-  bounded phase 1 loop model.
+- The semantic phase MUST reject `for` iterables outside the bounded phase 1
+  loop model; phase 1 bounded iterables are range expressions, array literals,
+  and bindings whose declared types or initializers make them fixed arrays or
+  explicit-capacity `Set`/`Map` values.
 
 ## LLG-PROOF-01 Proof-Required Operations
 

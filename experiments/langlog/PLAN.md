@@ -54,8 +54,8 @@ into AST and report parse errors with precise spans.
 - [ ] Implement name resolution and scope handling.
 - [ ] Add the initial type checker for scalars, tuples, arrays, `Option`,
   `Result`, `Set`, and `Map`.
-- [ ] Reject recursion.
-- [ ] Reject unbounded loop forms and keep iteration syntax bounded.
+- [x] Reject recursion.
+- [x] Reject unbounded loop forms and keep iteration syntax bounded.
 
 Exit criteria: AST lowers to HIR, names resolve, types check, recursion is
 rejected, and unbounded loop forms are rejected.

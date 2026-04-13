@@ -1,5 +1,5 @@
 use langlog_sema::{analyze, BindingKind, CheckedProgram};
-use langlog_syntax::ast::{Block, Expr, ExprKind, Item, LetStmt, Stmt};
+use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt};
 use langlog_syntax::{parse, LabelStyle, Span};
 
 fn analyze_ok(source: &str) -> CheckedProgram {
@@ -56,6 +56,17 @@ fn block_expr(block: &Block, index: usize) -> &Block {
     }
 }
 
+fn first_for_stmt(block: &Block) -> &ForStmt {
+    block
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            Stmt::For(stmt) => Some(stmt),
+            _ => None,
+        })
+        .expect("expected a for statement")
+}
+
 fn assert_resolves_to(
     checked: &CheckedProgram,
     expr: &Expr,
@@ -99,6 +110,25 @@ fn assert_primary_diagnostic(checked: &CheckedProgram, message: &str, span: Span
                 .iter()
                 .any(|label| label.style == LabelStyle::Primary && label.span == span)
     }));
+}
+
+fn assert_rejects_unbounded_iterable(source: &str, expected_iterable: &str) {
+    let checked = analyze_ok(source);
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+    let loop_stmt = first_for_stmt(&main.body);
+
+    assert_eq!(checked.diagnostics.len(), 1);
+    assert_primary_diagnostic(
+        &checked,
+        "unbounded iteration is not allowed in phase 1",
+        loop_stmt.iterable.span,
+    );
+    assert_eq!(
+        checked.parsed.source.span_text(loop_stmt.iterable.span),
+        Some(expected_iterable)
+    );
 }
 
 //= SPEC.md#llg-sema-01-name-resolution-and-scopes
@@ -328,5 +358,119 @@ fn delta() {
         &checked,
         "indirect recursion is not allowed: alpha -> beta -> gamma -> delta -> alpha",
         closing_callee.span,
+    );
+}
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# The semantic phase MUST reject `for` iterables outside the bounded phase 1 loop model; phase 1 bounded iterables are range expressions, array literals, and bindings whose declared types or initializers make them fixed arrays or explicit-capacity `Set`/`Map` values.
+#[test]
+fn requirement_llg_sema_02_rejects_unbounded_iteration_forms() {
+    let bounded_range = analyze_ok(
+        r#"
+fn main() {
+    for value in 0 .. 4 {
+        observe value >= 0;
+    }
+}
+"#,
+    );
+    // Accept a range expression as a bounded phase 1 iterable.
+    assert!(
+        !bounded_range.has_errors(),
+        "{:#?}",
+        bounded_range.diagnostics
+    );
+
+    let bounded_array_literal = analyze_ok(
+        r#"
+fn main() {
+    for value in [1, 2, 3] {
+        observe value >= 0;
+    }
+}
+"#,
+    );
+    // Accept an array literal as a bounded phase 1 iterable.
+    assert!(
+        !bounded_array_literal.has_errors(),
+        "{:#?}",
+        bounded_array_literal.diagnostics
+    );
+
+    let bounded_array_binding = analyze_ok(
+        r#"
+fn main(values: [u32; 4]) {
+    for value in values {
+        observe value >= 0;
+    }
+}
+"#,
+    );
+    // Accept a binding whose declared type is a fixed-size array.
+    assert!(
+        !bounded_array_binding.has_errors(),
+        "{:#?}",
+        bounded_array_binding.diagnostics
+    );
+
+    let bounded_set_binding = analyze_ok(
+        r#"
+fn main(values: Set<u32, 16>) {
+    for value in values {
+        observe value >= 0;
+    }
+}
+"#,
+    );
+    // Accept a binding whose declared type is an explicit-capacity set.
+    assert!(
+        !bounded_set_binding.has_errors(),
+        "{:#?}",
+        bounded_set_binding.diagnostics
+    );
+
+    let bounded_initializer_binding = analyze_ok(
+        r#"
+fn main() {
+    let values = [1, 2, 3];
+    for value in values {
+        observe value >= 0;
+    }
+}
+"#,
+    );
+    // Accept a binding whose initializer proves it is a bounded array value.
+    assert!(
+        !bounded_initializer_binding.has_errors(),
+        "{:#?}",
+        bounded_initializer_binding.diagnostics
+    );
+
+    // Reject a scalar binding because it is not a bounded iterable.
+    assert_rejects_unbounded_iterable(
+        r#"
+fn main() {
+    let count = 3;
+    for value in count {
+        observe value >= 0;
+    }
+}
+"#,
+        "count",
+    );
+
+    // Reject an arbitrary computed expression because it is outside the bounded loop model.
+    assert_rejects_unbounded_iterable(
+        r#"
+fn helper() -> u32 { 4 }
+
+fn main() {
+    for value in helper() {
+        observe value >= 0;
+    }
+}
+"#,
+        "helper()",
     );
 }

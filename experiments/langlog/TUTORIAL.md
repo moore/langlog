@@ -87,8 +87,9 @@ fn sum(values: [u32; 4]) -> u32 {
 ```
 
 Right now, the parser accepts any expression after `in`. The long-term language
-design is stricter: loops will have to be bounded. That semantic restriction is
-planned, but not enforced by the parser alone.
+design is stricter: loops have to be bounded. The parser still accepts any
+expression after `in`, but semantic checking now rejects loop iterables outside
+the phase 1 bounded model.
 
 ## 5. State Facts With `observe`
 
