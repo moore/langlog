@@ -30,38 +30,42 @@ impl Drop for TempSource {
     }
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# When `langlog check <path>` succeeds, the CLI MUST print a success summary to stdout.
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# When syntax analysis fails, the CLI MUST print diagnostics to stderr.
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# Success and syntax-error reporting MUST not write to the opposite stream.
 #[test]
-fn check_command_prints_success_summary_for_valid_program() {
+fn requirement_llg_cli_02_routes_success_and_error_output_to_the_correct_streams() {
     let source = TempSource::new("fn main() {}");
+    let broken = TempSource::new("fn main( {");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_langlog"))
+    let success = Command::new(env!("CARGO_BIN_EXE_langlog"))
         .args(["check", &source.path.display().to_string()])
         .output()
         .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stdout.contains("checked 1 item(s)"));
-    assert!(stdout.contains(&source.path.display().to_string()));
-    assert!(stderr.is_empty());
-}
-
-#[test]
-fn check_command_prints_syntax_errors_to_stderr() {
-    let source = TempSource::new("fn main( {");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_langlog"))
-        .args(["check", &source.path.display().to_string()])
+    let failure = Command::new(env!("CARGO_BIN_EXE_langlog"))
+        .args(["check", &broken.path.display().to_string()])
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("error: expected a parameter name"));
-    assert!(stderr.contains(&format!("{}:1:10", source.path.display())));
-    assert!(stderr.contains("fn main( {"));
-    assert!(stderr.contains("^"));
+    assert!(success.status.success());
+    let success_stdout = String::from_utf8(success.stdout).unwrap();
+    let success_stderr = String::from_utf8(success.stderr).unwrap();
+    assert!(success_stdout.contains("checked 1 item(s)"));
+    assert!(success_stdout.contains(&source.path.display().to_string()));
+    assert!(success_stderr.is_empty());
+
+    assert!(!failure.status.success());
+    let failure_stdout = String::from_utf8(failure.stdout).unwrap();
+    let failure_stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(failure_stdout.is_empty());
+    assert!(failure_stderr.contains("error: expected a parameter name"));
+    assert!(failure_stderr.contains(&format!("{}:1:10", broken.path.display())));
+    assert!(failure_stderr.contains("fn main( {"));
+    assert!(failure_stderr.contains("^"));
 }

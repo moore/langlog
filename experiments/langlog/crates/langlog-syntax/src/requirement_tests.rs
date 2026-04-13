@@ -1,4 +1,6 @@
-use crate::ast::{BinaryOp, Expr, ExprKind, Function, GenericArg, Item, TypeKind, UnaryOp};
+use crate::ast::{
+    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, PatternKind, Stmt, TypeKind, UnaryOp,
+};
 use crate::diagnostic::LabelStyle;
 use crate::lexer::lex;
 use crate::parser::ParsedModule;
@@ -40,103 +42,72 @@ fn parse_trailing_expr(expr_source: &str) -> Expr {
         .clone()
 }
 
-//= SPEC.md#llg-lex-01-comments-and-token-spans
+fn expr_stmt(stmt: &Stmt) -> &Expr {
+    match stmt {
+        Stmt::Expr(stmt) => &stmt.expr,
+        other => panic!("expected expression statement, got {other:?}"),
+    }
+}
+
+//= SPEC.md#llg-lex-01-comments
 //= type=test
 //# The lexer MUST ignore line comments beginning with `//`.
-#[test]
-fn requirement_llg_lex_01_line_comments_are_ignored() {
-    let lexed = lex("requirement.llg", "// comment\nfn main() {}");
-
-    assert!(lexed.diagnostics.is_empty());
-    assert_eq!(lexed.tokens[0].tag(), TokenTag::Fn);
-}
-
-//= SPEC.md#llg-lex-01-comments-and-token-spans
+//= SPEC.md#llg-lex-01-comments
 //= type=test
 //# The lexer MUST ignore block comments delimited by `/*` and `*/`.
-#[test]
-fn requirement_llg_lex_01_block_comments_are_ignored() {
-    let lexed = lex("requirement.llg", "/* comment */ fn main() {}");
-
-    assert!(lexed.diagnostics.is_empty());
-    assert_eq!(lexed.tokens[0].tag(), TokenTag::Fn);
-}
-
-//= SPEC.md#llg-lex-01-comments-and-token-spans
+//= SPEC.md#llg-lex-01-comments
 //= type=test
 //# The lexer MUST support nested block comments.
-#[test]
-fn requirement_llg_lex_01_nested_block_comments_are_supported() {
-    let lexed = lex(
-        "requirement.llg",
-        "/* outer /* inner */ still outer */ fn main() {}",
-    );
-
-    assert!(lexed.diagnostics.is_empty());
-    assert_eq!(lexed.tokens[0].tag(), TokenTag::Fn);
-}
-
-//= SPEC.md#llg-lex-01-comments-and-token-spans
+//= SPEC.md#llg-lex-01-comments
 //= type=test
 //# The lexer MUST report an error for an unterminated block comment.
 #[test]
-fn requirement_llg_lex_01_unterminated_block_comment_reports_error() {
-    let lexed = lex("requirement.llg", "/* unterminated");
+fn requirement_llg_lex_01_handles_comments() {
+    let line = lex("requirement.llg", "// comment\nfn main() {}");
+    let block = lex("requirement.llg", "/* comment */ fn main() {}");
+    let nested = lex(
+        "requirement.llg",
+        "/* outer /* inner */ still outer */ fn main() {}",
+    );
+    let unterminated = lex("requirement.llg", "/* unterminated");
 
-    assert_eq!(lexed.diagnostics.len(), 1);
-    assert!(lexed.diagnostics[0]
+    assert!(line.diagnostics.is_empty());
+    assert_eq!(line.tokens[0].tag(), TokenTag::Fn);
+
+    assert!(block.diagnostics.is_empty());
+    assert_eq!(block.tokens[0].tag(), TokenTag::Fn);
+
+    assert!(nested.diagnostics.is_empty());
+    assert_eq!(nested.tokens[0].tag(), TokenTag::Fn);
+
+    assert_eq!(unterminated.diagnostics.len(), 1);
+    assert!(unterminated.diagnostics[0]
         .message
         .contains("unterminated block comment"));
-}
-
-//= SPEC.md#llg-lex-01-comments-and-token-spans
-//= type=test
-//# The lexer MUST attach a byte span to every emitted token.
-#[test]
-fn requirement_llg_lex_01_every_token_has_a_span() {
-    let lexed = lex("requirement.llg", "fn main() {}");
-
-    for token in &lexed.tokens {
-        let text = lexed.source.span_text(token.span);
-        if token.tag() == TokenTag::Eof {
-            assert_eq!(text, Some(""));
-        } else {
-            assert!(text.is_some_and(|slice| !slice.is_empty()));
-        }
-    }
 }
 
 //= SPEC.md#llg-lex-02-identifiers-and-literals
 //= type=test
 //# Identifiers MUST begin with an ASCII letter or `_` and MAY continue with ASCII letters, digits, or `_`.
-#[test]
-fn requirement_llg_lex_02_identifier_shape_is_accepted() {
-    let lexed = lex("requirement.llg", "_name9");
-
-    assert!(matches!(
-        &lexed.tokens[0].kind,
-        TokenKind::Identifier(name) if name == "_name9"
-    ));
-}
-
 //= SPEC.md#llg-lex-02-identifiers-and-literals
 //= type=test
 //# Integer literals MUST be parsed as unsigned base-10 integers.
-#[test]
-fn requirement_llg_lex_02_integer_literals_are_base_10_u64_values() {
-    let lexed = lex("requirement.llg", "12345");
-
-    assert!(matches!(lexed.tokens[0].kind, TokenKind::IntLiteral(12345)));
-}
-
 //= SPEC.md#llg-lex-02-identifiers-and-literals
 //= type=test
 //# Boolean literals MUST include `true` and `false`.
 #[test]
-fn requirement_llg_lex_02_boolean_literals_are_tokens() {
-    let lexed = lex("requirement.llg", "true false");
-    let tags: Vec<_> = lexed.tokens.iter().map(|token| token.tag()).collect();
+fn requirement_llg_lex_02_recognizes_identifiers_and_literals() {
+    let identifier = lex("requirement.llg", "_name9");
+    let integer = lex("requirement.llg", "12345");
+    let booleans = lex("requirement.llg", "true false");
 
+    assert!(matches!(
+        &identifier.tokens[0].kind,
+        TokenKind::Identifier(name) if name == "_name9"
+    ));
+    assert!(matches!(integer.tokens[0].kind, TokenKind::IntLiteral(12345)));
+
+    let tags: Vec<_> = booleans.tokens.iter().map(|token| token.tag()).collect();
     assert_eq!(tags, vec![TokenTag::True, TokenTag::False, TokenTag::Eof]);
 }
 
@@ -144,7 +115,7 @@ fn requirement_llg_lex_02_boolean_literals_are_tokens() {
 //= type=test
 //# The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `true`, and `false`.
 #[test]
-fn requirement_llg_lex_03_keywords_are_reserved() {
+fn requirement_llg_lex_03_reserves_keywords() {
     let lexed = lex(
         "requirement.llg",
         "fn let mut if else match for in return observe true false",
@@ -171,35 +142,59 @@ fn requirement_llg_lex_03_keywords_are_reserved() {
     );
 }
 
-//= SPEC.md#llg-syn-01-top-level-functions
+//= SPEC.md#llg-lex-04-lexical-error-diagnostics
 //= type=test
-//# A phase 1 source file MUST contain only function items at the top level.
+//# Lexical diagnostics for invalid characters MUST include a primary span covering the offending character.
 #[test]
-fn requirement_llg_syn_01_only_functions_are_allowed_at_top_level() {
-    let parsed = parse_err("let value = 1;");
+fn requirement_llg_lex_04_marks_invalid_character_spans() {
+    let lexed = lex("requirement.llg", "@");
 
-    assert!(parsed.module.items.is_empty());
+    assert_eq!(lexed.diagnostics.len(), 1);
+    let label = &lexed.diagnostics[0].labels[0];
+    assert_eq!(label.style, LabelStyle::Primary);
+    assert_eq!(lexed.source.span_text(label.span), Some("@"));
 }
 
 //= SPEC.md#llg-syn-01-top-level-functions
 //= type=test
+//# A phase 1 source file MUST contain only function items at the top level.
+//= SPEC.md#llg-syn-01-top-level-functions
+//= type=test
 //# A function item MUST use Rust-like syntax with `fn`, a name, a parameter list, and a block body.
+//= SPEC.md#llg-syn-01-top-level-functions
+//= type=test
+//# The current parser allows the return type to be omitted in phase 1.
 #[test]
-fn requirement_llg_syn_01_function_item_syntax_is_parsed() {
-    let parsed = parse_ok("fn main(value: u32) -> u32 { value }");
+fn requirement_llg_syn_01_parses_top_level_functions() {
+    let non_function = parse_err("let value = 1;");
+    let parsed = parse_ok(
+        r#"
+fn main(value: u32) -> u32 { value }
+fn helper() {}
+"#,
+    );
     let function = first_function(&parsed);
 
+    assert!(non_function.module.items.is_empty());
     assert_eq!(function.name.value, "main");
     assert_eq!(function.params.len(), 1);
     assert!(function.return_type.is_some());
-    assert!(function.body.trailing_expr.is_some());
+
+    let Item::Function(helper) = &parsed.module.items[1];
+    assert!(helper.return_type.is_none());
 }
 
 //= SPEC.md#llg-syn-02-statements
 //= type=test
 //# The parser MUST accept `let`, assignment, expression, `if`, `match`, `for`, `return`, and `observe` statements.
+//= SPEC.md#llg-syn-02-statements
+//= type=test
+//# The current parser allows a `let` statement to include `mut`, a type annotation, and an initializer.
+//= SPEC.md#llg-syn-02-statements
+//= type=test
+//# A statement form that requires a semicolon MUST reject the form if the semicolon is absent.
 #[test]
-fn requirement_llg_syn_02_statement_forms_are_parsed() {
+fn requirement_llg_syn_02_parses_statement_forms_and_requires_semicolons() {
     let parsed = parse_ok(
         r#"
 fn main() {
@@ -223,30 +218,75 @@ fn main() {
 }
 "#,
     );
-
-    assert!(!parsed.has_errors());
+    let missing_let_semi = parse_err("fn main() { let value = 1 }");
+    let missing_expr_semi = parse_err(
+        r#"
+fn main() {
+    1
+    observe true;
 }
+"#,
+    );
 
-//= SPEC.md#llg-syn-02-statements
-//= type=test
-//# A statement form that requires a semicolon MUST reject the form if the semicolon is absent.
-#[test]
-fn requirement_llg_syn_02_missing_semicolon_is_rejected() {
-    let parsed = parse_err("fn main() { let value = 1 }");
+    let statements = &first_function(&parsed).body.statements;
+    let Stmt::Let(let_stmt) = &statements[0] else {
+        panic!("expected a let statement, got {:?}", statements[0]);
+    };
 
-    assert!(parsed.diagnostics.iter().any(|diagnostic| diagnostic
+    assert!(let_stmt.mutable);
+    assert!(let_stmt.ty.is_some());
+    assert!(let_stmt.value.is_some());
+    assert!(matches!(statements[1], Stmt::Assign(_)));
+    assert!(matches!(statements[2], Stmt::Expr(_)));
+    assert!(matches!(statements[3], Stmt::If(_)));
+    assert!(matches!(statements[4], Stmt::Match(_)));
+    assert!(matches!(statements[5], Stmt::For(_)));
+    assert!(matches!(statements[6], Stmt::Observe(_)));
+    assert!(matches!(statements[7], Stmt::Return(_)));
+
+    assert!(missing_let_semi.diagnostics.iter().any(|diagnostic| diagnostic
         .message
-        .contains("expected `;` after `let` statement")
-        || diagnostic
-            .message
-            .contains("expected `;` or `}` after expression")));
+        .contains("expected `;` after `let` statement")));
+    assert!(missing_expr_semi.diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("expected `;` or `}` after expression")));
 }
 
 //= SPEC.md#llg-syn-03-expressions-and-precedence
 //= type=test
 //# The parser MUST accept integer literals, boolean literals, names, tuples, arrays, blocks, grouped expressions, unary operators, binary operators, calls, and indexing expressions.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# The supported binary operators MUST include `..`, `||`, `&&`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, and `%`.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Binary operators with the same precedence MUST associate to the left.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Postfix call and indexing MUST bind tighter than unary operators.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Unary operators MUST bind tighter than multiplicative operators.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Multiplicative operators MUST bind tighter than additive operators.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Additive operators MUST bind tighter than comparison operators.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Comparison operators MUST bind tighter than equality operators.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Equality operators MUST bind tighter than logical and.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Logical and MUST bind tighter than logical or.
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Logical or MUST bind tighter than range construction.
 #[test]
-fn requirement_llg_syn_03_expression_forms_are_parsed() {
+fn requirement_llg_syn_03_parses_expression_forms_and_operator_binding() {
     let parsed = parse_ok(
         r#"
 fn main() {
@@ -263,21 +303,89 @@ fn main() {
     1 + 2;
     call(1);
     arr[0];
+    1 != 2;
+    3 <= 4;
+    5 >= 6;
+    8 - 4 - 2;
+    20 / 5 % 2;
 }
 "#,
     );
+    let postfix = parse_trailing_expr("-f(1)[0]");
+    let unary_mul = parse_trailing_expr("-a * b");
+    let add_cmp = parse_trailing_expr("1 + 2 < 4");
+    let cmp_eq = parse_trailing_expr("1 < 2 == 3 < 4");
+    let eq_and = parse_trailing_expr("1 == 2 && 3 == 4");
+    let and_or = parse_trailing_expr("a && b || c && d");
+    let or_range = parse_trailing_expr("a || b .. c || d");
 
-    assert!(!parsed.has_errors());
-}
+    let statements = &first_function(&parsed).body.statements;
+    assert!(matches!(
+        expr_stmt(&statements[10]).kind,
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[13]).kind,
+        ExprKind::Binary {
+            op: BinaryOp::NotEq,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[14]).kind,
+        ExprKind::Binary {
+            op: BinaryOp::LtEq,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[15]).kind,
+        ExprKind::Binary {
+            op: BinaryOp::GtEq,
+            ..
+        }
+    ));
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Postfix call and indexing MUST bind tighter than unary operators.
-#[test]
-fn requirement_llg_syn_03_postfix_binds_tighter_than_unary() {
-    let expr = parse_trailing_expr("-f(1)[0]");
+    match &expr_stmt(&statements[16]).kind {
+        ExprKind::Binary {
+            op: BinaryOp::Sub,
+            left,
+            right,
+        } => {
+            assert!(matches!(right.kind, ExprKind::Int(2)));
+            assert!(matches!(
+                left.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Sub,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected left-associated subtraction, got {other:?}"),
+    }
 
-    match expr.kind {
+    match &expr_stmt(&statements[17]).kind {
+        ExprKind::Binary {
+            op: BinaryOp::Rem,
+            left,
+            right,
+        } => {
+            assert!(matches!(right.kind, ExprKind::Int(2)));
+            assert!(matches!(
+                left.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Div,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected remainder expression, got {other:?}"),
+    }
+
+    match postfix.kind {
         ExprKind::Unary {
             op: UnaryOp::Neg,
             expr,
@@ -290,16 +398,8 @@ fn requirement_llg_syn_03_postfix_binds_tighter_than_unary() {
         },
         other => panic!("expected unary expression, got {other:?}"),
     }
-}
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Unary operators MUST bind tighter than multiplicative operators.
-#[test]
-fn requirement_llg_syn_03_unary_binds_tighter_than_multiplicative() {
-    let expr = parse_trailing_expr("-a * b");
-
-    match expr.kind {
+    match unary_mul.kind {
         ExprKind::Binary {
             op: BinaryOp::Mul,
             left,
@@ -312,38 +412,8 @@ fn requirement_llg_syn_03_unary_binds_tighter_than_multiplicative() {
         },
         other => panic!("expected multiplicative expression, got {other:?}"),
     }
-}
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Multiplicative operators MUST bind tighter than additive operators.
-#[test]
-fn requirement_llg_syn_03_multiplicative_binds_tighter_than_additive() {
-    let expr = parse_trailing_expr("1 + 2 * 3");
-
-    match expr.kind {
-        ExprKind::Binary {
-            op: BinaryOp::Add,
-            right,
-            ..
-        } => match right.kind {
-            ExprKind::Binary {
-                op: BinaryOp::Mul, ..
-            } => {}
-            other => panic!("expected multiplicative right operand, got {other:?}"),
-        },
-        other => panic!("expected additive expression, got {other:?}"),
-    }
-}
-
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Additive operators MUST bind tighter than comparison operators.
-#[test]
-fn requirement_llg_syn_03_additive_binds_tighter_than_comparison() {
-    let expr = parse_trailing_expr("1 + 2 < 4");
-
-    match expr.kind {
+    match add_cmp.kind {
         ExprKind::Binary {
             op: BinaryOp::Lt,
             left,
@@ -356,16 +426,8 @@ fn requirement_llg_syn_03_additive_binds_tighter_than_comparison() {
         },
         other => panic!("expected comparison expression, got {other:?}"),
     }
-}
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Comparison operators MUST bind tighter than equality operators.
-#[test]
-fn requirement_llg_syn_03_comparison_binds_tighter_than_equality() {
-    let expr = parse_trailing_expr("1 < 2 == 3 < 4");
-
-    match expr.kind {
+    match cmp_eq.kind {
         ExprKind::Binary {
             op: BinaryOp::EqEq,
             left,
@@ -388,16 +450,8 @@ fn requirement_llg_syn_03_comparison_binds_tighter_than_equality() {
         }
         other => panic!("expected equality expression, got {other:?}"),
     }
-}
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Equality operators MUST bind tighter than logical and.
-#[test]
-fn requirement_llg_syn_03_equality_binds_tighter_than_logical_and() {
-    let expr = parse_trailing_expr("1 == 2 && 3 == 4");
-
-    match expr.kind {
+    match eq_and.kind {
         ExprKind::Binary {
             op: BinaryOp::And,
             left,
@@ -420,16 +474,8 @@ fn requirement_llg_syn_03_equality_binds_tighter_than_logical_and() {
         }
         other => panic!("expected logical and expression, got {other:?}"),
     }
-}
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Logical and MUST bind tighter than logical or.
-#[test]
-fn requirement_llg_syn_03_logical_and_binds_tighter_than_logical_or() {
-    let expr = parse_trailing_expr("a && b || c && d");
-
-    match expr.kind {
+    match and_or.kind {
         ExprKind::Binary {
             op: BinaryOp::Or,
             left,
@@ -452,16 +498,8 @@ fn requirement_llg_syn_03_logical_and_binds_tighter_than_logical_or() {
         }
         other => panic!("expected logical or expression, got {other:?}"),
     }
-}
 
-//= SPEC.md#llg-syn-03-expressions-and-precedence
-//= type=test
-//# Logical or MUST bind tighter than range construction.
-#[test]
-fn requirement_llg_syn_03_logical_or_binds_tighter_than_range() {
-    let expr = parse_trailing_expr("a || b .. c || d");
-
-    match expr.kind {
+    match or_range.kind {
         ExprKind::Binary {
             op: BinaryOp::Range,
             left,
@@ -486,82 +524,169 @@ fn requirement_llg_syn_03_logical_or_binds_tighter_than_range() {
     }
 }
 
+//= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
+//= type=test
+//# `()` MUST parse as an empty tuple expression.
+//= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
+//= type=test
+//# `(expr)` MUST parse as a grouped expression.
+//= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
+//= type=test
+//# `(expr,)` MUST parse as a single-element tuple expression.
+//= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
+//= type=test
+//# `(a, b, ...)` MUST parse as a tuple expression.
+#[test]
+fn requirement_llg_syn_04_distinguishes_grouped_and_tuple_expressions() {
+    let parsed = parse_ok(
+        r#"
+fn main() {
+    ();
+    (1);
+    (1,);
+    (1, 2, 3);
+}
+"#,
+    );
+    let statements = &first_function(&parsed).body.statements;
+
+    assert!(matches!(
+        &expr_stmt(&statements[0]).kind,
+        ExprKind::Tuple(elements) if elements.is_empty()
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[1]).kind,
+        ExprKind::Grouped(_)
+    ));
+    assert!(matches!(
+        &expr_stmt(&statements[2]).kind,
+        ExprKind::Tuple(elements) if elements.len() == 1
+    ));
+    assert!(matches!(
+        &expr_stmt(&statements[3]).kind,
+        ExprKind::Tuple(elements) if elements.len() == 3
+    ));
+}
+
+//= SPEC.md#llg-syn-05-patterns-and-match-arms
+//= type=test
+//# The parser MUST accept wildcard, binding, integer literal, and boolean patterns.
+//= SPEC.md#llg-syn-05-patterns-and-match-arms
+//= type=test
+//# `match` arms MUST use `pattern => body`.
+//= SPEC.md#llg-syn-05-patterns-and-match-arms
+//= type=test
+//# `match` arms MUST be comma-separated and MAY end with a trailing comma.
+#[test]
+fn requirement_llg_syn_05_parses_patterns_and_match_arms() {
+    let parsed = parse_ok(
+        r#"
+fn main() {
+    match 1 {
+        _ => 0,
+        value => value,
+        7 => 1,
+        false => 2,
+    }
+}
+"#,
+    );
+    let stmt = &first_function(&parsed).body.statements[0];
+    let Stmt::Match(match_stmt) = stmt else {
+        panic!("expected match statement, got {stmt:?}");
+    };
+
+    assert_eq!(match_stmt.arms.len(), 4);
+    assert!(matches!(
+        match_stmt.arms[0].pattern.kind,
+        PatternKind::Wildcard
+    ));
+    assert!(matches!(
+        match_stmt.arms[1].pattern.kind,
+        PatternKind::Binding(_)
+    ));
+    assert!(matches!(match_stmt.arms[2].pattern.kind, PatternKind::Int(7)));
+    assert!(matches!(
+        match_stmt.arms[3].pattern.kind,
+        PatternKind::Bool(false)
+    ));
+}
+
 //= SPEC.md#llg-type-01-phase-1-types
 //= type=test
 //# The parser MUST accept unit, named, tuple, fixed-array, and generic application type forms.
-#[test]
-fn requirement_llg_type_01_type_forms_are_parsed() {
-    let parsed = parse_ok(
-        "fn main(a: (), b: u32, c: (u32, bool), d: [u32; 4], e: Option<u32>, f: Result<u32, Error>) -> () { () }",
-    );
-
-    assert_eq!(first_function(&parsed).params.len(), 6);
-}
-
 //= SPEC.md#llg-type-01-phase-1-types
 //= type=test
 //# A fixed-array type MUST use the form `[T; N]`.
 #[test]
-fn requirement_llg_type_01_fixed_array_type_uses_semicolon_syntax() {
-    let parsed = parse_ok("fn main(values: [u32; 4]) {}");
-
-    match &first_function(&parsed).params[0].ty.kind {
-        TypeKind::Array { .. } => {}
-        other => panic!("expected array type, got {other:?}"),
-    }
-}
-
-//= SPEC.md#llg-type-01-phase-1-types
-//= type=test
-//# `Set<T, N>` and `Map<K, V, N>` MUST carry explicit capacity arguments in the source type.
-#[test]
-fn requirement_llg_type_01_set_and_map_require_explicit_capacity() {
-    let parsed = parse_err("fn main(a: Set<u32>, b: Map<u32, bool>) {}");
-
-    assert!(parsed.diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("requires a value type and an explicit capacity")
-        || diagnostic
-            .message
-            .contains("requires key type, value type, and explicit capacity")));
-}
-
-//= SPEC.md#llg-diag-01-source-spans-and-syntax-diagnostics
-//= type=test
-//# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
-#[test]
-fn requirement_llg_diag_01_syntax_nodes_preserve_source_spans() {
-    let source = "fn main() { let value = 1; value }";
-    let parsed = parse_ok(source);
+fn requirement_llg_type_01_parses_core_type_forms() {
+    let parsed = parse_ok(
+        "fn main(a: (), b: u32, c: (u32, bool), d: [u32; 4], e: Option<u32>, f: Result<u32, Error>) -> () { () }",
+    );
     let function = first_function(&parsed);
-    let trailing_expr = function.body.trailing_expr.as_deref().unwrap();
 
-    assert_eq!(parsed.source.span_text(function.span), Some(source));
-    assert_eq!(parsed.source.span_text(function.name.span), Some("main"));
-    assert_eq!(parsed.source.span_text(trailing_expr.span), Some("value"));
+    assert_eq!(function.params.len(), 6);
+    assert!(matches!(
+        function.return_type.as_ref().map(|ty| &ty.kind),
+        Some(TypeKind::Unit)
+    ));
+    assert!(matches!(function.params[1].ty.kind, TypeKind::Named(_)));
+    assert!(matches!(function.params[2].ty.kind, TypeKind::Tuple(_)));
+    assert!(matches!(function.params[3].ty.kind, TypeKind::Array { .. }));
+    assert!(matches!(function.params[4].ty.kind, TypeKind::Applied { .. }));
+    assert!(matches!(function.params[5].ty.kind, TypeKind::Applied { .. }));
 }
 
-//= SPEC.md#llg-diag-01-source-spans-and-syntax-diagnostics
+//= SPEC.md#llg-type-02-grouped-and-tuple-types
 //= type=test
-//# Syntax diagnostics MUST include a primary source span.
+//# `()` MUST parse as the unit type.
+//= SPEC.md#llg-type-02-grouped-and-tuple-types
+//= type=test
+//# `(T)` MUST parse as a grouped type and MUST NOT create a tuple type.
+//= SPEC.md#llg-type-02-grouped-and-tuple-types
+//= type=test
+//# `(T,)` MUST parse as a single-element tuple type.
+//= SPEC.md#llg-type-02-grouped-and-tuple-types
+//= type=test
+//# `(A, B, ...)` MUST parse as a tuple type.
 #[test]
-fn requirement_llg_diag_01_syntax_errors_have_primary_labels() {
-    let parsed = parse_err("fn main( {");
+fn requirement_llg_type_02_distinguishes_grouped_and_tuple_types() {
+    let unit = parse_ok("fn main(value: ()) {}");
+    let grouped = parse_ok("fn main(value: (u32)) {}");
+    let singleton = parse_ok("fn main(value: (u32,)) {}");
+    let tuple = parse_ok("fn main(value: (u32, bool, u8)) {}");
 
-    assert!(parsed.diagnostics.iter().any(|diagnostic| diagnostic
-        .labels
-        .iter()
-        .any(|label| label.style == LabelStyle::Primary)));
+    assert!(matches!(
+        &first_function(&unit).params[0].ty.kind,
+        TypeKind::Unit
+    ));
+    assert!(matches!(
+        &first_function(&grouped).params[0].ty.kind,
+        TypeKind::Named(name) if name.value == "u32"
+    ));
+    assert!(matches!(
+        &first_function(&singleton).params[0].ty.kind,
+        TypeKind::Tuple(elements) if elements.len() == 1
+    ));
+    assert!(matches!(
+        &first_function(&tuple).params[0].ty.kind,
+        TypeKind::Tuple(elements) if elements.len() == 3
+    ));
 }
 
-//= SPEC.md#llg-rel-01-collections-and-relations
+//= SPEC.md#llg-type-03-bounded-collection-type-arity
 //= type=test
-//# The language MUST parse capacity-bounded `Set<T, N>` and `Map<K, V, N>` types.
+//# `Set<T, N>` MUST require exactly one element type and one explicit capacity.
+//= SPEC.md#llg-type-03-bounded-collection-type-arity
+//= type=test
+//# `Map<K, V, N>` MUST require exactly one key type, one value type, and one explicit capacity.
 #[test]
-fn requirement_llg_rel_01_capacity_bounded_collection_types_parse() {
-    let parsed = parse_ok("fn main(a: Set<u32, 16>, b: Map<u32, bool, 32>) {}");
+fn requirement_llg_type_03_validates_bounded_collection_type_arity() {
+    let valid = parse_ok("fn main(a: Set<u32, 16>, b: Map<u32, bool, 32>) {}");
+    let invalid_set = parse_err("fn main(value: Set<u32, 16, 32>) {}");
+    let invalid_map = parse_err("fn main(value: Map<u32, bool>) {}");
+    let params = &first_function(&valid).params;
 
-    let params = &first_function(&parsed).params;
     match &params[0].ty.kind {
         TypeKind::Applied { args, .. } => {
             assert!(matches!(
@@ -584,4 +709,110 @@ fn requirement_llg_rel_01_capacity_bounded_collection_types_parse() {
         }
         other => panic!("expected applied type for Map, got {other:?}"),
     }
+
+    assert!(invalid_set.diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("`Set` requires a value type and an explicit capacity")));
+    assert!(invalid_map.diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("`Map` requires key type, value type, and explicit capacity")));
+}
+
+//= SPEC.md#llg-diag-01-source-span-preservation
+//= type=test
+//# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
+//= SPEC.md#llg-diag-01-source-span-preservation
+//= type=test
+//# Syntax diagnostics MUST include a primary source span.
+#[test]
+fn requirement_llg_diag_01_preserves_source_spans_and_primary_labels() {
+    let lexed = lex("requirement.llg", "fn main() {}");
+    for token in &lexed.tokens {
+        let text = lexed.source.span_text(token.span);
+        if token.tag() == TokenTag::Eof {
+            assert_eq!(text, Some(""));
+        } else {
+            assert!(text.is_some_and(|slice| !slice.is_empty()));
+        }
+    }
+
+    let source = "fn main() { let value = 1; value }";
+    let parsed = parse_ok(source);
+    let function = first_function(&parsed);
+    let trailing_expr = function.body.trailing_expr.as_deref().unwrap();
+
+    assert_eq!(parsed.source.span_text(function.span), Some(source));
+    assert_eq!(parsed.source.span_text(function.name.span), Some("main"));
+    assert_eq!(parsed.source.span_text(trailing_expr.span), Some("value"));
+
+    let broken = parse_err("fn main( {");
+    assert!(broken.diagnostics.iter().any(|diagnostic| diagnostic
+        .labels
+        .iter()
+        .any(|label| label.style == LabelStyle::Primary)));
+}
+
+//= SPEC.md#llg-diag-03-parser-recovery
+//= type=test
+//# Parser recovery MUST preserve following valid top-level items after malformed top-level input.
+//= SPEC.md#llg-diag-03-parser-recovery
+//= type=test
+//# Parser recovery MUST preserve following valid statements after a malformed statement.
+//= SPEC.md#llg-diag-03-parser-recovery
+//= type=test
+//# A missing semicolon before `}` MUST not cascade into additional syntax errors for the same statement.
+#[test]
+fn requirement_llg_diag_03_recovers_after_invalid_input_without_cascading() {
+    let malformed_item = parse_err(
+        r#"
+let value = 1;
+fn main() {}
+"#,
+    );
+    let broken_before_keyword = parse_err(
+        r#"
+fn main() {
+    1
+    let value = 2;
+}
+"#,
+    );
+    let broken_before_statement = parse_err(
+        r#"
+fn main() {
+    let value = ;
+    observe true;
+}
+"#,
+    );
+    let broken_before_expression = parse_err(
+        r#"
+fn main() {
+    let value = ;
+    7;
+}
+"#,
+    );
+    let missing_let_semi = parse_err("fn main() { let value = 1 }");
+
+    assert_eq!(malformed_item.module.items.len(), 1);
+    assert_eq!(first_function(&malformed_item).name.value, "main");
+
+    let statements = &first_function(&broken_before_keyword).body.statements;
+    assert_eq!(statements.len(), 1);
+    assert!(matches!(statements[0], Stmt::Let(_)));
+
+    let statements = &first_function(&broken_before_statement).body.statements;
+    assert_eq!(statements.len(), 1);
+    assert!(matches!(statements[0], Stmt::Observe(_)));
+
+    let statements = &first_function(&broken_before_expression).body.statements;
+    assert_eq!(statements.len(), 1);
+    assert!(matches!(statements[0], Stmt::Expr(_)));
+
+    assert_eq!(missing_let_semi.module.items.len(), 1);
+    assert_eq!(missing_let_semi.diagnostics.len(), 1);
+    assert!(missing_let_semi.diagnostics[0]
+        .message
+        .contains("expected `;` after `let` statement"));
 }

@@ -13,8 +13,8 @@ pub fn lex(path: impl Into<std::path::PathBuf>, contents: impl Into<String>) -> 
     lex_source(SourceFile::new(path, contents))
 }
 
-//= SPEC.md#llg-lex-01-comments-and-token-spans
-//# The lexer MUST attach a byte span to every emitted token.
+//= SPEC.md#llg-diag-01-source-span-preservation
+//# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
 pub fn lex_source(source: SourceFile) -> LexedSource {
     Lexer::new(source).lex()
 }
@@ -170,7 +170,7 @@ impl Lexer {
     }
 
     fn skip_line_comment(&mut self) {
-        //= SPEC.md#llg-lex-01-comments-and-token-spans
+        //= SPEC.md#llg-lex-01-comments
         //# The lexer MUST ignore line comments beginning with `//`.
         self.bump_char();
         self.bump_char();
@@ -184,9 +184,9 @@ impl Lexer {
     }
 
     fn skip_block_comment(&mut self) {
-        //= SPEC.md#llg-lex-01-comments-and-token-spans
+        //= SPEC.md#llg-lex-01-comments
         //# The lexer MUST ignore block comments delimited by `/*` and `*/`.
-        //= SPEC.md#llg-lex-01-comments-and-token-spans
+        //= SPEC.md#llg-lex-01-comments
         //# The lexer MUST support nested block comments.
         let start = self.offset;
         self.bump_char();
@@ -216,7 +216,7 @@ impl Lexer {
 
         let span = self.source.span(start, self.source.len());
         self.diagnostics.push(
-            //= SPEC.md#llg-lex-01-comments-and-token-spans
+            //= SPEC.md#llg-lex-01-comments
             //# The lexer MUST report an error for an unterminated block comment.
             Diagnostic::error("unterminated block comment")
                 .with_label(Label::primary(span, "comment starts here")),
@@ -291,6 +291,8 @@ impl Lexer {
     }
 
     fn report_unexpected_char(&mut self, ch: char, message: &str) {
+        //= SPEC.md#llg-lex-04-lexical-error-diagnostics
+        //# Lexical diagnostics for invalid characters MUST include a primary span covering the offending character.
         let start = self.offset;
         let end = start + ch.len_utf8();
         let span = self.source.span(start, end);
@@ -340,32 +342,5 @@ mod tests {
                 TokenTag::Eof,
             ]
         );
-    }
-
-    #[test]
-    fn reports_invalid_characters() {
-        let lexed = lex("bad.llg", "@");
-
-        assert_eq!(lexed.diagnostics.len(), 1);
-        assert_eq!(
-            lexed.tokens.last().map(|token| token.tag()),
-            Some(TokenTag::Eof)
-        );
-    }
-
-    #[test]
-    fn lexes_standalone_underscore_as_wildcard_token() {
-        let lexed = lex("wildcard.llg", "_");
-
-        assert!(lexed.diagnostics.is_empty());
-        assert_eq!(lexed.tokens[0].tag(), TokenTag::Underscore);
-    }
-
-    #[test]
-    fn invalid_character_diagnostic_marks_the_offending_character() {
-        let lexed = lex("bad.llg", "@");
-
-        let label = &lexed.diagnostics[0].labels[0];
-        assert_eq!(lexed.source.span_text(label.span), Some("@"));
     }
 }

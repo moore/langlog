@@ -10,6 +10,10 @@ fn main() -> ExitCode {
     run(env::args().skip(1))
 }
 
+//= SPEC.md#llg-cli-01-single-file-front-end
+//# The phase 1 front end MUST accept `langlog check <path>`.
+//= SPEC.md#llg-cli-01-single-file-front-end
+//# The phase 1 front end MUST treat `<path>` as a single source file.
 fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     match (args.next().as_deref(), args.next(), args.next()) {
         (Some("check"), Some(path), None) => run_check(PathBuf::from(path)),
@@ -20,10 +24,12 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-//= SPEC.md#llg-cli-01-single-file-front-end
-//# The phase 1 front end MUST accept `langlog check <path>`.
-//= SPEC.md#llg-cli-01-single-file-front-end
-//# The phase 1 front end MUST treat `<path>` as a single source file.
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//# When `langlog check <path>` succeeds, the CLI MUST print a success summary to stdout.
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//# When syntax analysis fails, the CLI MUST print diagnostics to stderr.
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//# Success and syntax-error reporting MUST not write to the opposite stream.
 fn run_check(path: PathBuf) -> ExitCode {
     let source = match fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -57,8 +63,8 @@ fn emit_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) {
     eprint!("{}", render_diagnostics(source, diagnostics));
 }
 
-//= SPEC.md#llg-diag-01-source-spans-and-syntax-diagnostics
-//# The CLI MUST render syntax errors with file path, line, column, source line text, and an underline for the primary span.
+//= SPEC.md#llg-diag-02-rendered-syntax-diagnostics
+//# The CLI MUST render syntax errors with file path, line, column, source line text, and an underline spanning the full primary source span.
 fn render_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) -> String {
     let mut rendered = String::new();
     for diagnostic in diagnostics {
@@ -191,38 +197,31 @@ mod tests {
     //= SPEC.md#llg-cli-01-single-file-front-end
     //= type=test
     //# The phase 1 front end MUST accept `langlog check <path>`.
-    #[test]
-    fn requirement_llg_cli_01_accepts_check_path_command() {
-        let source = TempSource::new("fn main() {}");
-
-        let exit = run(["check".to_string(), source.path.display().to_string()].into_iter());
-
-        assert_eq!(exit, std::process::ExitCode::SUCCESS);
-    }
-
     //= SPEC.md#llg-cli-01-single-file-front-end
     //= type=test
     //# The phase 1 front end MUST treat `<path>` as a single source file.
     #[test]
-    fn requirement_llg_cli_01_requires_exactly_one_source_path() {
-        let first = TempSource::new("fn main() {}");
+    fn requirement_llg_cli_01_accepts_exactly_one_source_path() {
+        let source = TempSource::new("fn main() {}");
         let second = TempSource::new("fn helper() {}");
 
-        let exit = run([
+        let success = run(["check".to_string(), source.path.display().to_string()].into_iter());
+        let extra_path = run([
             "check".to_string(),
-            first.path.display().to_string(),
+            source.path.display().to_string(),
             second.path.display().to_string(),
         ]
         .into_iter());
 
-        assert_eq!(exit, std::process::ExitCode::from(2));
+        assert_eq!(success, std::process::ExitCode::SUCCESS);
+        assert_eq!(extra_path, std::process::ExitCode::from(2));
     }
 
-    //= SPEC.md#llg-diag-01-source-spans-and-syntax-diagnostics
+    //= SPEC.md#llg-diag-02-rendered-syntax-diagnostics
     //= type=test
-    //# The CLI MUST render syntax errors with file path, line, column, source line text, and an underline for the primary span.
+    //# The CLI MUST render syntax errors with file path, line, column, source line text, and an underline spanning the full primary source span.
     #[test]
-    fn requirement_llg_diag_01_renders_source_linked_syntax_errors() {
+    fn requirement_llg_diag_02_renders_source_linked_syntax_errors() {
         let parsed = langlog_syntax::parse("broken.llg", "fn main( {");
         assert!(parsed.has_errors());
 
@@ -232,15 +231,11 @@ mod tests {
         assert!(rendered.contains("broken.llg:1:10"));
         assert!(rendered.contains("fn main( {"));
         assert!(rendered.contains("^"));
-    }
 
-    #[test]
-    fn render_diagnostics_underlines_the_full_primary_span() {
         let source = SourceFile::new("diagnostic.llg", "observe count;\n");
         let span = source.span(8, 13);
         let diagnostic = Diagnostic::error("example error")
             .with_label(Label::primary(span, "spans the whole name"));
-
         let rendered = render_diagnostics(&source, &[diagnostic]);
 
         assert!(rendered.contains("^^^^^ spans the whole name"));

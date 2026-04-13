@@ -27,6 +27,10 @@ This uses `.duvet/config.toml` by default and writes reports under
 
 - Parser and diagnostic requirements are traced directly to `langlog-syntax` and
   `langlog-driver`.
+- Implemented requirements should normally have one consolidated requirement
+  test function per spec ID.
+- Unit tests outside the requirement suites should cover non-normative helper
+  behavior and local invariants rather than duplicate spec-backed contracts.
 - Semantic and proof requirements that are planned but not implemented are
   traced with `todo` annotations in `langlog-sema` and `langlog-proof`.
 - The spec is intentionally small and requirement-oriented so the traceability

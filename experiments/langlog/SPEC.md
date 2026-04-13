@@ -25,13 +25,19 @@ properties that should be enforced structurally rather than by convention:
 - The phase 1 front end MUST accept `langlog check <path>`.
 - The phase 1 front end MUST treat `<path>` as a single source file.
 
-## LLG-LEX-01 Comments And Token Spans
+## LLG-CLI-02 CLI Output Behavior
+
+- When `langlog check <path>` succeeds, the CLI MUST print a success summary to
+  stdout.
+- When syntax analysis fails, the CLI MUST print diagnostics to stderr.
+- Success and syntax-error reporting MUST not write to the opposite stream.
+
+## LLG-LEX-01 Comments
 
 - The lexer MUST ignore line comments beginning with `//`.
 - The lexer MUST ignore block comments delimited by `/*` and `*/`.
 - The lexer MUST support nested block comments.
 - The lexer MUST report an error for an unterminated block comment.
-- The lexer MUST attach a byte span to every emitted token.
 
 ## LLG-LEX-02 Identifiers And Literals
 
@@ -44,6 +50,11 @@ properties that should be enforced structurally rather than by convention:
 
 - The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`,
   `match`, `for`, `in`, `return`, `observe`, `true`, and `false`.
+
+## LLG-LEX-04 Lexical Error Diagnostics
+
+- Lexical diagnostics for invalid characters MUST include a primary span
+  covering the offending character.
 
 ## LLG-SYN-01 Top-Level Functions
 
@@ -66,6 +77,9 @@ properties that should be enforced structurally rather than by convention:
 - The parser MUST accept integer literals, boolean literals, names, tuples,
   arrays, blocks, grouped expressions, unary operators, binary operators, calls,
   and indexing expressions.
+- The supported binary operators MUST include `..`, `||`, `&&`, `==`, `!=`,
+  `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, and `%`.
+- Binary operators with the same precedence MUST associate to the left.
 - Postfix call and indexing MUST bind tighter than unary operators.
 - Unary operators MUST bind tighter than multiplicative operators.
 - Multiplicative operators MUST bind tighter than additive operators.
@@ -75,21 +89,58 @@ properties that should be enforced structurally rather than by convention:
 - Logical and MUST bind tighter than logical or.
 - Logical or MUST bind tighter than range construction.
 
+## LLG-SYN-04 Grouped And Tuple Expressions
+
+- `()` MUST parse as an empty tuple expression.
+- `(expr)` MUST parse as a grouped expression.
+- `(expr,)` MUST parse as a single-element tuple expression.
+- `(a, b, ...)` MUST parse as a tuple expression.
+
+## LLG-SYN-05 Patterns And Match Arms
+
+- The parser MUST accept wildcard, binding, integer literal, and boolean
+  patterns.
+- `match` arms MUST use `pattern => body`.
+- `match` arms MUST be comma-separated and MAY end with a trailing comma.
+
 ## LLG-TYPE-01 Phase 1 Types
 
 - The parser MUST accept unit, named, tuple, fixed-array, and generic
   application type forms.
 - A fixed-array type MUST use the form `[T; N]`.
-- `Set<T, N>` and `Map<K, V, N>` MUST carry explicit capacity arguments in the
-  source type.
 
-## LLG-DIAG-01 Source Spans And Syntax Diagnostics
+## LLG-TYPE-02 Grouped And Tuple Types
+
+- `()` MUST parse as the unit type.
+- `(T)` MUST parse as a grouped type and MUST NOT create a tuple type.
+- `(T,)` MUST parse as a single-element tuple type.
+- `(A, B, ...)` MUST parse as a tuple type.
+
+## LLG-TYPE-03 Bounded Collection Type Arity
+
+- `Set<T, N>` MUST require exactly one element type and one explicit capacity.
+- `Map<K, V, N>` MUST require exactly one key type, one value type, and one
+  explicit capacity.
+
+## LLG-DIAG-01 Source Span Preservation
 
 - The front end MUST preserve byte spans for tokens and syntax nodes or derive
   them from spanned children without reparsing source text.
 - Syntax diagnostics MUST include a primary source span.
+
+## LLG-DIAG-02 Rendered Syntax Diagnostics
+
 - The CLI MUST render syntax errors with file path, line, column, source line
-  text, and an underline for the primary span.
+  text, and an underline spanning the full primary source span.
+
+## LLG-DIAG-03 Parser Recovery
+
+- Parser recovery MUST preserve following valid top-level items after malformed
+  top-level input.
+- Parser recovery MUST preserve following valid statements after a malformed
+  statement.
+- A missing semicolon before `}` MUST not cascade into additional syntax errors
+  for the same statement.
 
 ## LLG-SEMA-01 Name Resolution And Scopes
 
@@ -122,7 +173,6 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-REL-01 Collections And Relations
 
-- The language MUST parse capacity-bounded `Set<T, N>` and `Map<K, V, N>` types.
 - The first enforced relation MUST allow membership in a `Set<K, N>` to imply
   presence in a `Map<K, V, M>`.
 
