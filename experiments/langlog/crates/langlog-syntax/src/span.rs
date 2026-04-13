@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 //= SPEC.md#llg-diag-01-source-span-preservation
-//# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
+//# The front end MUST preserve byte spans for tokens and syntax nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(u32);
 
@@ -129,7 +129,7 @@ pub struct SourceFile {
 
 impl SourceFile {
     //= SPEC.md#llg-diag-01-source-span-preservation
-    //# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
+    //# The front end MUST preserve byte spans for tokens and syntax nodes.
     pub fn new(path: impl Into<PathBuf>, contents: impl Into<String>) -> Self {
         Self::with_id(FileId::new(0), path, contents)
     }

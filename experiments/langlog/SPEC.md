@@ -124,8 +124,7 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-DIAG-01 Source Span Preservation
 
-- The front end MUST preserve byte spans for tokens and syntax nodes or derive
-  them from spanned children without reparsing source text.
+- The front end MUST preserve byte spans for tokens and syntax nodes.
 - Syntax diagnostics MUST include a primary source span.
 
 ## LLG-DIAG-02 Rendered Syntax Diagnostics

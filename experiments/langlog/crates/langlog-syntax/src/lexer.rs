@@ -14,7 +14,7 @@ pub fn lex(path: impl Into<std::path::PathBuf>, contents: impl Into<String>) -> 
 }
 
 //= SPEC.md#llg-diag-01-source-span-preservation
-//# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
+//# The front end MUST preserve byte spans for tokens and syntax nodes.
 pub fn lex_source(source: SourceFile) -> LexedSource {
     Lexer::new(source).lex()
 }

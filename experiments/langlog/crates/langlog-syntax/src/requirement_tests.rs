@@ -720,7 +720,7 @@ fn requirement_llg_type_03_validates_bounded_collection_type_arity() {
 
 //= SPEC.md#llg-diag-01-source-span-preservation
 //= type=test
-//# The front end MUST preserve byte spans for tokens and syntax nodes or derive them from spanned children without reparsing source text.
+//# The front end MUST preserve byte spans for tokens and syntax nodes.
 //= SPEC.md#llg-diag-01-source-span-preservation
 //= type=test
 //# Syntax diagnostics MUST include a primary source span.
