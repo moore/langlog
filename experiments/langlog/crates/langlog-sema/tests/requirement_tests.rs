@@ -1,5 +1,5 @@
 use langlog_sema::{analyze, BindingKind, CheckedProgram};
-use langlog_syntax::ast::{Expr, ExprKind, Item, Stmt};
+use langlog_syntax::ast::{Block, Expr, ExprKind, Item, LetStmt, Stmt};
 use langlog_syntax::{parse, LabelStyle, Span};
 
 fn analyze_ok(source: &str) -> CheckedProgram {
@@ -28,6 +28,62 @@ fn name_span(expr: &Expr) -> Span {
     }
 }
 
+fn let_stmt(block: &Block, index: usize) -> &LetStmt {
+    match &block.statements[index] {
+        Stmt::Let(stmt) => stmt,
+        other => panic!("expected let statement at index {index}, got {other:?}"),
+    }
+}
+
+fn expr_stmt(block: &Block, index: usize) -> &Expr {
+    match &block.statements[index] {
+        Stmt::Expr(stmt) => &stmt.expr,
+        other => panic!("expected expression statement at index {index}, got {other:?}"),
+    }
+}
+
+fn block_expr(block: &Block, index: usize) -> &Block {
+    match &expr_stmt(block, index).kind {
+        ExprKind::Block(block) => block,
+        other => panic!("expected block expression at index {index}, got {other:?}"),
+    }
+}
+
+fn assert_resolves_to(
+    checked: &CheckedProgram,
+    expr: &Expr,
+    expected_kind: BindingKind,
+    expected_declaration_span: Span,
+    context: &str,
+) {
+    let resolution = checked
+        .resolution(name_span(expr))
+        .unwrap_or_else(|| panic!("expected resolution for {context}"));
+    assert_eq!(
+        resolution.kind, expected_kind,
+        "wrong binding kind for {context}"
+    );
+    assert_eq!(
+        resolution.declaration_span, expected_declaration_span,
+        "wrong declaration span for {context}"
+    );
+}
+
+fn assert_undefined_name(checked: &CheckedProgram, expr: &Expr, name: &str) {
+    let span = name_span(expr);
+    assert!(
+        checked.resolution(span).is_none(),
+        "unexpected resolution for undefined name {name:?}"
+    );
+    assert!(checked.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == format!("undefined binding `{name}`")
+            && diagnostic
+                .labels
+                .iter()
+                .any(|label| label.style == LabelStyle::Primary && label.span == span)
+    }));
+}
+
 //= SPEC.md#llg-sema-01-name-resolution-and-scopes
 //= type=test
 //# The semantic phase MUST resolve item, parameter, and local bindings according to lexical scope.
@@ -38,14 +94,14 @@ fn requirement_llg_sema_01_resolves_bindings_according_to_lexical_scope() {
 fn helper() {}
 
 fn main(param: u32) {
-    let local = helper;
+    let local = helper; // item binding
     {
-        let helper = local;
-        helper
+        let helper = local; // outer local binding
+        helper              // inner local binding
     };
-    helper;
-    param;
-    local;
+    helper; // item binding again after leaving the inner block
+    param;  // parameter binding
+    local;  // outer local binding
 }
 "#,
     );
@@ -53,86 +109,70 @@ fn main(param: u32) {
 
     let helper = function(&checked, "helper");
     let main = function(&checked, "main");
-    let outer_let = match &main.body.statements[0] {
-        Stmt::Let(stmt) => stmt,
-        other => panic!("expected outer let statement, got {other:?}"),
-    };
-    let inner_block = match &main.body.statements[1] {
-        Stmt::Expr(stmt) => match &stmt.expr.kind {
-            ExprKind::Block(block) => block,
-            other => panic!("expected block expression, got {other:?}"),
-        },
-        other => panic!("expected block expression statement, got {other:?}"),
-    };
-    let inner_let = match &inner_block.statements[0] {
-        Stmt::Let(stmt) => stmt,
-        other => panic!("expected inner let statement, got {other:?}"),
-    };
-    let outer_helper_expr = match &main.body.statements[2] {
-        Stmt::Expr(stmt) => &stmt.expr,
-        other => panic!("expected outer helper expression statement, got {other:?}"),
-    };
-    let param_expr = match &main.body.statements[3] {
-        Stmt::Expr(stmt) => &stmt.expr,
-        other => panic!("expected param expression statement, got {other:?}"),
-    };
-    let local_expr = match &main.body.statements[4] {
-        Stmt::Expr(stmt) => &stmt.expr,
-        other => panic!("expected local expression statement, got {other:?}"),
-    };
+    let outer_let = let_stmt(&main.body, 0);
+    let inner_block = block_expr(&main.body, 1);
+    let inner_let = let_stmt(inner_block, 0);
     let inner_helper_expr = inner_block
         .trailing_expr
         .as_deref()
         .expect("expected trailing expr in inner block");
 
-    let item_resolution = checked
-        .resolution(name_span(
-            outer_let.value.as_ref().expect("expected let initializer"),
-        ))
-        .expect("expected helper item resolution");
-    assert_eq!(item_resolution.kind, BindingKind::Item);
-    assert_eq!(item_resolution.declaration_span, helper.name.span);
-
-    let inner_initializer_resolution = checked
-        .resolution(name_span(
-            inner_let
-                .value
-                .as_ref()
-                .expect("expected inner let initializer"),
-        ))
-        .expect("expected outer local resolution inside inner let");
-    assert_eq!(inner_initializer_resolution.kind, BindingKind::Local);
-    assert_eq!(
-        inner_initializer_resolution.declaration_span,
-        outer_let.name.span
+    // `let local = helper;` should resolve `helper` to the top-level item.
+    assert_resolves_to(
+        &checked,
+        outer_let.value.as_ref().expect("expected let initializer"),
+        BindingKind::Item,
+        helper.name.span,
+        "outer let initializer",
     );
 
-    let inner_shadow_resolution = checked
-        .resolution(name_span(inner_helper_expr))
-        .expect("expected inner helper resolution");
-    assert_eq!(inner_shadow_resolution.kind, BindingKind::Local);
-    assert_eq!(
-        inner_shadow_resolution.declaration_span,
-        inner_let.name.span
+    // `let helper = local;` should resolve `local` to the outer local binding.
+    assert_resolves_to(
+        &checked,
+        inner_let
+            .value
+            .as_ref()
+            .expect("expected inner let initializer"),
+        BindingKind::Local,
+        outer_let.name.span,
+        "inner let initializer",
     );
 
-    let outer_helper_resolution = checked
-        .resolution(name_span(outer_helper_expr))
-        .expect("expected outer helper resolution");
-    assert_eq!(outer_helper_resolution.kind, BindingKind::Item);
-    assert_eq!(outer_helper_resolution.declaration_span, helper.name.span);
+    // The trailing `helper` inside the inner block should resolve to the shadowing inner local.
+    assert_resolves_to(
+        &checked,
+        inner_helper_expr,
+        BindingKind::Local,
+        inner_let.name.span,
+        "inner block trailing expression",
+    );
 
-    let param_resolution = checked
-        .resolution(name_span(param_expr))
-        .expect("expected param resolution");
-    assert_eq!(param_resolution.kind, BindingKind::Param);
-    assert_eq!(param_resolution.declaration_span, main.params[0].name.span);
+    // After the inner block ends, `helper;` should resolve back to the top-level item.
+    assert_resolves_to(
+        &checked,
+        expr_stmt(&main.body, 2),
+        BindingKind::Item,
+        helper.name.span,
+        "outer helper expression",
+    );
 
-    let local_resolution = checked
-        .resolution(name_span(local_expr))
-        .expect("expected local resolution");
-    assert_eq!(local_resolution.kind, BindingKind::Local);
-    assert_eq!(local_resolution.declaration_span, outer_let.name.span);
+    // `param;` should resolve to the function parameter.
+    assert_resolves_to(
+        &checked,
+        expr_stmt(&main.body, 3),
+        BindingKind::Param,
+        main.params[0].name.span,
+        "parameter expression",
+    );
+
+    // `local;` should resolve to the outer local binding introduced by the first let.
+    assert_resolves_to(
+        &checked,
+        expr_stmt(&main.body, 4),
+        BindingKind::Local,
+        outer_let.name.span,
+        "outer local expression",
+    );
 }
 
 //= SPEC.md#llg-sema-01-name-resolution-and-scopes
@@ -143,41 +183,26 @@ fn requirement_llg_sema_01_rejects_references_to_undefined_bindings() {
     let checked = analyze_ok(
         r#"
 fn main() {
-    missing;
-    let local = other;
+    missing;           // no matching item, parameter, or local binding
+    let local = other; // initializer also refers to an undefined name
 }
 "#,
     );
     assert!(checked.has_errors());
 
     let main = function(&checked, "main");
-    let missing_expr = match &main.body.statements[0] {
-        Stmt::Expr(stmt) => &stmt.expr,
-        other => panic!("expected missing name expression, got {other:?}"),
-    };
-    let other_expr = match &main.body.statements[1] {
-        Stmt::Let(stmt) => stmt.value.as_ref().expect("expected initializer"),
-        other => panic!("expected let statement, got {other:?}"),
-    };
+    let missing_expr = expr_stmt(&main.body, 0);
+    let other_expr = let_stmt(&main.body, 1)
+        .value
+        .as_ref()
+        .expect("expected initializer");
 
+    // Both unresolved names should produce diagnostics and no successful resolutions.
     assert_eq!(checked.diagnostics.len(), 2);
-    assert!(checked.resolution(name_span(missing_expr)).is_none());
-    assert!(checked.resolution(name_span(other_expr)).is_none());
 
-    let missing_span = name_span(missing_expr);
-    let other_span = name_span(other_expr);
-    assert!(checked.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message == "undefined binding `missing`"
-            && diagnostic
-                .labels
-                .iter()
-                .any(|label| label.style == LabelStyle::Primary && label.span == missing_span)
-    }));
-    assert!(checked.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message == "undefined binding `other`"
-            && diagnostic
-                .labels
-                .iter()
-                .any(|label| label.style == LabelStyle::Primary && label.span == other_span)
-    }));
+    // The standalone `missing;` expression should be reported as undefined.
+    assert_undefined_name(&checked, missing_expr, "missing");
+
+    // The initializer `other` should also be reported as undefined.
+    assert_undefined_name(&checked, other_expr, "other");
 }
