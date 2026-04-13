@@ -20,8 +20,6 @@ pub struct Label {
 }
 
 impl Label {
-    //= SPEC.md#llg-diag-01-source-span-preservation
-    //# Syntax diagnostics MUST include a primary source span.
     pub fn primary(span: Span, message: impl Into<String>) -> Self {
         Self {
             style: LabelStyle::Primary,

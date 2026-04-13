@@ -65,8 +65,6 @@ impl<'a> Parser<'a> {
         self.diagnostics
     }
 
-    //= SPEC.md#llg-syn-01-top-level-functions
-    //# A phase 1 source file MUST contain only function items at the top level.
     fn parse_module(&mut self) -> Module {
         let mut items = Vec::new();
 
@@ -89,10 +87,6 @@ impl<'a> Parser<'a> {
         self.parse_function().map(Item::Function)
     }
 
-    //= SPEC.md#llg-syn-01-top-level-functions
-    //# A function item MUST use Rust-like syntax with `fn`, a name, a parameter list, and a block body.
-    //= SPEC.md#llg-syn-01-top-level-functions
-    //# The current parser allows the return type to be omitted in phase 1.
     fn parse_function(&mut self) -> Option<Function> {
         let start = self.expect_tag(TokenTag::Fn, "expected `fn` to start a function")?;
         let name = self.expect_identifier("expected a function name")?;
@@ -142,8 +136,6 @@ impl<'a> Parser<'a> {
         Some(params)
     }
 
-    //= SPEC.md#llg-type-01-phase-1-types
-    //# The parser MUST accept unit, named, tuple, fixed-array, and generic application type forms.
     fn parse_type(&mut self) -> Option<Type> {
         match self.current_tag() {
             TokenTag::LParen => self.parse_tuple_or_grouped_type(),
@@ -157,14 +149,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_tuple_or_grouped_type(&mut self) -> Option<Type> {
-        //= SPEC.md#llg-type-02-grouped-and-tuple-types
-        //# `()` MUST parse as the unit type.
-        //= SPEC.md#llg-type-02-grouped-and-tuple-types
-        //# `(T)` MUST parse as a grouped type and MUST NOT create a tuple type.
-        //= SPEC.md#llg-type-02-grouped-and-tuple-types
-        //# `(T,)` MUST parse as a single-element tuple type.
-        //= SPEC.md#llg-type-02-grouped-and-tuple-types
-        //# `(A, B, ...)` MUST parse as a tuple type.
         let start = self.expect_tag(TokenTag::LParen, "expected `(`")?;
         if self.bump_if(TokenTag::RParen) {
             return Some(Type::new(
@@ -193,8 +177,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array_type(&mut self) -> Option<Type> {
-        //= SPEC.md#llg-type-01-phase-1-types
-        //# A fixed-array type MUST use the form `[T; N]`.
         let start = self.expect_tag(TokenTag::LBracket, "expected `[`")?;
         let element = self.parse_type()?;
         self.expect_tag(TokenTag::Semi, "expected `;` in array type")?;
@@ -248,10 +230,6 @@ impl<'a> Parser<'a> {
         args: &[GenericArg],
         span: Span,
     ) {
-        //= SPEC.md#llg-type-03-bounded-collection-type-arity
-        //# `Set<T, N>` MUST require exactly one element type and one explicit capacity.
-        //= SPEC.md#llg-type-03-bounded-collection-type-arity
-        //# `Map<K, V, N>` MUST require exactly one key type, one value type, and one explicit capacity.
         let valid = match base.value.as_str() {
             "Set" => matches!(args, [GenericArg::Type(_), GenericArg::Const(_)]),
             "Map" => matches!(
@@ -284,10 +262,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_block(&mut self) -> Option<Block> {
-        //= SPEC.md#llg-syn-02-statements
-        //# A statement form that requires a semicolon MUST reject the form if the semicolon is absent.
-        //= SPEC.md#llg-diag-03-parser-recovery
-        //# A missing semicolon before `}` MUST not cascade into additional syntax errors for the same statement.
         let start = self.expect_tag(TokenTag::LBrace, "expected `{` to start a block")?;
         let mut statements = Vec::new();
         let mut trailing_expr = None;
@@ -367,8 +341,6 @@ impl<'a> Parser<'a> {
         )
     }
 
-    //= SPEC.md#llg-syn-02-statements
-    //# The parser MUST accept `let`, assignment, expression, `if`, `match`, `for`, `return`, and `observe` statements.
     fn parse_statement(&mut self) -> Option<Stmt> {
         match self.current_tag() {
             TokenTag::Let => self.parse_let_statement().map(Stmt::Let),
@@ -385,8 +357,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_let_statement(&mut self) -> Option<LetStmt> {
-        //= SPEC.md#llg-syn-02-statements
-        //# The current parser allows a `let` statement to include `mut`, a type annotation, and an initializer.
         let start = self.expect_tag(TokenTag::Let, "expected `let`")?;
         let mutable = self.bump_if(TokenTag::Mut);
         let name = self.expect_identifier("expected a binding name")?;
@@ -443,10 +413,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_match_statement(&mut self) -> Option<MatchStmt> {
-        //= SPEC.md#llg-syn-05-patterns-and-match-arms
-        //# `match` arms MUST use `pattern => body`.
-        //= SPEC.md#llg-syn-05-patterns-and-match-arms
-        //# `match` arms MUST be comma-separated and MAY end with a trailing comma.
         let start = self.expect_tag(TokenTag::Match, "expected `match`")?;
         let expr = self.parse_expression(0)?;
         self.expect_tag(TokenTag::LBrace, "expected `{` after match expression")?;
@@ -522,8 +488,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_pattern(&mut self) -> Option<Pattern> {
-        //= SPEC.md#llg-syn-05-patterns-and-match-arms
-        //# The parser MUST accept wildcard, binding, integer literal, and boolean patterns.
         let token = self.current().clone();
         match token.kind {
             TokenKind::Underscore => {
@@ -554,28 +518,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# The parser MUST accept integer literals, boolean literals, names, tuples, arrays, blocks, grouped expressions, unary operators, binary operators, calls, and indexing expressions.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# The supported binary operators MUST include `..`, `||`, `&&`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, and `%`.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Binary operators with the same precedence MUST associate to the left.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Postfix call and indexing MUST bind tighter than unary operators.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Unary operators MUST bind tighter than multiplicative operators.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Multiplicative operators MUST bind tighter than additive operators.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Additive operators MUST bind tighter than comparison operators.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Comparison operators MUST bind tighter than equality operators.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Equality operators MUST bind tighter than logical and.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Logical and MUST bind tighter than logical or.
-    //= SPEC.md#llg-syn-03-expressions-and-precedence
-    //# Logical or MUST bind tighter than range construction.
     fn parse_expression(&mut self, min_binding_power: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
         lhs = self.parse_postfix(lhs)?;
@@ -731,14 +673,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_grouped_or_tuple_expression(&mut self) -> Option<Expr> {
-        //= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
-        //# `()` MUST parse as an empty tuple expression.
-        //= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
-        //# `(expr)` MUST parse as a grouped expression.
-        //= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
-        //# `(expr,)` MUST parse as a single-element tuple expression.
-        //= SPEC.md#llg-syn-04-grouped-and-tuple-expressions
-        //# `(a, b, ...)` MUST parse as a tuple expression.
         let start = self.expect_tag(TokenTag::LParen, "expected `(`")?;
         if self.bump_if(TokenTag::RParen) {
             return Some(Expr::new(
@@ -840,8 +774,6 @@ impl<'a> Parser<'a> {
     }
 
     fn synchronize_item(&mut self) {
-        //= SPEC.md#llg-diag-03-parser-recovery
-        //# Parser recovery MUST preserve following valid top-level items after malformed top-level input.
         while !self.at(TokenTag::Eof) {
             if self.at(TokenTag::Fn) {
                 break;
@@ -851,8 +783,6 @@ impl<'a> Parser<'a> {
     }
 
     fn synchronize_statement(&mut self) {
-        //= SPEC.md#llg-diag-03-parser-recovery
-        //# Parser recovery MUST preserve following valid statements after a malformed statement.
         while !self.at(TokenTag::Eof) {
             match self.current_tag() {
                 TokenTag::Semi => {

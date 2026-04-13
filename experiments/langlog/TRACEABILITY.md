@@ -7,10 +7,10 @@ requirements in [SPEC.md](./SPEC.md) to implementation and planned work.
 
 - `.duvet/config.toml` configures Duvet for this experiment.
 - `SPEC.md` contains the normative requirements using RFC 2119 terms.
-- Rust source files use Duvet annotations such as `//=` and `//#` to cite
-  implemented requirements.
-- Planned but not yet implemented requirements are marked with `type=todo`
-  annotations in the relevant crates.
+- Rust test files use Duvet annotations such as `//=` and `//#` to trace both
+  implemented requirements and planned work.
+- Planned but not yet implemented requirements are tracked with `type=todo`
+  annotations on ignored placeholder tests.
 
 ## Run The Report
 
@@ -25,17 +25,21 @@ This uses `.duvet/config.toml` by default and writes reports under
 
 ## Current Strategy
 
-- Parser and diagnostic requirements are traced directly to `langlog-syntax` and
-  `langlog-driver`.
+- Parser and diagnostic requirements are verified by tests in `langlog-syntax`
+  and `langlog-driver`.
 - Each normative requirement bullet should map to exactly one
   `requirement_*` test function.
 - Each `requirement_*` test function should trace exactly one normative
   requirement bullet.
-- `scripts/check_requirement_tests.py` enforces that one-to-one shape before the
-  Duvet report runs.
+- Each planned-but-unimplemented requirement should map to exactly one ignored
+  `todo_*` placeholder test.
+- `scripts/check_requirement_tests.py` enforces that Duvet annotations live on
+  test functions and that the one-to-one shape holds before the Duvet report
+  runs.
 - Unit tests outside the requirement suites should cover non-normative helper
   behavior and local invariants rather than duplicate spec-backed contracts.
 - Semantic and proof requirements that are planned but not implemented are
-  traced with `todo` annotations in `langlog-sema` and `langlog-proof`.
+  traced by placeholder tests in `langlog-sema/tests/` and
+  `langlog-proof/tests/`.
 - The spec is intentionally small and requirement-oriented so the traceability
   graph remains stable while the language evolves.

@@ -10,10 +10,6 @@ fn main() -> ExitCode {
     run(env::args().skip(1))
 }
 
-//= SPEC.md#llg-cli-01-single-file-front-end
-//# The phase 1 front end MUST accept `langlog check <path>`.
-//= SPEC.md#llg-cli-01-single-file-front-end
-//# The phase 1 front end MUST treat `<path>` as a single source file.
 fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     match (args.next().as_deref(), args.next(), args.next()) {
         (Some("check"), Some(path), None) => run_check(PathBuf::from(path)),
@@ -24,12 +20,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-//= SPEC.md#llg-cli-02-cli-output-behavior
-//# When `langlog check <path>` succeeds, the CLI MUST print a success summary to stdout.
-//= SPEC.md#llg-cli-02-cli-output-behavior
-//# When syntax analysis fails, the CLI MUST print diagnostics to stderr.
-//= SPEC.md#llg-cli-02-cli-output-behavior
-//# Success and syntax-error reporting MUST not write to the opposite stream.
 fn run_check(path: PathBuf) -> ExitCode {
     let source = match fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -63,8 +53,6 @@ fn emit_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) {
     eprint!("{}", render_diagnostics(source, diagnostics));
 }
 
-//= SPEC.md#llg-diag-02-rendered-syntax-diagnostics
-//# The CLI MUST render syntax errors with file path, line, column, source line text, and an underline spanning the full primary source span.
 fn render_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) -> String {
     let mut rendered = String::new();
     for diagnostic in diagnostics {
