@@ -16,8 +16,9 @@ allocation.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Project task runner: use `./tasks.sh` in `experiments/langlog/` to run the
-  default fast checks in one place. `cargo-mutants` is available as a separate
-  `./tasks.sh mutants` gate because it is intentionally slower.
+  default fast checks in one place. Mutation testing is intentionally excluded
+  from `./tasks.sh`; run `cargo mutants` manually when you explicitly want that
+  slower check.
 - Formatting defaults: `rustfmt` and `rumdl` are both pinned to a 100-column
   line length so requirement text stays stable across Rust and Markdown tooling.
 

@@ -28,9 +28,12 @@ run_duvet() {
     duvet report --require-tests true
 }
 
-run_cargo_mutants() {
-    echo "==> cargo mutants $*"
-    cargo mutants "$@"
+refuse_cargo_mutants() {
+    cat >&2 <<'EOF'
+mutation testing is intentionally disabled in ./tasks.sh
+run `cargo mutants` manually when you explicitly want that expensive check
+EOF
+    return 2
 }
 
 usage() {
@@ -44,7 +47,7 @@ Tasks:
   clippy   Run cargo clippy
   md       Run markdown formatting
   duvet    Run duvet report with test coverage required
-  mutants  Run cargo-mutants with the checked-in configuration
+  mutants  Refuse to run cargo-mutants; use `cargo mutants` manually instead
 EOF
 }
 
@@ -74,7 +77,7 @@ run_task() {
             run_duvet
             ;;
         mutants)
-            run_cargo_mutants
+            refuse_cargo_mutants
             ;;
         -h|--help|help)
             usage
