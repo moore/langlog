@@ -191,10 +191,30 @@ fn requirement_llg_lex_04_marks_invalid_character_spans() {
 //= type=test
 //# A phase 1 source file MUST contain only function items at the top level.
 #[test]
-fn requirement_llg_syn_01_rejects_non_function_top_level_items() {
+fn requirement_llg_syn_01_accepts_only_function_top_level_items() {
+    let parsed = parse_ok(
+        r#"
+fn main() {}
+fn helper() {}
+"#,
+    );
+
+    assert_eq!(parsed.module.items.len(), 2);
+    assert!(parsed
+        .module
+        .items
+        .iter()
+        .all(|item| matches!(item, Item::Function(_))));
+}
+
+//= SPEC.md#llg-syn-01-top-level-functions
+//= type=test
+//# A non-function top-level item MUST be rejected with a syntax diagnostic.
+#[test]
+fn requirement_llg_syn_01_rejects_non_function_top_level_items_with_a_syntax_diagnostic() {
     let parsed = parse_err("let value = 1;");
 
-    assert!(parsed.module.items.is_empty());
+    assert_diagnostic_contains(&parsed, "expected a top-level item");
 }
 
 //= SPEC.md#llg-syn-01-top-level-functions
@@ -321,8 +341,58 @@ fn main() {
 }
 "#,
     );
+    let statements = &first_function(&parsed).body.statements;
 
-    assert_eq!(first_function(&parsed).body.statements.len(), 13);
+    assert_eq!(statements.len(), 13);
+    assert!(matches!(expr_stmt(&statements[2]).kind, ExprKind::Int(1)));
+    assert!(matches!(
+        expr_stmt(&statements[3]).kind,
+        ExprKind::Bool(true)
+    ));
+    assert!(matches!(expr_stmt(&statements[4]).kind, ExprKind::Name(_)));
+    assert!(matches!(
+        &expr_stmt(&statements[5]).kind,
+        ExprKind::Tuple(elements) if elements.len() == 2
+    ));
+    assert!(matches!(
+        &expr_stmt(&statements[6]).kind,
+        ExprKind::Array(elements) if elements.len() == 2
+    ));
+    assert!(matches!(
+        &expr_stmt(&statements[7]).kind,
+        ExprKind::Block(block)
+            if block.statements.is_empty()
+                && matches!(
+                    block.trailing_expr.as_deref().map(|expr| &expr.kind),
+                    Some(ExprKind::Int(1))
+                )
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[8]).kind,
+        ExprKind::Grouped(_)
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[9]).kind,
+        ExprKind::Unary {
+            op: UnaryOp::Not,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[10]).kind,
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &expr_stmt(&statements[11]).kind,
+        ExprKind::Call { args, .. } if args.len() == 1
+    ));
+    assert!(matches!(
+        expr_stmt(&statements[12]).kind,
+        ExprKind::Index { .. }
+    ));
 }
 
 //= SPEC.md#llg-syn-03-expressions-and-precedence
@@ -457,12 +527,12 @@ fn main() {
 //# Binary operators with the same precedence MUST associate to the left.
 #[test]
 fn requirement_llg_syn_03_left_associates_same_precedence_binary_operators() {
-    let sub = parse_trailing_expr("8 - 4 - 2");
+    let additive = parse_trailing_expr("8 - 4 + 2");
     let rem = parse_trailing_expr("20 / 5 % 2");
 
-    match sub.kind {
+    match additive.kind {
         ExprKind::Binary {
-            op: BinaryOp::Sub,
+            op: BinaryOp::Add,
             left,
             right,
         } => {
@@ -475,7 +545,7 @@ fn requirement_llg_syn_03_left_associates_same_precedence_binary_operators() {
                 }
             ));
         }
-        other => panic!("expected left-associated subtraction, got {other:?}"),
+        other => panic!("expected left-associated additive expression, got {other:?}"),
     }
 
     match rem.kind {
@@ -833,7 +903,18 @@ fn main() {
 //# `match` arms MUST be comma-separated and MAY end with a trailing comma.
 #[test]
 fn requirement_llg_syn_05_supports_comma_separated_match_arms_with_trailing_commas() {
-    let parsed = parse_ok(
+    let without_trailing_comma = parse_ok(
+        r#"
+fn main() {
+    match 1 {
+        _ => 0,
+        7 => 1,
+        false => 2
+    }
+}
+"#,
+    );
+    let with_trailing_comma = parse_ok(
         r#"
 fn main() {
     match 1 {
@@ -844,12 +925,15 @@ fn main() {
 }
 "#,
     );
-    let stmt = &first_function(&parsed).body.statements[0];
-    let Stmt::Match(match_stmt) = stmt else {
-        panic!("expected match statement, got {stmt:?}");
-    };
 
-    assert_eq!(match_stmt.arms.len(), 3);
+    for parsed in [&without_trailing_comma, &with_trailing_comma] {
+        let stmt = &first_function(parsed).body.statements[0];
+        let Stmt::Match(match_stmt) = stmt else {
+            panic!("expected match statement, got {stmt:?}");
+        };
+
+        assert_eq!(match_stmt.arms.len(), 3);
+    }
 }
 
 //= SPEC.md#llg-type-01-phase-1-types
@@ -886,11 +970,17 @@ fn requirement_llg_type_01_parses_core_type_forms() {
 #[test]
 fn requirement_llg_type_01_uses_semicolon_syntax_for_fixed_array_types() {
     let parsed = parse_ok("fn main(values: [u32; 4]) {}");
+    let invalid = parse_err("fn main(values: [u32, 4]) {}");
 
-    assert!(matches!(
-        first_function(&parsed).params[0].ty.kind,
-        TypeKind::Array { .. }
-    ));
+    match &first_function(&parsed).params[0].ty.kind {
+        TypeKind::Array { element, length } => {
+            assert!(matches!(element.kind, TypeKind::Named(_)));
+            assert_eq!(length.value, 4);
+        }
+        other => panic!("expected array type, got {other:?}"),
+    }
+
+    assert_diagnostic_contains(&invalid, "expected `;` in array type");
 }
 
 //= SPEC.md#llg-type-02-grouped-and-tuple-types
@@ -1003,22 +1093,63 @@ fn requirement_llg_type_03_requires_map_key_value_and_explicit_capacity() {
 #[test]
 fn requirement_llg_diag_01_preserves_token_and_syntax_node_spans() {
     let lexed = lex("requirement.llg", "fn main() {}");
-    for token in &lexed.tokens {
-        let text = lexed.source.span_text(token.span);
-        if token.tag() == TokenTag::Eof {
-            assert_eq!(text, Some(""));
-        } else {
-            assert!(text.is_some_and(|slice| !slice.is_empty()));
-        }
-    }
+    let token_texts: Vec<_> = lexed
+        .tokens
+        .iter()
+        .map(|token| lexed.source.span_text(token.span))
+        .collect();
+    assert_eq!(
+        token_texts,
+        vec![
+            Some("fn"),
+            Some("main"),
+            Some("("),
+            Some(")"),
+            Some("{"),
+            Some("}"),
+            Some(""),
+        ]
+    );
+    let token_tags: Vec<_> = lexed.tokens.iter().map(|token| token.tag()).collect();
+    assert_eq!(
+        token_tags,
+        vec![
+            TokenTag::Fn,
+            TokenTag::Identifier,
+            TokenTag::LParen,
+            TokenTag::RParen,
+            TokenTag::LBrace,
+            TokenTag::RBrace,
+            TokenTag::Eof,
+        ]
+    );
 
     let source = "fn main() { let value = 1; value }";
     let parsed = parse_ok(source);
     let function = first_function(&parsed);
+    let let_stmt = match &function.body.statements[0] {
+        Stmt::Let(stmt) => stmt,
+        other => panic!("expected let statement, got {other:?}"),
+    };
     let trailing_expr = function.body.trailing_expr.as_deref().unwrap();
 
     assert_eq!(parsed.source.span_text(function.span), Some(source));
     assert_eq!(parsed.source.span_text(function.name.span), Some("main"));
+    assert_eq!(
+        parsed.source.span_text(function.body.span),
+        Some("{ let value = 1; value }")
+    );
+    assert_eq!(
+        parsed.source.span_text(let_stmt.span),
+        Some("let value = 1;")
+    );
+    assert_eq!(parsed.source.span_text(let_stmt.name.span), Some("value"));
+    assert_eq!(
+        parsed
+            .source
+            .span_text(let_stmt.value.as_ref().unwrap().span),
+        Some("1")
+    );
     assert_eq!(parsed.source.span_text(trailing_expr.span), Some("value"));
 }
 

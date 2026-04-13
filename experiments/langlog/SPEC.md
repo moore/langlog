@@ -59,6 +59,7 @@ properties that should be enforced structurally rather than by convention:
 ## LLG-SYN-01 Top-Level Functions
 
 - A phase 1 source file MUST contain only function items at the top level.
+- A non-function top-level item MUST be rejected with a syntax diagnostic.
 - A function item MUST use Rust-like syntax with `fn`, a name, a parameter list,
   and a block body.
 - The current parser allows the return type to be omitted in phase 1.
