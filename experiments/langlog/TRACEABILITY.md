@@ -27,8 +27,12 @@ This uses `.duvet/config.toml` by default and writes reports under
 
 - Parser and diagnostic requirements are traced directly to `langlog-syntax` and
   `langlog-driver`.
-- Implemented requirements should normally have one consolidated requirement
-  test function per spec ID.
+- Each normative requirement bullet should map to exactly one
+  `requirement_*` test function.
+- Each `requirement_*` test function should trace exactly one normative
+  requirement bullet.
+- `scripts/check_requirement_tests.py` enforces that one-to-one shape before the
+  Duvet report runs.
 - Unit tests outside the requirement suites should cover non-normative helper
   behavior and local invariants rather than duplicate spec-backed contracts.
 - Semantic and proof requirements that are planned but not implemented are

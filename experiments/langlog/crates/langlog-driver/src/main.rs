@@ -197,15 +197,23 @@ mod tests {
     //= SPEC.md#llg-cli-01-single-file-front-end
     //= type=test
     //# The phase 1 front end MUST accept `langlog check <path>`.
+    #[test]
+    fn requirement_llg_cli_01_accepts_check_path_command() {
+        let source = TempSource::new("fn main() {}");
+
+        let success = run(["check".to_string(), source.path.display().to_string()].into_iter());
+
+        assert_eq!(success, std::process::ExitCode::SUCCESS);
+    }
+
     //= SPEC.md#llg-cli-01-single-file-front-end
     //= type=test
     //# The phase 1 front end MUST treat `<path>` as a single source file.
     #[test]
-    fn requirement_llg_cli_01_accepts_exactly_one_source_path() {
+    fn requirement_llg_cli_01_treats_path_as_a_single_source_file() {
         let source = TempSource::new("fn main() {}");
         let second = TempSource::new("fn helper() {}");
 
-        let success = run(["check".to_string(), source.path.display().to_string()].into_iter());
         let extra_path = run([
             "check".to_string(),
             source.path.display().to_string(),
@@ -213,7 +221,6 @@ mod tests {
         ]
         .into_iter());
 
-        assert_eq!(success, std::process::ExitCode::SUCCESS);
         assert_eq!(extra_path, std::process::ExitCode::from(2));
     }
 

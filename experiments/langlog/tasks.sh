@@ -24,6 +24,8 @@ run_markdown_format() {
 }
 
 run_duvet() {
+    echo "==> python3 scripts/check_requirement_tests.py"
+    python3 scripts/check_requirement_tests.py
     echo "==> duvet report --require-tests true"
     duvet report --require-tests true
 }
