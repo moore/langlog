@@ -33,6 +33,13 @@ fn todo_llg_proof_02_derives_facts_from_control_flow_tests() {}
 #[ignore = "proof requirements are not implemented"]
 fn todo_llg_proof_02_incorporates_observe_statements() {}
 
+//= SPEC.md#llg-proof-02-observations
+//= type=todo
+//# In phase 1, an `observe` fact MUST relate a named left-hand side symbol to a scalar-valued right-hand side expression.
+#[test]
+#[ignore = "proof requirements are not implemented"]
+fn todo_llg_proof_02_represents_phase_1_observe_facts_as_relations() {}
+
 //= SPEC.md#llg-rel-01-collections-and-relations
 //= type=todo
 //# The first enforced relation MUST allow membership in a `Set<K, N>` to imply presence in a `Map<K, V, M>`.

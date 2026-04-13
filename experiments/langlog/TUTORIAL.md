@@ -105,7 +105,11 @@ fn bounded(total: u32) -> u32 {
 
 Today:
 
-- `observe` parses
+- `observe` parses as `observe <name> <op> <expr>;`
+- the left-hand side must be a bare name
+- the supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`
+- tuple, array, block, and range expressions are rejected on the right-hand
+  side in phase 1
 - it appears in the AST
 - it does not yet drive proof checking
 

@@ -104,6 +104,16 @@ properties that should be enforced structurally rather than by convention:
 - `match` arms MUST use `pattern => body`.
 - `match` arms MUST be comma-separated and MAY end with a trailing comma.
 
+## LLG-SYN-06 Observe Statements
+
+- `observe` statements MUST use the form `observe <name> <op> <expr>;`.
+- The left-hand side of `observe` MUST be a bare name and MUST NOT be an
+  arbitrary expression.
+- The phase 1 `observe` operator set MUST include `==`, `!=`, `<`, `<=`, `>`,
+  and `>=`.
+- In phase 1, the right-hand side of `observe` MUST be limited to scalar
+  expression forms and MUST reject tuple, array, block, and range expressions.
+
 ## LLG-TYPE-01 Phase 1 Types
 
 - The parser MUST accept unit, named, tuple, fixed-array, and generic
@@ -172,6 +182,8 @@ properties that should be enforced structurally rather than by convention:
   range checks, length checks, and membership tests.
 - The proof phase MUST incorporate explicit `observe` statements into the fact
   model.
+- In phase 1, an `observe` fact MUST relate a named left-hand side symbol to a
+  scalar-valued right-hand side expression.
 
 ## LLG-REL-01 Collections And Relations
 

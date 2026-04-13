@@ -1,5 +1,6 @@
 use crate::ast::{
-    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, PatternKind, Stmt, TypeKind, UnaryOp,
+    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, ObserveOp, PatternKind, Stmt, TypeKind,
+    UnaryOp,
 };
 use crate::diagnostic::LabelStyle;
 use crate::lexer::lex;
@@ -46,6 +47,13 @@ fn expr_stmt(stmt: &Stmt) -> &Expr {
     match stmt {
         Stmt::Expr(stmt) => &stmt.expr,
         other => panic!("expected expression statement, got {other:?}"),
+    }
+}
+
+fn observe_stmt(stmt: &Stmt) -> &crate::ast::ObserveStmt {
+    match stmt {
+        Stmt::Observe(stmt) => stmt,
+        other => panic!("expected observe statement, got {other:?}"),
     }
 }
 
@@ -254,9 +262,9 @@ fn main() {
     total = total + 1;
     total;
     if true {
-        observe true;
+        observe total > 0;
     } else {
-        observe false;
+        observe total == 0;
     }
     match true {
         true => { total = 1; },
@@ -308,7 +316,7 @@ fn requirement_llg_syn_02_rejects_missing_semicolons() {
         r#"
 fn main() {
     1
-    observe true;
+    observe value == 1;
 }
 "#,
     );
@@ -936,6 +944,83 @@ fn main() {
     }
 }
 
+//= SPEC.md#llg-syn-06-observe-statements
+//= type=test
+//# `observe` statements MUST use the form `observe <name> <op> <expr>;`.
+#[test]
+fn requirement_llg_syn_06_parses_relational_observe_statements() {
+    let parsed = parse_ok("fn main(limit: u32) { observe limit <= limit + 1; }");
+    let observe = observe_stmt(&first_function(&parsed).body.statements[0]);
+
+    assert_eq!(observe.subject.value, "limit");
+    assert_eq!(observe.op, ObserveOp::LtEq);
+    assert!(matches!(
+        observe.value.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+}
+
+//= SPEC.md#llg-syn-06-observe-statements
+//= type=test
+//# The left-hand side of `observe` MUST be a bare name and MUST NOT be an arbitrary expression.
+#[test]
+fn requirement_llg_syn_06_rejects_non_name_left_hand_sides() {
+    let indexed_name =
+        parse_err("fn main(values: [u32; 4], limit: u32) { observe values[0] < limit; }");
+    let array_literal = parse_err("fn main(limit: u32) { observe [1, 2] < limit; }");
+
+    assert_diagnostic_contains(&indexed_name, "expected an `observe` comparison operator");
+    assert_diagnostic_contains(&array_literal, "expected a name after `observe`");
+}
+
+//= SPEC.md#llg-syn-06-observe-statements
+//= type=test
+//# The phase 1 `observe` operator set MUST include `==`, `!=`, `<`, `<=`, `>`, and `>=`.
+#[test]
+fn requirement_llg_syn_06_supports_the_phase_1_observe_operator_set() {
+    let parsed = parse_ok(
+        r#"
+fn main(value: u32, limit: u32) {
+    observe value == limit;
+    observe value != limit;
+    observe value < limit;
+    observe value <= limit;
+    observe value > limit;
+    observe value >= limit;
+}
+"#,
+    );
+    let statements = &first_function(&parsed).body.statements;
+
+    assert_eq!(observe_stmt(&statements[0]).op, ObserveOp::Eq);
+    assert_eq!(observe_stmt(&statements[1]).op, ObserveOp::NotEq);
+    assert_eq!(observe_stmt(&statements[2]).op, ObserveOp::Lt);
+    assert_eq!(observe_stmt(&statements[3]).op, ObserveOp::LtEq);
+    assert_eq!(observe_stmt(&statements[4]).op, ObserveOp::Gt);
+    assert_eq!(observe_stmt(&statements[5]).op, ObserveOp::GtEq);
+}
+
+//= SPEC.md#llg-syn-06-observe-statements
+//= type=test
+//# In phase 1, the right-hand side of `observe` MUST be limited to scalar expression forms and MUST reject tuple, array, block, and range expressions.
+#[test]
+fn requirement_llg_syn_06_rejects_non_scalar_phase_1_observe_values() {
+    let tuple_value = parse_err("fn main(value: u32) { observe value == (1, 2); }");
+    let array_value = parse_err("fn main(value: u32) { observe value == [1, 2]; }");
+    let block_value = parse_err("fn main(value: u32) { observe value == { 1 }; }");
+    let range_value = parse_err("fn main(value: u32) { observe value == 0 .. 4; }");
+
+    for parsed in [&tuple_value, &array_value, &block_value, &range_value] {
+        assert_diagnostic_contains(
+            parsed,
+            "phase 1 `observe` values must be scalar expressions",
+        );
+    }
+}
+
 //= SPEC.md#llg-type-01-phase-1-types
 //= type=test
 //# The parser MUST accept unit, named, tuple, fixed-array, and generic application type forms.
@@ -1199,7 +1284,7 @@ fn main() {
         r#"
 fn main() {
     let value = ;
-    observe true;
+    observe value == 1;
 }
 "#,
     );

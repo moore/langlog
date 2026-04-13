@@ -141,7 +141,19 @@ pub struct ReturnStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserveStmt {
     pub span: Span,
-    pub predicate: Expr,
+    pub subject: Spanned<String>,
+    pub op: ObserveOp,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserveOp {
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

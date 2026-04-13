@@ -1,7 +1,7 @@
 use crate::ast::{
     AssignStmt, BinaryOp, Block, ElseBranch, Expr, ExprKind, ExprStmt, ForStmt, Function,
-    GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveStmt, Param,
-    Pattern, PatternKind, ReturnStmt, Stmt, Type, TypeKind, UnaryOp,
+    GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp,
+    ObserveStmt, Param, Pattern, PatternKind, ReturnStmt, Stmt, Type, TypeKind, UnaryOp,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -480,11 +480,54 @@ impl<'a> Parser<'a> {
 
     fn parse_observe_statement(&mut self) -> Option<ObserveStmt> {
         let start = self.expect_tag(TokenTag::Observe, "expected `observe`")?;
-        let predicate = self.parse_expression(0)?;
+        let subject = self.expect_identifier("expected a name after `observe`")?;
+        let op = self.parse_observe_operator()?;
+        let value = self.parse_expression(0)?;
+        self.validate_observe_value(&value);
         let end = self.expect_tag(TokenTag::Semi, "expected `;` after `observe`")?;
         let span = start.span.cover(end.span).unwrap_or(start.span);
 
-        Some(ObserveStmt { span, predicate })
+        Some(ObserveStmt {
+            span,
+            subject,
+            op,
+            value,
+        })
+    }
+
+    fn parse_observe_operator(&mut self) -> Option<ObserveOp> {
+        let op = match self.current_tag() {
+            TokenTag::EqEq => ObserveOp::Eq,
+            TokenTag::BangEq => ObserveOp::NotEq,
+            TokenTag::Lt => ObserveOp::Lt,
+            TokenTag::LtEq => ObserveOp::LtEq,
+            TokenTag::Gt => ObserveOp::Gt,
+            TokenTag::GtEq => ObserveOp::GtEq,
+            _ => {
+                self.error_current(
+                    "expected an `observe` comparison operator",
+                    "expected `==`, `!=`, `<`, `<=`, `>`, or `>=` here",
+                );
+                return None;
+            }
+        };
+        self.bump();
+        Some(op)
+    }
+
+    fn validate_observe_value(&mut self, value: &Expr) {
+        if observe_value_is_phase1_scalar(value) {
+            return;
+        }
+
+        self.diagnostics.push(
+            Diagnostic::error("phase 1 `observe` values must be scalar expressions").with_label(
+                Label::primary(
+                    value.span,
+                    "tuple, array, block, and range expressions are not allowed here",
+                ),
+            ),
+        );
     }
 
     fn parse_pattern(&mut self) -> Option<Pattern> {
@@ -837,9 +880,31 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn observe_value_is_phase1_scalar(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Name(_) => true,
+        ExprKind::Tuple(_) | ExprKind::Array(_) | ExprKind::Block(_) => false,
+        ExprKind::Unary { expr, .. } | ExprKind::Grouped(expr) => {
+            observe_value_is_phase1_scalar(expr)
+        }
+        ExprKind::Binary { op, left, right } => {
+            !matches!(op, BinaryOp::Range)
+                && observe_value_is_phase1_scalar(left)
+                && observe_value_is_phase1_scalar(right)
+        }
+        ExprKind::Call { callee, args } => {
+            observe_value_is_phase1_scalar(callee)
+                && args.iter().all(observe_value_is_phase1_scalar)
+        }
+        ExprKind::Index { target, index } => {
+            observe_value_is_phase1_scalar(target) && observe_value_is_phase1_scalar(index)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::ast::{BinaryOp, ExprKind, Item, PatternKind, Stmt, TypeKind};
+    use crate::ast::{BinaryOp, ExprKind, Item, ObserveOp, PatternKind, Stmt, TypeKind};
     use crate::lexer::lex;
     use crate::parser::parse_lexed;
 
@@ -886,7 +951,14 @@ fn sum(values: [u32; 4]) -> u32 {
             }
             other => panic!("expected for statement, got {other:?}"),
         }
-        assert!(matches!(&function.body.statements[2], Stmt::Observe(_)));
+        match &function.body.statements[2] {
+            Stmt::Observe(stmt) => {
+                assert_eq!(stmt.subject.value, "total");
+                assert_eq!(stmt.op, ObserveOp::Lt);
+                assert!(matches!(stmt.value.kind, ExprKind::Int(100)));
+            }
+            other => panic!("expected observe statement, got {other:?}"),
+        }
         assert!(matches!(&function.body.statements[3], Stmt::Return(_)));
     }
 }

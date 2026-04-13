@@ -162,8 +162,18 @@ return;
 observe total <= 1000;
 ```
 
-`observe` records an explicit fact in the source program. The parser accepts it
-now. Its proof behavior will be implemented later.
+`observe` records an explicit fact in the source program.
+
+Rules:
+
+- Phase 1 `observe` uses the form `observe <name> <op> <expr>;`.
+- The left-hand side must be a bare name.
+- The supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`.
+- The right-hand side is limited to scalar expression forms in phase 1.
+- Tuple, array, block, and range expressions are rejected on the right-hand
+  side in phase 1.
+- The parser accepts `observe` now. Its proof behavior will be implemented
+  later.
 
 ## Patterns
 

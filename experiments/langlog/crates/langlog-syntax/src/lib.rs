@@ -7,7 +7,7 @@ mod requirement_tests;
 pub mod span;
 pub mod token;
 
-pub use ast::{Block, Expr, ExprKind, Function, Item, Module, Stmt, Type, TypeKind};
+pub use ast::{Block, Expr, ExprKind, Function, Item, Module, ObserveOp, Stmt, Type, TypeKind};
 pub use diagnostic::{Diagnostic, Label, LabelStyle, Severity};
 pub use lexer::{lex, lex_source, LexedSource};
 pub use parser::{parse_lexed, ParsedModule};

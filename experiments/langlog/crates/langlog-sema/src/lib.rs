@@ -220,7 +220,8 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Stmt::Observe(stmt) => {
-                self.analyze_expr(&stmt.predicate, scopes, function);
+                self.resolve_name(stmt.subject.value.as_str(), stmt.subject.span, scopes);
+                self.analyze_expr(&stmt.value, scopes, function);
             }
         }
     }
