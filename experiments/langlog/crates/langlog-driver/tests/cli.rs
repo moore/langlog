@@ -103,3 +103,23 @@ fn main() {
     assert!(failure_stderr.contains(&broken.path.display().to_string()));
     assert!(failure_stderr.contains("missing;"));
 }
+
+#[test]
+fn check_reports_proof_failures_to_stderr() {
+    let broken = TempSource::new(
+        r#"
+fn main(total: u32, denom: u32) {
+    total / denom;
+}
+"#,
+    );
+    let failure = run_check(&broken.path);
+
+    assert!(!failure.status.success());
+    let failure_stdout = String::from_utf8(failure.stdout).unwrap();
+    let failure_stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(failure_stdout.is_empty());
+    assert!(failure_stderr.contains("error: possible divide-by-zero is not proven safe"));
+    assert!(failure_stderr.contains(&broken.path.display().to_string()));
+    assert!(failure_stderr.contains("total / denom;"));
+}

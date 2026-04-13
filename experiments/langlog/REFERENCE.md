@@ -174,8 +174,9 @@ Rules:
   side in phase 1.
 - The proof phase currently records relational facts from explicit `observe`
   statements and simple comparison-based `if` conditions.
-- Discharging proof obligations from those facts is still ahead of the current
-  implementation.
+- The proof phase currently rejects division or remainder operations that are
+  not proven non-zero, and indexing expressions that are not proven in bounds.
+- Arithmetic overflow checking is still ahead of the current implementation.
 
 ## Patterns
 

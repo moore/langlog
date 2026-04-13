@@ -114,7 +114,9 @@ Today:
 - the proof phase now records relational facts from explicit `observe`
   statements
 - the proof phase also records simple comparison facts from `if` conditions
-- it does not yet discharge overflow, divide-by-zero, or bounds obligations
+- the proof phase now rejects division or remainder by zero and out-of-bounds
+  indexing when safety is not proven
+- arithmetic overflow checking is still ahead of the current implementation
 
 Later, `observe` will help discharge obligations such as overflow safety and
 bounds safety.

@@ -1,6 +1,6 @@
 use langlog_proof::{check, CheckedProof, FactSource};
 use langlog_sema::{analyze, CheckedProgram};
-use langlog_syntax::{parse, ObserveOp};
+use langlog_syntax::{parse, LabelStyle, ObserveOp};
 
 fn check_ok(source: &str) -> (CheckedProgram, CheckedProof) {
     let parsed = parse("requirement.llg", source);
@@ -11,6 +11,19 @@ fn check_ok(source: &str) -> (CheckedProgram, CheckedProof) {
 
     let proof = check(&checked);
     assert!(!proof.has_errors(), "{:#?}", proof.diagnostics);
+
+    (checked, proof)
+}
+
+fn check_err(source: &str) -> (CheckedProgram, CheckedProof) {
+    let parsed = parse("requirement.llg", source);
+    assert!(!parsed.has_errors(), "{:#?}", parsed.diagnostics);
+
+    let checked = analyze(parsed);
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let proof = check(&checked);
+    assert!(proof.has_errors(), "{:#?}", proof.diagnostics);
 
     (checked, proof)
 }
@@ -34,6 +47,21 @@ fn assert_fact(
         "missing fact {expected_source:?} {expected_subject} {expected_op:?} {expected_value:?}: {:#?}",
         proof.facts
     );
+}
+
+fn assert_primary_diagnostic(
+    checked: &CheckedProgram,
+    proof: &CheckedProof,
+    message: &str,
+    expected_span_text: &str,
+) {
+    assert!(proof.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == message
+            && diagnostic.labels.iter().any(|label| {
+                label.style == LabelStyle::Primary
+                    && checked.parsed.source.span_text(label.span) == Some(expected_span_text)
+            })
+    }));
 }
 
 //= SPEC.md#llg-proof-02-observations
@@ -148,4 +176,113 @@ fn main(total: u32, limit: u32, one: u32) {
 
     // This example introduces exactly one phase 1 observe relation.
     assert_eq!(proof.observations, 1);
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# The proof phase MUST reject division or remainder operations that may divide by zero unless safety is proven.
+#[test]
+fn requirement_llg_proof_01_rejects_possible_divide_by_zero_without_proof() {
+    let (checked, failing_proof) = check_err(
+        r#"
+fn main(total: u32, denom: u32) {
+    total / denom;
+    total % denom;
+}
+"#,
+    );
+
+    // Reject an unproven divisor in a division operation.
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible divide-by-zero is not proven safe",
+        "denom",
+    );
+
+    // Reject an unproven divisor in a remainder operation too.
+    assert_eq!(failing_proof.diagnostics.len(), 2);
+
+    let (_, observed_safe) = check_ok(
+        r#"
+fn main(total: u32, denom: u32) {
+    observe denom != 0;
+    total / denom;
+}
+"#,
+    );
+
+    // An explicit non-zero observe should discharge the obligation.
+    assert_eq!(observed_safe.obligations, 1);
+
+    let (_, control_flow_safe) = check_ok(
+        r#"
+fn main(total: u32, denom: u32) {
+    if denom > 0 {
+        total % denom;
+    }
+}
+"#,
+    );
+
+    // A control-flow comparison should also discharge the obligation in the guarded block.
+    assert_eq!(control_flow_safe.obligations, 1);
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# The proof phase MUST reject indexing that may go out of bounds unless safety is proven.
+#[test]
+fn requirement_llg_proof_01_rejects_possible_out_of_bounds_indexing_without_proof() {
+    let (checked, failing_proof) = check_err(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    values[index];
+}
+"#,
+    );
+
+    // Reject an index whose upper bound is not proven.
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+
+    let (_, literal_safe) = check_ok(
+        r#"
+fn main() {
+    [10, 20, 30][2];
+}
+"#,
+    );
+
+    // A constant in-bounds index against an array literal should be accepted.
+    assert_eq!(literal_safe.obligations, 1);
+
+    let (_, observed_safe) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    observe index < 4;
+    values[index];
+}
+"#,
+    );
+
+    // An explicit upper-bound observe should discharge the indexing obligation.
+    assert_eq!(observed_safe.obligations, 1);
+
+    let (_, control_flow_safe) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        values[index];
+    }
+}
+"#,
+    );
+
+    // A control-flow bound check should discharge the indexing obligation in the guarded block.
+    assert_eq!(control_flow_safe.obligations, 1);
 }
