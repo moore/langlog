@@ -28,6 +28,13 @@ fn name_span(expr: &Expr) -> Span {
     }
 }
 
+fn call_callee(expr: &Expr) -> &Expr {
+    match &expr.kind {
+        ExprKind::Call { callee, .. } => callee,
+        other => panic!("expected call expression, got {other:?}"),
+    }
+}
+
 fn let_stmt(block: &Block, index: usize) -> &LetStmt {
     match &block.statements[index] {
         Stmt::Let(stmt) => stmt,
@@ -77,6 +84,16 @@ fn assert_undefined_name(checked: &CheckedProgram, expr: &Expr, name: &str) {
     );
     assert!(checked.diagnostics.iter().any(|diagnostic| {
         diagnostic.message == format!("undefined binding `{name}`")
+            && diagnostic
+                .labels
+                .iter()
+                .any(|label| label.style == LabelStyle::Primary && label.span == span)
+    }));
+}
+
+fn assert_primary_diagnostic(checked: &CheckedProgram, message: &str, span: Span) {
+    assert!(checked.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == message
             && diagnostic
                 .labels
                 .iter()
@@ -205,4 +222,40 @@ fn main() {
 
     // The initializer `other` should also be reported as undefined.
     assert_undefined_name(&checked, other_expr, "other");
+}
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# The semantic phase MUST reject direct recursion.
+#[test]
+fn requirement_llg_sema_02_rejects_direct_recursion() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    main(); // direct recursive call
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+    let recursive_call = expr_stmt(&main.body, 0);
+    let recursive_callee = call_callee(recursive_call);
+
+    // The call target still resolves to the current function item.
+    assert_resolves_to(
+        &checked,
+        recursive_callee,
+        BindingKind::Item,
+        main.name.span,
+        "recursive call callee",
+    );
+
+    // The self-call should be rejected with a direct-recursion diagnostic.
+    assert_eq!(checked.diagnostics.len(), 1);
+    assert_primary_diagnostic(
+        &checked,
+        "direct recursion is not allowed for `main`",
+        recursive_callee.span,
+    );
 }

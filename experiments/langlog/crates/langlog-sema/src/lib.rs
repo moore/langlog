@@ -111,25 +111,30 @@ impl<'a> Analyzer<'a> {
             );
         }
 
-        self.analyze_block(&function.body, &mut scopes);
+        self.analyze_block(&function.body, &mut scopes, function);
     }
 
-    fn analyze_block(&mut self, block: &Block, scopes: &mut ScopeStack) {
+    fn analyze_block(&mut self, block: &Block, scopes: &mut ScopeStack, function: &Function) {
         scopes.push();
         for statement in &block.statements {
-            self.analyze_statement(statement, scopes);
+            self.analyze_statement(statement, scopes, function);
         }
         if let Some(expr) = &block.trailing_expr {
-            self.analyze_expr(expr, scopes);
+            self.analyze_expr(expr, scopes, function);
         }
         scopes.pop();
     }
 
-    fn analyze_statement(&mut self, statement: &Stmt, scopes: &mut ScopeStack) {
+    fn analyze_statement(
+        &mut self,
+        statement: &Stmt,
+        scopes: &mut ScopeStack,
+        function: &Function,
+    ) {
         match statement {
             Stmt::Let(stmt) => {
                 if let Some(value) = &stmt.value {
-                    self.analyze_expr(value, scopes);
+                    self.analyze_expr(value, scopes, function);
                 }
                 scopes.insert(
                     stmt.name.value.clone(),
@@ -140,47 +145,53 @@ impl<'a> Analyzer<'a> {
                 );
             }
             Stmt::Assign(stmt) => {
-                self.analyze_expr(&stmt.target, scopes);
-                self.analyze_expr(&stmt.value, scopes);
+                self.analyze_expr(&stmt.target, scopes, function);
+                self.analyze_expr(&stmt.value, scopes, function);
             }
-            Stmt::Expr(stmt) => self.analyze_expr(&stmt.expr, scopes),
+            Stmt::Expr(stmt) => {
+                self.analyze_expr(&stmt.expr, scopes, function);
+            }
             Stmt::If(stmt) => {
-                self.analyze_expr(&stmt.condition, scopes);
-                self.analyze_block(&stmt.then_block, scopes);
+                self.analyze_expr(&stmt.condition, scopes, function);
+                self.analyze_block(&stmt.then_block, scopes, function);
                 if let Some(else_branch) = &stmt.else_branch {
                     match else_branch {
-                        ElseBranch::Block(block) => self.analyze_block(block, scopes),
+                        ElseBranch::Block(block) => self.analyze_block(block, scopes, function),
                         ElseBranch::If(stmt) => {
-                            self.analyze_statement(&Stmt::If(*stmt.clone()), scopes)
+                            self.analyze_statement(&Stmt::If(*stmt.clone()), scopes, function)
                         }
                     }
                 }
             }
             Stmt::Match(stmt) => {
-                self.analyze_expr(&stmt.expr, scopes);
+                self.analyze_expr(&stmt.expr, scopes, function);
                 for arm in &stmt.arms {
                     scopes.push();
                     self.bind_pattern(&arm.pattern, scopes);
                     match &arm.body {
-                        MatchBody::Block(block) => self.analyze_block(block, scopes),
-                        MatchBody::Expr(expr) => self.analyze_expr(expr, scopes),
+                        MatchBody::Block(block) => self.analyze_block(block, scopes, function),
+                        MatchBody::Expr(expr) => {
+                            self.analyze_expr(expr, scopes, function);
+                        }
                     }
                     scopes.pop();
                 }
             }
             Stmt::For(stmt) => {
-                self.analyze_expr(&stmt.iterable, scopes);
+                self.analyze_expr(&stmt.iterable, scopes, function);
                 scopes.push();
                 self.bind_pattern(&stmt.binding, scopes);
-                self.analyze_block(&stmt.body, scopes);
+                self.analyze_block(&stmt.body, scopes, function);
                 scopes.pop();
             }
             Stmt::Return(stmt) => {
                 if let Some(value) = &stmt.value {
-                    self.analyze_expr(value, scopes);
+                    self.analyze_expr(value, scopes, function);
                 }
             }
-            Stmt::Observe(stmt) => self.analyze_expr(&stmt.predicate, scopes),
+            Stmt::Observe(stmt) => {
+                self.analyze_expr(&stmt.predicate, scopes, function);
+            }
         }
     }
 
@@ -196,37 +207,58 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn analyze_expr(&mut self, expr: &Expr, scopes: &mut ScopeStack) {
+    fn analyze_expr(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut ScopeStack,
+        function: &Function,
+    ) -> Option<Binding> {
         match &expr.kind {
-            ExprKind::Int(_) | ExprKind::Bool(_) => {}
+            ExprKind::Int(_) | ExprKind::Bool(_) => None,
             ExprKind::Name(name) => self.resolve_name(name.value.as_str(), name.span, scopes),
             ExprKind::Tuple(elements) | ExprKind::Array(elements) => {
                 for element in elements {
-                    self.analyze_expr(element, scopes);
+                    self.analyze_expr(element, scopes, function);
                 }
+                None
             }
-            ExprKind::Block(block) => self.analyze_block(block, scopes),
+            ExprKind::Block(block) => {
+                self.analyze_block(block, scopes, function);
+                None
+            }
             ExprKind::Unary { expr, .. } | ExprKind::Grouped(expr) => {
-                self.analyze_expr(expr, scopes)
+                self.analyze_expr(expr, scopes, function)
             }
             ExprKind::Binary { left, right, .. } => {
-                self.analyze_expr(left, scopes);
-                self.analyze_expr(right, scopes);
+                self.analyze_expr(left, scopes, function);
+                self.analyze_expr(right, scopes, function);
+                None
             }
             ExprKind::Call { callee, args } => {
-                self.analyze_expr(callee, scopes);
-                for arg in args {
-                    self.analyze_expr(arg, scopes);
+                let callee_binding = self.analyze_expr(callee, scopes, function);
+                if matches!(
+                    callee_binding,
+                    Some(Binding {
+                        kind: BindingKind::Item,
+                        span
+                    }) if span == function.name.span
+                ) {
+                    self.report_direct_recursion(function, callee.span);
                 }
+                for arg in args {
+                    self.analyze_expr(arg, scopes, function);
+                }
+                None
             }
             ExprKind::Index { target, index } => {
-                self.analyze_expr(target, scopes);
-                self.analyze_expr(index, scopes);
+                self.analyze_expr(target, scopes, function);
+                self.analyze_expr(index, scopes, function);
+                None
             }
         }
     }
 
-    fn resolve_name(&mut self, name: &str, use_span: Span, scopes: &ScopeStack) {
+    fn resolve_name(&mut self, name: &str, use_span: Span, scopes: &ScopeStack) -> Option<Binding> {
         if let Some(binding) = scopes
             .lookup(name)
             .or_else(|| self.items.get(name).copied())
@@ -237,12 +269,27 @@ impl<'a> Analyzer<'a> {
                 kind: binding.kind,
                 name: name.to_owned(),
             });
-            return;
+            return Some(binding);
         }
 
         self.diagnostics.push(
             Diagnostic::error(format!("undefined binding `{name}`"))
                 .with_label(Label::primary(use_span, "not found in this scope")),
+        );
+        None
+    }
+
+    fn report_direct_recursion(&mut self, function: &Function, call_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "direct recursion is not allowed for `{}`",
+                function.name.value
+            ))
+            .with_label(Label::primary(call_span, "recursive call occurs here"))
+            .with_label(Label::secondary(
+                function.name.span,
+                "recursive function declared here",
+            )),
         );
     }
 }
