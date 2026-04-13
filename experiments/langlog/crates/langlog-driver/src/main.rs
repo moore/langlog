@@ -36,6 +36,11 @@ fn run_check(path: PathBuf) -> ExitCode {
     }
 
     let checked = langlog_sema::analyze(parsed);
+    if checked.has_errors() {
+        emit_diagnostics(&checked.parsed.source, &checked.diagnostics);
+        return ExitCode::from(1);
+    }
+
     let proof = langlog_proof::check(&checked);
 
     println!(

@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,7 +30,7 @@ impl Drop for TempSource {
     }
 }
 
-fn run_check(path: &PathBuf) -> std::process::Output {
+fn run_check(path: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_langlog"))
         .args(["check", &path.display().to_string()])
         .output()
@@ -82,4 +82,24 @@ fn requirement_llg_cli_02_does_not_write_success_and_error_output_to_the_wrong_s
 
     assert!(success_stderr.is_empty());
     assert!(failure_stdout.is_empty());
+}
+
+#[test]
+fn check_reports_semantic_failures_to_stderr() {
+    let broken = TempSource::new(
+        r#"
+fn main() {
+    missing;
+}
+"#,
+    );
+    let failure = run_check(&broken.path);
+
+    assert!(!failure.status.success());
+    let failure_stdout = String::from_utf8(failure.stdout).unwrap();
+    let failure_stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(failure_stdout.is_empty());
+    assert!(failure_stderr.contains("error: undefined binding `missing`"));
+    assert!(failure_stderr.contains(&broken.path.display().to_string()));
+    assert!(failure_stderr.contains("missing;"));
 }
