@@ -16,6 +16,7 @@ name = "langlog-proof"
 version = "0.1.0"
 dependencies = [
  "langlog-sema",
+ "langlog-syntax",
 ]
 
 [[package]]

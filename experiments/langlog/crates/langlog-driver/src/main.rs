@@ -42,6 +42,10 @@ fn run_check(path: PathBuf) -> ExitCode {
     }
 
     let proof = langlog_proof::check(&checked);
+    if proof.has_errors() {
+        emit_diagnostics(&checked.parsed.source, &proof.diagnostics);
+        return ExitCode::from(1);
+    }
 
     println!(
         "checked {} item(s) in {} (obligations: {}, observations: {})",
@@ -232,7 +236,7 @@ mod tests {
         assert!(rendered.contains("fn main( {"));
         assert!(rendered.contains("^"));
 
-        let source = SourceFile::new("diagnostic.llg", "observe count;\n");
+        let source = SourceFile::new("diagnostic.llg", "observe count <= limit;\n");
         let span = source.span(8, 13);
         let diagnostic = Diagnostic::error("example error")
             .with_label(Label::primary(span, "spans the whole name"));

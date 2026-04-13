@@ -111,7 +111,10 @@ Today:
 - tuple, array, block, and range expressions are rejected on the right-hand
   side in phase 1
 - it appears in the AST
-- it does not yet drive proof checking
+- the proof phase now records relational facts from explicit `observe`
+  statements
+- the proof phase also records simple comparison facts from `if` conditions
+- it does not yet discharge overflow, divide-by-zero, or bounds obligations
 
 Later, `observe` will help discharge obligations such as overflow safety and
 bounds safety.

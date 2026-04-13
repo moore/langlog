@@ -172,8 +172,10 @@ Rules:
 - The right-hand side is limited to scalar expression forms in phase 1.
 - Tuple, array, block, and range expressions are rejected on the right-hand
   side in phase 1.
-- The parser accepts `observe` now. Its proof behavior will be implemented
-  later.
+- The proof phase currently records relational facts from explicit `observe`
+  statements and simple comparison-based `if` conditions.
+- Discharging proof obligations from those facts is still ahead of the current
+  implementation.
 
 ## Patterns
 

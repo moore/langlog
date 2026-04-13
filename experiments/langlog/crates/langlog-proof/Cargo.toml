@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 langlog-sema = { path = "../langlog-sema" }
+langlog-syntax = { path = "../langlog-syntax" }
 
 [lib]
 path = "src/lib.rs"
