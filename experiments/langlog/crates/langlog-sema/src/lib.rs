@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
     Block, ElseBranch, Expr, ExprKind, Function, Item, MatchBody, Pattern, PatternKind, Stmt,
@@ -16,6 +16,20 @@ pub enum BindingKind {
 struct Binding {
     kind: BindingKind,
     span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallEdge {
+    caller_name: String,
+    callee_name: String,
+    callee_span: Span,
+    call_span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisitState {
+    Visiting,
+    Visited,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +81,7 @@ struct Analyzer<'a> {
     items: HashMap<String, Binding>,
     diagnostics: Vec<Diagnostic>,
     resolutions: Vec<ResolvedName>,
+    call_edges: Vec<CallEdge>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -76,6 +91,7 @@ impl<'a> Analyzer<'a> {
             items: HashMap::new(),
             diagnostics: Vec::new(),
             resolutions: Vec::new(),
+            call_edges: Vec::new(),
         }
     }
 
@@ -96,6 +112,8 @@ impl<'a> Analyzer<'a> {
             let Item::Function(function) = item;
             self.analyze_function(function);
         }
+
+        self.detect_indirect_recursion();
     }
 
     fn analyze_function(&mut self, function: &Function) {
@@ -245,6 +263,24 @@ impl<'a> Analyzer<'a> {
                 ) {
                     self.report_direct_recursion(function, callee.span);
                 }
+                if let Some(Binding {
+                    kind: BindingKind::Item,
+                    ..
+                }) = callee_binding
+                {
+                    let callee_name = self
+                        .resolutions
+                        .iter()
+                        .find(|resolution| resolution.use_span == name_span(callee))
+                        .map(|resolution| resolution.name.clone())
+                        .expect("resolved item call should have a recorded name resolution");
+                    self.call_edges.push(CallEdge {
+                        caller_name: function.name.value.clone(),
+                        callee_name,
+                        callee_span: callee.span,
+                        call_span: callee.span,
+                    });
+                }
                 for arg in args {
                     self.analyze_expr(arg, scopes, function);
                 }
@@ -291,6 +327,93 @@ impl<'a> Analyzer<'a> {
                 "recursive function declared here",
             )),
         );
+    }
+
+    fn detect_indirect_recursion(&mut self) {
+        let mut adjacency: HashMap<String, Vec<CallEdge>> = HashMap::new();
+        for edge in &self.call_edges {
+            if edge.caller_name != edge.callee_name {
+                adjacency
+                    .entry(edge.caller_name.clone())
+                    .or_default()
+                    .push(edge.clone());
+            }
+        }
+
+        let mut states = HashMap::new();
+        let mut stack = Vec::new();
+        let mut reported_edges = HashSet::new();
+        let mut function_names: Vec<_> = self.items.keys().cloned().collect();
+        function_names.sort();
+        for function_name in function_names {
+            self.visit_call_graph(
+                &function_name,
+                &adjacency,
+                &mut states,
+                &mut stack,
+                &mut reported_edges,
+            );
+        }
+    }
+
+    fn visit_call_graph(
+        &mut self,
+        function_name: &str,
+        adjacency: &HashMap<String, Vec<CallEdge>>,
+        states: &mut HashMap<String, VisitState>,
+        stack: &mut Vec<String>,
+        reported_edges: &mut HashSet<Span>,
+    ) {
+        match states.get(function_name) {
+            Some(VisitState::Visiting | VisitState::Visited) => return,
+            None => {}
+        }
+
+        states.insert(function_name.to_owned(), VisitState::Visiting);
+        stack.push(function_name.to_owned());
+
+        if let Some(edges) = adjacency.get(function_name) {
+            for edge in edges {
+                if stack.contains(&edge.callee_name) {
+                    if reported_edges.insert(edge.call_span) {
+                        self.report_indirect_recursion(edge, stack);
+                    }
+                    continue;
+                }
+
+                self.visit_call_graph(&edge.callee_name, adjacency, states, stack, reported_edges);
+            }
+        }
+
+        stack.pop();
+        states.insert(function_name.to_owned(), VisitState::Visited);
+    }
+
+    fn report_indirect_recursion(&mut self, edge: &CallEdge, stack: &[String]) {
+        let cycle_start = stack
+            .iter()
+            .position(|function_name| function_name == &edge.callee_name)
+            .expect("callee should appear in the active DFS stack");
+        let mut cycle: Vec<&str> = stack[cycle_start..].iter().map(String::as_str).collect();
+        cycle.push(edge.callee_name.as_str());
+        let cycle_text = cycle.join(" -> ");
+
+        self.diagnostics.push(
+            Diagnostic::error(format!("indirect recursion is not allowed: {cycle_text}"))
+                .with_label(Label::primary(edge.call_span, "cycle closes here"))
+                .with_label(Label::secondary(
+                    edge.callee_span,
+                    "cycle re-enters this function",
+                )),
+        );
+    }
+}
+
+fn name_span(expr: &Expr) -> Span {
+    match &expr.kind {
+        ExprKind::Name(name) => name.span,
+        ExprKind::Grouped(expr) => name_span(expr),
+        other => panic!("expected name-like callee expression, got {other:?}"),
     }
 }
 

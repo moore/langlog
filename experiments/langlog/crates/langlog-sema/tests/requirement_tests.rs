@@ -259,3 +259,74 @@ fn main() {
         recursive_callee.span,
     );
 }
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# The semantic phase MUST reject indirect recursion.
+#[test]
+fn requirement_llg_sema_02_rejects_indirect_recursion() {
+    let checked = analyze_ok(
+        r#"
+fn alpha() {
+    beta(); // depth 1
+}
+
+fn beta() {
+    gamma(); // depth 2
+}
+
+fn gamma() {
+    delta(); // depth 3
+}
+
+fn delta() {
+    alpha(); // closes the cycle after multiple calls
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let alpha = function(&checked, "alpha");
+    let beta = function(&checked, "beta");
+    let gamma = function(&checked, "gamma");
+    let delta = function(&checked, "delta");
+
+    // Each call target should still resolve as a top-level function item.
+    assert_resolves_to(
+        &checked,
+        call_callee(expr_stmt(&alpha.body, 0)),
+        BindingKind::Item,
+        beta.name.span,
+        "alpha calling beta",
+    );
+    assert_resolves_to(
+        &checked,
+        call_callee(expr_stmt(&beta.body, 0)),
+        BindingKind::Item,
+        gamma.name.span,
+        "beta calling gamma",
+    );
+    assert_resolves_to(
+        &checked,
+        call_callee(expr_stmt(&gamma.body, 0)),
+        BindingKind::Item,
+        delta.name.span,
+        "gamma calling delta",
+    );
+    let closing_callee = call_callee(expr_stmt(&delta.body, 0));
+    assert_resolves_to(
+        &checked,
+        closing_callee,
+        BindingKind::Item,
+        alpha.name.span,
+        "delta calling alpha",
+    );
+
+    // The closing edge should be rejected as indirect recursion, regardless of path depth.
+    assert_eq!(checked.diagnostics.len(), 1);
+    assert_primary_diagnostic(
+        &checked,
+        "indirect recursion is not allowed: alpha -> beta -> gamma -> delta -> alpha",
+        closing_callee.span,
+    );
+}
