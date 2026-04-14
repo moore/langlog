@@ -178,6 +178,18 @@ properties that should be enforced structurally rather than by convention:
 - In phase 1, the semantic phase MUST reject `observe` proof expressions that
   directly reference mutable bindings.
 
+## LLG-SEMA-04 Initial Type Checking
+
+- The semantic phase MUST reject `let` annotations, assignments, returns, and
+  call arguments whose types do not match declared annotations or function
+  signatures.
+- The semantic phase MUST require `if` conditions and logical operators to use
+  `bool`.
+- The semantic phase MUST require arithmetic operators, ordering comparisons,
+  and range bounds to use `u32`.
+- The semantic phase MUST require array literals to have a homogeneous element
+  type, and MUST require indexing to use an array target plus a `u32` index.
+
 ## LLG-PROOF-01 Proof-Required Operations
 
 - The proof phase MUST reject arithmetic that may overflow unless safety is

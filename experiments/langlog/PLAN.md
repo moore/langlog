@@ -8,13 +8,19 @@ allocation.
 
 ## Current Status
 
-- Current phase: `M2 HIR plus semantic checks`
+- Current phase: `M2 semantic typing plus early proof checks`
 - Last completed milestone: `M1 Lexer and parser to AST`
-- Next concrete task: Define the HIR surface and lower the current AST into it,
-  starting with function signatures, blocks, and expression forms already
-  supported by `langlog-syntax`.
+- Next concrete task: Extend the new initial type checker across tuples,
+  `Option`, `Result`, `Set`, and `Map`, then use typed expressions to add
+  overflow obligations to the proof phase.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
+- Implemented semantic baseline: name resolution, recursion rejection, bounded
+  loop enforcement, mutability checks, guarded `observe`, and an initial type
+  checker for scalar operators, calls, arrays, indexing, assignments, and
+  returns are all in place.
+- Implemented proof baseline: control-flow and `observe` facts already drive
+  divide-by-zero and out-of-bounds indexing checks.
 - Project task runner: use `./tasks.sh` in `experiments/langlog/` to run the
   default fast checks in one place. Mutation testing is intentionally excluded
   from `./tasks.sh`; run `cargo mutants` manually when you explicitly want that
@@ -51,9 +57,10 @@ into AST and report parse errors with precise spans.
 ### M2 HIR plus semantic checks
 
 - [ ] Lower AST into a typed HIR.
-- [ ] Implement name resolution and scope handling.
-- [ ] Add the initial type checker for scalars, tuples, arrays, `Option`,
-  `Result`, `Set`, and `Map`.
+- [x] Implement name resolution and scope handling.
+- [x] Add the initial type checker for scalar operators, calls, arrays,
+  indexing, assignments, and returns.
+- [ ] Extend type checking across tuples, `Option`, `Result`, `Set`, and `Map`.
 - [x] Reject recursion.
 - [x] Reject unbounded loop forms and keep iteration syntax bounded.
 
@@ -63,12 +70,12 @@ rejected, and unbounded loop forms are rejected.
 ### M3 Proof engine for obligations and observations
 
 - [ ] Define a control-flow-based proof IR from HIR.
-- [ ] Represent obligations for overflow, divide/mod by zero, and out-of-bounds
-  indexing.
+- [x] Represent obligations for divide/mod by zero and out-of-bounds indexing.
+- [ ] Add overflow obligations.
 - [x] Infer facts from control flow, comparisons, length checks, and membership
   tests.
 - [x] Support explicit `observe` facts when inference is insufficient.
-- [ ] Emit proof diagnostics when obligations are not discharged.
+- [x] Emit proof diagnostics when obligations are not discharged.
 
 Exit criteria: the checker can accept or reject arithmetic and indexing based on
 inferred or explicit facts.

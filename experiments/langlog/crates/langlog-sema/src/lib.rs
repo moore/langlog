@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
-    Block, ElseBranch, Expr, ExprKind, Function, Item, MatchBody, Pattern, PatternKind, Stmt,
+    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MatchBody, ObserveOp,
+    Pattern, PatternKind, Stmt, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span};
 
@@ -64,17 +65,96 @@ impl CheckedProgram {
 }
 
 pub fn analyze(parsed: ParsedModule) -> CheckedProgram {
-    let (diagnostics, resolutions) = {
+    let (mut diagnostics, resolutions) = {
         let mut analyzer = Analyzer::new(&parsed);
         analyzer.collect_items();
         analyzer.analyze_module();
         (analyzer.diagnostics, analyzer.resolutions)
     };
 
+    let mut type_checker = TypeChecker::new(&parsed);
+    type_checker.check_module();
+    diagnostics.extend(type_checker.diagnostics);
+
     CheckedProgram {
         parsed,
         diagnostics,
         resolutions,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SemanticType {
+    Unit,
+    Bool,
+    U32,
+    Tuple(Vec<SemanticType>),
+    Array {
+        element: Box<SemanticType>,
+        length: u64,
+    },
+    Option(Box<SemanticType>),
+    Result {
+        ok: Box<SemanticType>,
+        err: Box<SemanticType>,
+    },
+    Set {
+        element: Box<SemanticType>,
+        capacity: u64,
+    },
+    Map {
+        key: Box<SemanticType>,
+        value: Box<SemanticType>,
+        capacity: u64,
+    },
+    Range(Box<SemanticType>),
+    Named(String),
+    Function(FunctionType),
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionType {
+    params: Vec<SemanticType>,
+    return_type: Box<SemanticType>,
+}
+
+impl SemanticType {
+    fn describe(&self) -> String {
+        match self {
+            Self::Unit => "()".to_owned(),
+            Self::Bool => "bool".to_owned(),
+            Self::U32 => "u32".to_owned(),
+            Self::Tuple(elements) => format!(
+                "({})",
+                elements
+                    .iter()
+                    .map(SemanticType::describe)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Array { element, length } => format!("[{}; {length}]", element.describe()),
+            Self::Option(inner) => format!("Option<{}>", inner.describe()),
+            Self::Result { ok, err } => format!("Result<{}, {}>", ok.describe(), err.describe()),
+            Self::Set { element, capacity } => format!("Set<{}, {capacity}>", element.describe()),
+            Self::Map {
+                key,
+                value,
+                capacity,
+            } => format!("Map<{}, {}, {capacity}>", key.describe(), value.describe()),
+            Self::Range(inner) => format!("range<{}>", inner.describe()),
+            Self::Named(name) => name.clone(),
+            Self::Function(_) => "function".to_owned(),
+            Self::Unknown => "<unknown>".to_owned(),
+        }
+    }
+
+    fn is_bool(&self) -> bool {
+        matches!(self, Self::Bool)
+    }
+
+    fn is_u32(&self) -> bool {
+        matches!(self, Self::U32)
     }
 }
 
@@ -544,11 +624,538 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+struct TypeChecker<'a> {
+    parsed: &'a ParsedModule,
+    diagnostics: Vec<Diagnostic>,
+    item_signatures: HashMap<String, FunctionType>,
+}
+
+impl<'a> TypeChecker<'a> {
+    fn new(parsed: &'a ParsedModule) -> Self {
+        let item_signatures = parsed
+            .module
+            .items
+            .iter()
+            .map(|item| {
+                let Item::Function(function) = item;
+                (function.name.value.clone(), function_signature(function))
+            })
+            .collect();
+
+        Self {
+            parsed,
+            diagnostics: Vec::new(),
+            item_signatures,
+        }
+    }
+
+    fn check_module(&mut self) {
+        for item in &self.parsed.module.items {
+            let Item::Function(function) = item;
+            self.check_function(function);
+        }
+    }
+
+    fn check_function(&mut self, function: &Function) {
+        let mut scopes = TypeScopeStack::default();
+        scopes.push();
+        for param in &function.params {
+            scopes.insert(param.name.value.clone(), lower_type(&param.ty));
+        }
+
+        let expected_return = function
+            .return_type
+            .as_ref()
+            .map(lower_type)
+            .unwrap_or(SemanticType::Unit);
+        let body_type = self.check_block(&function.body, &mut scopes, &expected_return);
+
+        if let Some(expr) = &function.body.trailing_expr {
+            self.require_same_type(expr.span, &expected_return, &body_type);
+        } else if !is_terminal_block(&function.body) {
+            self.require_same_type(function.body.span, &expected_return, &SemanticType::Unit);
+        }
+
+        scopes.pop();
+    }
+
+    fn check_block(
+        &mut self,
+        block: &Block,
+        scopes: &mut TypeScopeStack,
+        expected_return: &SemanticType,
+    ) -> SemanticType {
+        scopes.push();
+        for statement in &block.statements {
+            self.check_statement(statement, scopes, expected_return);
+        }
+        let result = block
+            .trailing_expr
+            .as_deref()
+            .map(|expr| self.check_expr(expr, scopes))
+            .unwrap_or(SemanticType::Unit);
+        scopes.pop();
+        result
+    }
+
+    fn check_statement(
+        &mut self,
+        statement: &Stmt,
+        scopes: &mut TypeScopeStack,
+        expected_return: &SemanticType,
+    ) {
+        match statement {
+            Stmt::Let(stmt) => {
+                let value_type = stmt
+                    .value
+                    .as_ref()
+                    .map(|expr| self.check_expr(expr, scopes));
+                if let (Some(annotation), Some(value_type)) = (&stmt.ty, &value_type) {
+                    self.require_same_type(stmt.span, &lower_type(annotation), value_type);
+                }
+                let binding_type = stmt
+                    .ty
+                    .as_ref()
+                    .map(lower_type)
+                    .or(value_type)
+                    .unwrap_or(SemanticType::Unknown);
+                scopes.insert(stmt.name.value.clone(), binding_type);
+            }
+            Stmt::Assign(stmt) => {
+                let target = self.check_expr(&stmt.target, scopes);
+                let value = self.check_expr(&stmt.value, scopes);
+                self.require_same_type(stmt.value.span, &target, &value);
+            }
+            Stmt::Expr(stmt) => {
+                self.check_expr(&stmt.expr, scopes);
+            }
+            Stmt::If(stmt) => {
+                let condition_type = self.check_expr(&stmt.condition, scopes);
+                self.require_bool(stmt.condition.span, &condition_type, "if conditions");
+                self.check_block(&stmt.then_block, scopes, expected_return);
+                if let Some(else_branch) = &stmt.else_branch {
+                    self.check_else_branch(else_branch, scopes, expected_return);
+                }
+            }
+            Stmt::Match(stmt) => {
+                let scrutinee_type = self.check_expr(&stmt.expr, scopes);
+                for arm in &stmt.arms {
+                    scopes.push();
+                    self.bind_pattern_type(&arm.pattern, scopes, &scrutinee_type);
+                    match &arm.body {
+                        MatchBody::Block(block) => {
+                            self.check_block(block, scopes, expected_return);
+                        }
+                        MatchBody::Expr(expr) => {
+                            self.check_expr(expr, scopes);
+                        }
+                    }
+                    scopes.pop();
+                }
+            }
+            Stmt::For(stmt) => {
+                let iterable_type = self.check_expr(&stmt.iterable, scopes);
+                scopes.push();
+                self.bind_pattern_type(
+                    &stmt.binding,
+                    scopes,
+                    &iterable_item_type(&iterable_type).unwrap_or(SemanticType::Unknown),
+                );
+                self.check_block(&stmt.body, scopes, expected_return);
+                scopes.pop();
+            }
+            Stmt::Return(stmt) => {
+                let value_type = stmt
+                    .value
+                    .as_ref()
+                    .map(|value| self.check_expr(value, scopes))
+                    .unwrap_or(SemanticType::Unit);
+                self.require_same_type(stmt.span, expected_return, &value_type);
+            }
+            Stmt::Observe(stmt) => {
+                let left = self.check_expr(&stmt.left, scopes);
+                let right = self.check_expr(&stmt.right, scopes);
+                self.require_observe_types(stmt.span, stmt.op, &left, &right);
+                self.check_block(&stmt.else_block, scopes, expected_return);
+            }
+        }
+    }
+
+    fn check_else_branch(
+        &mut self,
+        branch: &ElseBranch,
+        scopes: &mut TypeScopeStack,
+        expected_return: &SemanticType,
+    ) {
+        match branch {
+            ElseBranch::Block(block) => {
+                self.check_block(block, scopes, expected_return);
+            }
+            ElseBranch::If(stmt) => {
+                self.check_statement(&Stmt::If(*stmt.clone()), scopes, expected_return);
+            }
+        }
+    }
+
+    fn bind_pattern_type(
+        &mut self,
+        pattern: &Pattern,
+        scopes: &mut TypeScopeStack,
+        value_type: &SemanticType,
+    ) {
+        match &pattern.kind {
+            PatternKind::Binding(name) => {
+                scopes.insert(name.value.clone(), value_type.clone());
+            }
+            PatternKind::Wildcard | PatternKind::Int(_) | PatternKind::Bool(_) => {}
+        }
+    }
+
+    fn check_expr(&mut self, expr: &Expr, scopes: &mut TypeScopeStack) -> SemanticType {
+        match &expr.kind {
+            ExprKind::Int(_) => SemanticType::U32,
+            ExprKind::Bool(_) => SemanticType::Bool,
+            ExprKind::Name(name) => scopes
+                .lookup(name.value.as_str())
+                .or_else(|| {
+                    self.item_signatures
+                        .get(name.value.as_str())
+                        .cloned()
+                        .map(SemanticType::Function)
+                })
+                .unwrap_or(SemanticType::Unknown),
+            ExprKind::Tuple(elements) => SemanticType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.check_expr(element, scopes))
+                    .collect(),
+            ),
+            ExprKind::Array(elements) => self.check_array_expr(elements, scopes),
+            ExprKind::Block(block) => self.check_block(block, scopes, &SemanticType::Unknown),
+            ExprKind::Unary { op, expr } => {
+                let operand = self.check_expr(expr, scopes);
+                match op {
+                    UnaryOp::Neg => {
+                        self.require_u32(expr.span, &operand, "arithmetic operators");
+                        SemanticType::U32
+                    }
+                    UnaryOp::Not => {
+                        self.require_bool(expr.span, &operand, "logical operators");
+                        SemanticType::Bool
+                    }
+                }
+            }
+            ExprKind::Binary { op, left, right } => {
+                let left_type = self.check_expr(left, scopes);
+                let right_type = self.check_expr(right, scopes);
+                self.check_binary_expr(expr.span, *op, &left_type, &right_type)
+            }
+            ExprKind::Call { callee, args } => {
+                let callee_type = self.check_expr(callee, scopes);
+                let arg_types: Vec<_> = args
+                    .iter()
+                    .map(|arg| self.check_expr(arg, scopes))
+                    .collect();
+                self.check_call_expr(callee.span, &callee_type, args, &arg_types)
+            }
+            ExprKind::Index { target, index } => {
+                let target_type = self.check_expr(target, scopes);
+                let index_type = self.check_expr(index, scopes);
+                self.check_index_expr(expr.span, &target_type, index.span, &index_type)
+            }
+            ExprKind::Grouped(expr) => self.check_expr(expr, scopes),
+        }
+    }
+
+    fn check_array_expr(&mut self, elements: &[Expr], scopes: &mut TypeScopeStack) -> SemanticType {
+        let mut element_type = None;
+        for element in elements {
+            let current = self.check_expr(element, scopes);
+            if let Some(expected) = &element_type {
+                self.require_same_type(element.span, expected, &current);
+            } else {
+                element_type = Some(current);
+            }
+        }
+
+        SemanticType::Array {
+            element: Box::new(element_type.unwrap_or(SemanticType::Unknown)),
+            length: elements.len() as u64,
+        }
+    }
+
+    fn check_binary_expr(
+        &mut self,
+        span: Span,
+        op: BinaryOp,
+        left: &SemanticType,
+        right: &SemanticType,
+    ) -> SemanticType {
+        match op {
+            BinaryOp::Range => {
+                self.require_u32(span, left, "range expressions");
+                self.require_u32(span, right, "range expressions");
+                SemanticType::Range(Box::new(SemanticType::U32))
+            }
+            BinaryOp::Or | BinaryOp::And => {
+                self.require_bool(span, left, "logical operators");
+                self.require_bool(span, right, "logical operators");
+                SemanticType::Bool
+            }
+            BinaryOp::EqEq | BinaryOp::NotEq => {
+                self.require_same_type(span, left, right);
+                SemanticType::Bool
+            }
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => {
+                self.require_u32(span, left, "ordering comparisons");
+                self.require_u32(span, right, "ordering comparisons");
+                SemanticType::Bool
+            }
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+                self.require_u32(span, left, "arithmetic operators");
+                self.require_u32(span, right, "arithmetic operators");
+                SemanticType::U32
+            }
+        }
+    }
+
+    fn check_call_expr(
+        &mut self,
+        callee_span: Span,
+        callee_type: &SemanticType,
+        args: &[Expr],
+        arg_types: &[SemanticType],
+    ) -> SemanticType {
+        let SemanticType::Function(signature) = callee_type else {
+            if !matches!(callee_type, SemanticType::Unknown) {
+                self.report_called_non_function(callee_span);
+            }
+            return SemanticType::Unknown;
+        };
+
+        if args.len() != signature.params.len() {
+            self.report_call_arity_mismatch(callee_span, signature.params.len(), args.len());
+            return (*signature.return_type).clone();
+        }
+
+        for (arg, (expected, found)) in args
+            .iter()
+            .zip(signature.params.iter().zip(arg_types.iter()))
+        {
+            self.require_same_type(arg.span, expected, found);
+        }
+
+        (*signature.return_type).clone()
+    }
+
+    fn check_index_expr(
+        &mut self,
+        expr_span: Span,
+        target_type: &SemanticType,
+        index_span: Span,
+        index_type: &SemanticType,
+    ) -> SemanticType {
+        let SemanticType::Array { element, .. } = target_type else {
+            if !matches!(target_type, SemanticType::Unknown) {
+                self.report_non_array_index_target(expr_span);
+            }
+            return SemanticType::Unknown;
+        };
+
+        self.require_u32(index_span, index_type, "array indices");
+        (**element).clone()
+    }
+
+    fn require_same_type(&mut self, span: Span, expected: &SemanticType, found: &SemanticType) {
+        if matches!(expected, SemanticType::Unknown) || matches!(found, SemanticType::Unknown) {
+            return;
+        }
+        if expected == found {
+            return;
+        }
+
+        self.report_type_mismatch(span, expected, found);
+    }
+
+    fn require_bool(&mut self, span: Span, found: &SemanticType, context: &str) {
+        if matches!(found, SemanticType::Unknown) || found.is_bool() {
+            return;
+        }
+
+        self.diagnostics.push(
+            Diagnostic::error(format!("{context} must have type bool"))
+                .with_label(Label::primary(span, "expected `bool` here")),
+        );
+    }
+
+    fn require_u32(&mut self, span: Span, found: &SemanticType, context: &str) {
+        if matches!(found, SemanticType::Unknown) || found.is_u32() {
+            return;
+        }
+
+        self.diagnostics.push(
+            Diagnostic::error(format!("{context} must have type u32"))
+                .with_label(Label::primary(span, "expected `u32` here")),
+        );
+    }
+
+    fn require_observe_types(
+        &mut self,
+        span: Span,
+        op: ObserveOp,
+        left: &SemanticType,
+        right: &SemanticType,
+    ) {
+        match op {
+            ObserveOp::Eq | ObserveOp::NotEq => self.require_same_type(span, left, right),
+            ObserveOp::Lt | ObserveOp::LtEq | ObserveOp::Gt | ObserveOp::GtEq => {
+                self.require_u32(span, left, "observe ordering comparisons");
+                self.require_u32(span, right, "observe ordering comparisons");
+            }
+        }
+    }
+
+    fn report_type_mismatch(&mut self, span: Span, expected: &SemanticType, found: &SemanticType) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "type mismatch: expected {}, found {}",
+                expected.describe(),
+                found.describe()
+            ))
+            .with_label(Label::primary(span, "types do not match here")),
+        );
+    }
+
+    fn report_called_non_function(&mut self, callee_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("calls require a function-valued callee").with_label(Label::primary(
+                callee_span,
+                "this expression is not callable",
+            )),
+        );
+    }
+
+    fn report_call_arity_mismatch(&mut self, callee_span: Span, expected: usize, found: usize) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "call arity mismatch: expected {expected} argument(s), found {found}"
+            ))
+            .with_label(Label::primary(callee_span, "adjust this call signature")),
+        );
+    }
+
+    fn report_non_array_index_target(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("indexing requires an array target")
+                .with_label(Label::primary(span, "this expression is not an array")),
+        );
+    }
+}
+
+#[derive(Debug, Default)]
+struct TypeScopeStack {
+    scopes: Vec<HashMap<String, SemanticType>>,
+}
+
+impl TypeScopeStack {
+    fn push(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn pop(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn insert(&mut self, name: String, ty: SemanticType) {
+        self.scopes
+            .last_mut()
+            .expect("type scope stack must not be empty")
+            .insert(name, ty);
+    }
+
+    fn lookup(&self, name: &str) -> Option<SemanticType> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+}
+
 fn name_span(expr: &Expr) -> Span {
     match &expr.kind {
         ExprKind::Name(name) => name.span,
         ExprKind::Grouped(expr) => name_span(expr),
         other => panic!("expected name-like callee expression, got {other:?}"),
+    }
+}
+
+fn function_signature(function: &Function) -> FunctionType {
+    FunctionType {
+        params: function
+            .params
+            .iter()
+            .map(|param| lower_type(&param.ty))
+            .collect(),
+        return_type: Box::new(
+            function
+                .return_type
+                .as_ref()
+                .map(lower_type)
+                .unwrap_or(SemanticType::Unit),
+        ),
+    }
+}
+
+fn lower_type(ty: &Type) -> SemanticType {
+    match &ty.kind {
+        TypeKind::Unit => SemanticType::Unit,
+        TypeKind::Named(name) => match name.value.as_str() {
+            "u32" => SemanticType::U32,
+            "bool" => SemanticType::Bool,
+            _ => SemanticType::Named(name.value.clone()),
+        },
+        TypeKind::Tuple(elements) => SemanticType::Tuple(elements.iter().map(lower_type).collect()),
+        TypeKind::Array { element, length } => SemanticType::Array {
+            element: Box::new(lower_type(element)),
+            length: length.value,
+        },
+        TypeKind::Applied { base, args } => match (base.value.as_str(), args.as_slice()) {
+            ("Option", [GenericArg::Type(inner)]) => {
+                SemanticType::Option(Box::new(lower_type(inner)))
+            }
+            ("Result", [GenericArg::Type(ok), GenericArg::Type(err)]) => SemanticType::Result {
+                ok: Box::new(lower_type(ok)),
+                err: Box::new(lower_type(err)),
+            },
+            ("Set", [GenericArg::Type(element), GenericArg::Const(capacity)]) => {
+                SemanticType::Set {
+                    element: Box::new(lower_type(element)),
+                    capacity: capacity.value,
+                }
+            }
+            (
+                "Map",
+                [GenericArg::Type(key), GenericArg::Type(value), GenericArg::Const(capacity)],
+            ) => SemanticType::Map {
+                key: Box::new(lower_type(key)),
+                value: Box::new(lower_type(value)),
+                capacity: capacity.value,
+            },
+            _ => SemanticType::Named(base.value.clone()),
+        },
+    }
+}
+
+fn iterable_item_type(ty: &SemanticType) -> Option<SemanticType> {
+    match ty {
+        SemanticType::Array { element, .. } => Some((**element).clone()),
+        SemanticType::Range(inner) => Some((**inner).clone()),
+        SemanticType::Set { element, .. } => Some((**element).clone()),
+        SemanticType::Map { key, value, .. } => Some(SemanticType::Tuple(vec![
+            (**key).clone(),
+            (**value).clone(),
+        ])),
+        _ => None,
     }
 }
 

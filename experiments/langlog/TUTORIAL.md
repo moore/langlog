@@ -67,6 +67,15 @@ Semantic checking now enforces mutability:
 - in phase 1, `observe` proof expressions may not directly reference `mut`
   bindings
 
+The current semantic checker also enforces these initial type rules:
+
+- `let` annotations, assignment values, returns, and call arguments must match
+  declared types and function signatures
+- `if` conditions and logical operators must use `bool`
+- arithmetic operators, ordering comparisons, and range bounds must use `u32`
+- array literals must be homogeneous, and indexing requires an array target
+  plus a `u32` index
+
 ## 4. Use Arrays And Loops
 
 Arrays are written with square brackets:
@@ -247,15 +256,16 @@ Use it as the main parser smoke test while the compiler grows.
 
 ## 10. What Comes Next
 
-The parser is only the first stage. The next compiler milestones are:
+The parser is no longer the only stage. The next compiler milestones are:
 
 - lower the AST into HIR
-- resolve names and types
-- reject recursion and unbounded loops
-- implement proof obligations and observations
+- extend the new initial type checker across tuples, `Option`, `Result`, `Set`,
+  and `Map`
+- add overflow obligations to the proof phase
+- enforce the first collection relation
 
 So the right way to think about Langlog today is:
 
 - the syntax is becoming concrete
-- the semantics are still under construction
+- the semantic and proof layers exist, but they are still intentionally partial
 - the reliability model is the point of the experiment

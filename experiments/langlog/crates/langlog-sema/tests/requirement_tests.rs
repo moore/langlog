@@ -641,3 +641,257 @@ fn main(limit: u32) {
     // The immutable snapshot and immutable parameter binding should not add more errors.
     assert_eq!(checked.diagnostics.len(), 1);
 }
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# The semantic phase MUST reject `let` annotations, assignments, returns, and call arguments whose types do not match declared annotations or function signatures.
+#[test]
+fn requirement_llg_sema_04_rejects_mismatched_annotations_assignments_returns_and_calls() {
+    let valid = analyze_ok(
+        r#"
+fn id(value: u32) -> u32 {
+    value
+}
+
+fn main(flag: bool) -> u32 {
+    let count: u32 = 1;
+    let mut total = count;
+    total = id(count);
+    if flag {
+        return total;
+    }
+    id(total)
+}
+"#,
+    );
+    // Accept matching let annotations, assignments, returns, and call arguments.
+    assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn id(value: u32) -> u32 {
+    value
+}
+
+fn main(flag: bool) -> u32 {
+    let total: u32 = true;
+    let mut count = 0;
+    count = false;
+    id(true);
+    return flag;
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+
+    let main = function(&invalid, "main");
+    let annotated_let = let_stmt(&main.body, 0);
+    let assign_value = match &main.body.statements[2] {
+        Stmt::Assign(stmt) => &stmt.value,
+        other => panic!("expected assignment statement, got {other:?}"),
+    };
+    let call_arg = match &expr_stmt(&main.body, 3).kind {
+        ExprKind::Call { args, .. } => &args[0],
+        other => panic!("expected call expression, got {other:?}"),
+    };
+    let return_stmt = match &main.body.statements[4] {
+        Stmt::Return(stmt) => stmt,
+        other => panic!("expected return statement, got {other:?}"),
+    };
+
+    // Reject a let initializer that does not match its annotation.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected u32, found bool",
+        annotated_let.span,
+    );
+
+    // Reject an assignment whose value does not match the target type.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected u32, found bool",
+        assign_value.span,
+    );
+
+    // Reject a call argument that does not match the declared parameter type.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected u32, found bool",
+        call_arg.span,
+    );
+
+    // Reject a return value that does not match the declared function return type.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected u32, found bool",
+        return_stmt.span,
+    );
+}
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# The semantic phase MUST require `if` conditions and logical operators to use `bool`.
+#[test]
+fn requirement_llg_sema_04_requires_bool_conditions_and_logical_operators() {
+    let valid = analyze_ok(
+        r#"
+fn main(flag: bool, other: bool) {
+    if flag && other {
+        return;
+    }
+}
+"#,
+    );
+    // Accept boolean conditions and logical operators.
+    assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn main(flag: bool, count: u32) {
+    if count {
+        return;
+    }
+    flag && count;
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+
+    let main = function(&invalid, "main");
+    let if_stmt = match &main.body.statements[0] {
+        Stmt::If(stmt) => stmt,
+        other => panic!("expected if statement, got {other:?}"),
+    };
+
+    // Reject a non-boolean `if` condition.
+    assert_primary_diagnostic(
+        &invalid,
+        "if conditions must have type bool",
+        if_stmt.condition.span,
+    );
+
+    // Reject a logical expression that uses a non-boolean operand.
+    assert_primary_diagnostic(
+        &invalid,
+        "logical operators must have type bool",
+        expr_stmt(&main.body, 1).span,
+    );
+}
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# The semantic phase MUST require arithmetic operators, ordering comparisons, and range bounds to use `u32`.
+#[test]
+fn requirement_llg_sema_04_requires_u32_for_arithmetic_ordering_and_ranges() {
+    let valid = analyze_ok(
+        r#"
+fn main(value: u32, limit: u32) {
+    value + limit;
+    value < limit;
+    for index in 0 .. limit {
+        observe index < limit else {
+            return;
+        }
+    }
+}
+"#,
+    );
+    // Accept arithmetic, ordering, and range bounds when they use `u32`.
+    assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn main(flag: bool, limit: u32) {
+    flag + limit;
+    flag < limit;
+    for index in true .. limit {
+        return;
+    }
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+
+    let main = function(&invalid, "main");
+    let loop_stmt = first_for_stmt(&main.body);
+
+    // Reject arithmetic operands that are not `u32`.
+    assert_primary_diagnostic(
+        &invalid,
+        "arithmetic operators must have type u32",
+        expr_stmt(&main.body, 0).span,
+    );
+
+    // Reject ordering comparisons that are not `u32`.
+    assert_primary_diagnostic(
+        &invalid,
+        "ordering comparisons must have type u32",
+        expr_stmt(&main.body, 1).span,
+    );
+
+    // Reject range bounds that are not `u32`.
+    assert_primary_diagnostic(
+        &invalid,
+        "range expressions must have type u32",
+        loop_stmt.iterable.span,
+    );
+}
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# The semantic phase MUST require array literals to have a homogeneous element type, and MUST require indexing to use an array target plus a `u32` index.
+#[test]
+fn requirement_llg_sema_04_requires_homogeneous_arrays_and_typed_indexing() {
+    let valid = analyze_ok(
+        r#"
+fn main(index: u32) -> u32 {
+    let values = [1, 2, 3];
+    values[index]
+}
+"#,
+    );
+    // Accept homogeneous arrays and `u32` indexing into arrays.
+    assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn main(flag: bool) {
+    let values = [1, false];
+    values[flag];
+    flag[0];
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+
+    let main = function(&invalid, "main");
+    let heterogenous_values = let_stmt(&main.body, 0)
+        .value
+        .as_ref()
+        .expect("expected array literal");
+    let second_array_element = match &heterogenous_values.kind {
+        ExprKind::Array(elements) => &elements[1],
+        other => panic!("expected array literal, got {other:?}"),
+    };
+    let bad_index = match &expr_stmt(&main.body, 1).kind {
+        ExprKind::Index { index, .. } => index,
+        other => panic!("expected index expression, got {other:?}"),
+    };
+
+    // Reject array literals whose elements do not share a single type.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected u32, found bool",
+        second_array_element.span,
+    );
+
+    // Reject non-`u32` array indices.
+    assert_primary_diagnostic(&invalid, "array indices must have type u32", bad_index.span);
+
+    // Reject indexing on a non-array target.
+    assert_primary_diagnostic(
+        &invalid,
+        "indexing requires an array target",
+        expr_stmt(&main.body, 2).span,
+    );
+}

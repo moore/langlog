@@ -305,11 +305,24 @@ The parser currently accepts:
 Notes:
 
 - Generic arguments may be either types or integer constants.
-- The parser accepts user-written names such as `MyType`, but name resolution
-  does not exist yet.
+- The parser accepts user-written names such as `MyType`; semantic checking
+  currently understands `u32`, `bool`, arrays, and the built-in collection
+  shells, but richer user-defined type meaning is still ahead of the current
+  implementation.
 - Capacity-bounded `Set` and `Map` are parsed now because they are central to
   the language design, even though collection semantics are still ahead of the
   current implementation.
+
+## Current Semantic Type Checks
+
+The current semantic checker already enforces these rules:
+
+- `let` annotations, assignment values, returns, and call arguments must match
+  declared types and function signatures.
+- `if` conditions and logical operators must use `bool`.
+- arithmetic operators, ordering comparisons, and range bounds must use `u32`.
+- array literals must be homogeneous, and indexing requires an array target
+  plus a `u32` index.
 
 ## Diagnostics
 
