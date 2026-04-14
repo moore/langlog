@@ -480,19 +480,20 @@ impl<'a> Parser<'a> {
 
     fn parse_observe_statement(&mut self) -> Option<ObserveStmt> {
         let start = self.expect_tag(TokenTag::Observe, "expected `observe`")?;
-        let subject = self.expect_identifier("expected a name after `observe`")?;
+        let left = self.parse_expression(10)?;
         let op = self.parse_observe_operator()?;
-        let value = self.parse_expression(0)?;
-        self.validate_observe_value(&value);
+        let right = self.parse_expression(10)?;
+        self.validate_observe_operand(&left);
+        self.validate_observe_operand(&right);
         self.expect_tag(TokenTag::Else, "expected `else` after `observe`")?;
         let else_block = self.parse_block()?;
         let span = start.span.cover(else_block.span).unwrap_or(start.span);
 
         Some(ObserveStmt {
             span,
-            subject,
+            left,
             op,
-            value,
+            right,
             else_block,
         })
     }
@@ -517,16 +518,16 @@ impl<'a> Parser<'a> {
         Some(op)
     }
 
-    fn validate_observe_value(&mut self, value: &Expr) {
-        if observe_value_is_phase1_scalar(value) {
+    fn validate_observe_operand(&mut self, expr: &Expr) {
+        if observe_expr_is_phase1_proof_expr(expr) {
             return;
         }
 
         self.diagnostics.push(
-            Diagnostic::error("phase 1 `observe` values must be scalar expressions").with_label(
+            Diagnostic::error("phase 1 `observe` operands must be proof expressions").with_label(
                 Label::primary(
-                    value.span,
-                    "tuple, array, block, and range expressions are not allowed here",
+                    expr.span,
+                    "tuple, array, block, range, logical, equality, and comparison expressions are not allowed here",
                 ),
             ),
         );
@@ -882,24 +883,26 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn observe_value_is_phase1_scalar(expr: &Expr) -> bool {
+fn observe_expr_is_phase1_proof_expr(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Name(_) => true,
         ExprKind::Tuple(_) | ExprKind::Array(_) | ExprKind::Block(_) => false,
         ExprKind::Unary { expr, .. } | ExprKind::Grouped(expr) => {
-            observe_value_is_phase1_scalar(expr)
+            observe_expr_is_phase1_proof_expr(expr)
         }
         ExprKind::Binary { op, left, right } => {
-            !matches!(op, BinaryOp::Range)
-                && observe_value_is_phase1_scalar(left)
-                && observe_value_is_phase1_scalar(right)
+            matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+            ) && observe_expr_is_phase1_proof_expr(left)
+                && observe_expr_is_phase1_proof_expr(right)
         }
         ExprKind::Call { callee, args } => {
-            observe_value_is_phase1_scalar(callee)
-                && args.iter().all(observe_value_is_phase1_scalar)
+            observe_expr_is_phase1_proof_expr(callee)
+                && args.iter().all(observe_expr_is_phase1_proof_expr)
         }
         ExprKind::Index { target, index } => {
-            observe_value_is_phase1_scalar(target) && observe_value_is_phase1_scalar(index)
+            observe_expr_is_phase1_proof_expr(target) && observe_expr_is_phase1_proof_expr(index)
         }
     }
 }
@@ -957,9 +960,9 @@ fn sum(values: [u32; 4]) -> u32 {
         }
         match &function.body.statements[2] {
             Stmt::Observe(stmt) => {
-                assert_eq!(stmt.subject.value, "total");
+                assert!(matches!(stmt.left.kind, ExprKind::Name(_)));
                 assert_eq!(stmt.op, ObserveOp::Lt);
-                assert!(matches!(stmt.value.kind, ExprKind::Int(100)));
+                assert!(matches!(stmt.right.kind, ExprKind::Int(100)));
                 assert!(matches!(
                     stmt.else_block.statements.as_slice(),
                     [Stmt::Return(_)]

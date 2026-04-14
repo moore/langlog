@@ -67,6 +67,20 @@ fn first_for_stmt(block: &Block) -> &ForStmt {
         .expect("expected a for statement")
 }
 
+fn observe_stmt(block: &Block, index: usize) -> &langlog_syntax::ast::ObserveStmt {
+    match &block.statements[index] {
+        Stmt::Observe(stmt) => stmt,
+        other => panic!("expected observe statement at index {index}, got {other:?}"),
+    }
+}
+
+fn assign_target(block: &Block, index: usize) -> &Expr {
+    match &block.statements[index] {
+        Stmt::Assign(stmt) => &stmt.target,
+        other => panic!("expected assignment statement at index {index}, got {other:?}"),
+    }
+}
+
 fn assert_resolves_to(
     checked: &CheckedProgram,
     expr: &Expr,
@@ -540,4 +554,90 @@ fn main(total: u32, limit: u32) {
         "`observe` `else` blocks must be terminal in phase 1",
         observe.else_block.span,
     );
+}
+
+//= SPEC.md#llg-sema-03-mutability-and-stable-facts
+//= type=test
+//# The semantic phase MUST reject assignment to immutable bindings.
+#[test]
+fn requirement_llg_sema_03_rejects_assignment_to_immutable_bindings() {
+    let checked = analyze_ok(
+        r#"
+fn main(param: u32) {
+    let value = 0;
+    value = 1;
+    param = value;
+    let mut total = 0;
+    total = param;
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+
+    // Reject assignment to an immutable local binding.
+    assert_primary_diagnostic(
+        &checked,
+        "assignment to an immutable binding is not allowed",
+        assign_target(&main.body, 1).span,
+    );
+
+    // Reject assignment to an immutable parameter binding.
+    assert_primary_diagnostic(
+        &checked,
+        "assignment to an immutable binding is not allowed",
+        assign_target(&main.body, 2).span,
+    );
+
+    // The mutable local assignment should be the only assignment that survives this program.
+    assert_eq!(checked.diagnostics.len(), 2);
+}
+
+//= SPEC.md#llg-sema-03-mutability-and-stable-facts
+//= type=test
+//# In phase 1, the semantic phase MUST reject `observe` proof expressions that directly reference mutable bindings.
+#[test]
+fn requirement_llg_sema_03_rejects_observe_proof_expressions_that_directly_reference_mutable_bindings(
+) {
+    let checked = analyze_ok(
+        r#"
+fn main(limit: u32) {
+    let mut total = 0;
+    let snapshot = total;
+    let stable = limit;
+
+    observe total < limit else {
+        return;
+    }
+    observe snapshot < limit else {
+        return;
+    }
+    observe stable < limit else {
+        return;
+    }
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+
+    // Reject a proof expression that directly mentions a mutable binding.
+    assert_primary_diagnostic(
+        &checked,
+        "mutable bindings are not allowed in `observe` proof expressions",
+        name_span(&observe_stmt(&main.body, 3).left),
+    );
+
+    // Accept an immutable snapshot of a mutable value in phase 1.
+    assert!(
+        checked
+            .resolution(name_span(&observe_stmt(&main.body, 4).left))
+            .is_some(),
+        "expected `snapshot` observe to remain valid"
+    );
+
+    // The immutable snapshot and immutable parameter binding should not add more errors.
+    assert_eq!(checked.diagnostics.len(), 1);
 }

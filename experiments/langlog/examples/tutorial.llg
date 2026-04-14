@@ -5,12 +5,16 @@ fn sum(values: [u32; 4]) -> u32 {
         total = total + value;
     }
 
+    total
+}
+
+fn bounded(total: u32, limit: u32, one: u32) -> u32 {
+    observe total + one <= limit + one else {
+        return total;
+    }
+
     if total > 100 {
-        observe total < 1000 else {
-            return total;
-        }
-    } else {
-        observe total >= 0 else {
+        observe total + 1 < 1001 else {
             return total;
         }
     }

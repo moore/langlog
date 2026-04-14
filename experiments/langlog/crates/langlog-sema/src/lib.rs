@@ -17,6 +17,7 @@ struct Binding {
     kind: BindingKind,
     span: Span,
     loop_bound: bool,
+    mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +106,7 @@ impl<'a> Analyzer<'a> {
                     kind: BindingKind::Item,
                     span: function.name.span,
                     loop_bound: false,
+                    mutable: false,
                 });
         }
     }
@@ -128,6 +130,7 @@ impl<'a> Analyzer<'a> {
                     kind: BindingKind::Param,
                     span: param.name.span,
                     loop_bound: is_bounded_iterable_type(&param.ty),
+                    mutable: false,
                 },
             );
         }
@@ -168,12 +171,16 @@ impl<'a> Analyzer<'a> {
                                 .as_ref()
                                 .and_then(|expr| self.iterable_bound(expr, scopes))
                                 .unwrap_or(false),
+                        mutable: stmt.mutable,
                     },
                 );
             }
             Stmt::Assign(stmt) => {
-                self.analyze_expr(&stmt.target, scopes, function);
+                let target_binding = self.analyze_expr(&stmt.target, scopes, function);
                 self.analyze_expr(&stmt.value, scopes, function);
+                if matches!(target_binding, Some(Binding { mutable: false, .. })) {
+                    self.report_immutable_assignment(stmt.target.span);
+                }
             }
             Stmt::Expr(stmt) => {
                 self.analyze_expr(&stmt.expr, scopes, function);
@@ -220,8 +227,10 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Stmt::Observe(stmt) => {
-                self.resolve_name(stmt.subject.value.as_str(), stmt.subject.span, scopes);
-                self.analyze_expr(&stmt.value, scopes, function);
+                self.analyze_expr(&stmt.left, scopes, function);
+                self.analyze_expr(&stmt.right, scopes, function);
+                self.check_observe_expr_stability(&stmt.left, scopes);
+                self.check_observe_expr_stability(&stmt.right, scopes);
                 self.analyze_block(&stmt.else_block, scopes, function);
                 if !is_terminal_block(&stmt.else_block) {
                     self.report_non_terminal_observe_else(stmt.else_block.span);
@@ -238,6 +247,7 @@ impl<'a> Analyzer<'a> {
                     kind: BindingKind::Local,
                     span: name.span,
                     loop_bound: false,
+                    mutable: false,
                 },
             );
         }
@@ -466,6 +476,71 @@ impl<'a> Analyzer<'a> {
                 Label::primary(else_span, "false observations must not fall through"),
             ),
         );
+    }
+
+    fn report_immutable_assignment(&mut self, target_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("assignment to an immutable binding is not allowed").with_label(
+                Label::primary(target_span, "mark this binding `mut` to assign to it"),
+            ),
+        );
+    }
+
+    fn report_mutable_observe_binding(&mut self, binding_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("mutable bindings are not allowed in `observe` proof expressions")
+                .with_label(Label::primary(
+                    binding_span,
+                    "proof expressions must not reference `mut` bindings",
+                )),
+        );
+    }
+
+    fn check_observe_expr_stability(&mut self, expr: &Expr, scopes: &ScopeStack) {
+        match &expr.kind {
+            ExprKind::Int(_) | ExprKind::Bool(_) => {}
+            ExprKind::Name(name) => {
+                if scopes
+                    .lookup(name.value.as_str())
+                    .or_else(|| self.items.get(name.value.as_str()).copied())
+                    .is_some_and(|binding| binding.mutable)
+                {
+                    self.report_mutable_observe_binding(name.span);
+                }
+            }
+            ExprKind::Tuple(elements) | ExprKind::Array(elements) => {
+                for element in elements {
+                    self.check_observe_expr_stability(element, scopes);
+                }
+            }
+            ExprKind::Block(block) => {
+                for statement in &block.statements {
+                    if let Stmt::Expr(stmt) = statement {
+                        self.check_observe_expr_stability(&stmt.expr, scopes);
+                    }
+                }
+                if let Some(expr) = &block.trailing_expr {
+                    self.check_observe_expr_stability(expr, scopes);
+                }
+            }
+            ExprKind::Unary { expr, .. } | ExprKind::Grouped(expr) => {
+                self.check_observe_expr_stability(expr, scopes);
+            }
+            ExprKind::Binary { left, right, .. } => {
+                self.check_observe_expr_stability(left, scopes);
+                self.check_observe_expr_stability(right, scopes);
+            }
+            ExprKind::Call { callee, args } => {
+                self.check_observe_expr_stability(callee, scopes);
+                for arg in args {
+                    self.check_observe_expr_stability(arg, scopes);
+                }
+            }
+            ExprKind::Index { target, index } => {
+                self.check_observe_expr_stability(target, scopes);
+                self.check_observe_expr_stability(index, scopes);
+            }
+        }
     }
 }
 

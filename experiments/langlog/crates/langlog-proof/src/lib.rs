@@ -17,10 +17,9 @@ pub enum FactSource {
 pub struct ProofFact {
     pub source: FactSource,
     pub origin_span: Span,
-    pub subject_name: String,
-    pub subject_span: Span,
+    pub left_span: Span,
     pub op: ObserveOp,
-    pub value_span: Span,
+    pub right_span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,22 +206,18 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Observe(stmt) => {
-                self.check_expr(&stmt.value, state);
+                self.check_expr(&stmt.left, state);
+                self.check_expr(&stmt.right, state);
                 self.check_block(&stmt.else_block, state);
                 self.facts.push(ProofFact {
                     source: FactSource::Observe,
                     origin_span: stmt.span,
-                    subject_name: stmt.subject.value.clone(),
-                    subject_span: stmt.subject.span,
+                    left_span: stmt.left.span,
                     op: stmt.op,
-                    value_span: stmt.value.span,
+                    right_span: stmt.right.span,
                 });
-                if let Some(value) = eval_const_u64(&stmt.value) {
-                    state.facts.push(KnownFact {
-                        subject_name: stmt.subject.value.clone(),
-                        op: stmt.op,
-                        value,
-                    });
+                if let Some(fact) = known_fact(&stmt.left, stmt.op, &stmt.right) {
+                    state.facts.push(fact);
                 }
             }
         }
@@ -287,27 +282,16 @@ impl<'a> Checker<'a> {
                 let Some(op) = comparison_to_observe_op(*op) else {
                     return Vec::new();
                 };
-                let Some(subject) = bare_name(left) else {
-                    return Vec::new();
-                };
-
                 self.facts.push(ProofFact {
                     source: FactSource::ControlFlow,
                     origin_span: condition.span,
-                    subject_name: subject.value.clone(),
-                    subject_span: subject.span,
+                    left_span: left.span,
                     op,
-                    value_span: right.span,
+                    right_span: right.span,
                 });
 
-                eval_const_u64(right)
-                    .map(|value| {
-                        vec![KnownFact {
-                            subject_name: subject.value.clone(),
-                            op,
-                            value,
-                        }]
-                    })
+                known_fact(left, op, right)
+                    .map(|fact| vec![fact])
                     .unwrap_or_default()
             }
             _ => Vec::new(),
@@ -347,6 +331,16 @@ fn bare_name(expr: &Expr) -> Option<&Spanned<String>> {
         ExprKind::Grouped(expr) => bare_name(expr),
         _ => None,
     }
+}
+
+fn known_fact(left: &Expr, op: ObserveOp, right: &Expr) -> Option<KnownFact> {
+    let subject = bare_name(left)?;
+    let value = eval_const_u64(right)?;
+    Some(KnownFact {
+        subject_name: subject.value.clone(),
+        op,
+        value,
+    })
 }
 
 fn eval_const_u64(expr: &Expr) -> Option<u64> {

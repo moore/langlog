@@ -61,8 +61,11 @@ Current parser rules:
 - Initializers are optional.
 - `mut` is optional.
 
-Semantic rules for mutability are not implemented yet, so `mut` is currently
-syntax with future meaning.
+Semantic checking now enforces mutability:
+
+- assignment is rejected unless the target binding was declared `mut`
+- in phase 1, `observe` proof expressions may not directly reference `mut`
+  bindings
 
 ## 4. Use Arrays And Loops
 
@@ -97,8 +100,8 @@ One of Langlog’s core ideas is that programs should be able to state facts the
 proof engine can use later. The syntax for that is `observe`:
 
 ```langlog
-fn bounded(total: u32) -> u32 {
-    observe total <= 1000 else {
+fn bounded(total: u32, limit: u32, one: u32) -> u32 {
+    observe total + one <= limit + one else {
         return total;
     }
     total
@@ -107,13 +110,15 @@ fn bounded(total: u32) -> u32 {
 
 Today:
 
-- `observe` parses as `observe <name> <op> <expr> else <block>`
+- `observe` parses as `observe <expr> <op> <expr> else <block>`
 - the `else` block is mandatory
-- the left-hand side must be a bare name
+- both sides must be phase 1 proof expressions
 - the supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`
-- tuple, array, block, and range expressions are rejected on the right-hand
-  side in phase 1
+- tuple, array, block, range, logical, equality, and comparison
+  subexpressions are rejected inside phase 1 proof expressions
 - it appears in the AST
+- semantic checking rejects proof expressions that directly reference `mut`
+  bindings
 - semantic checking requires the `else` block to be terminal
 - when the observed relation is true, the proof phase records the relational
   fact from the statement
@@ -132,7 +137,7 @@ bounds safety.
 ```langlog
 fn clamp_flag(total: u32) -> u32 {
     if total > 100 {
-        observe total < 1000 else {
+        observe total + 1 < 1001 else {
             return total;
         }
     } else {
@@ -209,12 +214,16 @@ fn sum(values: [u32; 4]) -> u32 {
         total = total + value;
     }
 
+    total
+}
+
+fn bounded(total: u32, limit: u32, one: u32) -> u32 {
+    observe total + one <= limit + one else {
+        return total;
+    }
+
     if total > 100 {
-        observe total < 1000 else {
-            return total;
-        }
-    } else {
-        observe total >= 0 else {
+        observe total + 1 < 1001 else {
             return total;
         }
     }

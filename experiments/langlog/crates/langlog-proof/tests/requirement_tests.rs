@@ -32,19 +32,18 @@ fn assert_fact(
     checked: &CheckedProgram,
     proof: &CheckedProof,
     expected_source: FactSource,
-    expected_subject: &str,
+    expected_left: &str,
     expected_op: ObserveOp,
-    expected_value: &str,
+    expected_right: &str,
 ) {
     assert!(
         proof.facts.iter().any(|fact| {
             fact.source == expected_source
-                && fact.subject_name == expected_subject
                 && fact.op == expected_op
-                && checked.parsed.source.span_text(fact.subject_span) == Some(expected_subject)
-                && checked.parsed.source.span_text(fact.value_span) == Some(expected_value)
+                && checked.parsed.source.span_text(fact.left_span) == Some(expected_left)
+                && checked.parsed.source.span_text(fact.right_span) == Some(expected_right)
         }),
-        "missing fact {expected_source:?} {expected_subject} {expected_op:?} {expected_value:?}: {:#?}",
+        "missing fact {expected_source:?} {expected_left} {expected_op:?} {expected_right:?}: {:#?}",
         proof.facts
     );
 }
@@ -157,25 +156,25 @@ fn main(total: u32, limit: u32) {
 
 //= SPEC.md#llg-proof-02-observations
 //= type=test
-//# In phase 1, an `observe` fact MUST relate a named left-hand side symbol to a scalar-valued right-hand side expression.
+//# In phase 1, an `observe` fact MUST relate a left-hand proof expression to a right-hand proof expression.
 #[test]
 fn requirement_llg_proof_02_represents_phase_1_observe_facts_as_relations() {
     let (checked, proof) = check_ok(
         r#"
 fn main(total: u32, limit: u32, one: u32) {
-    observe total <= limit + one else {
+    observe total + one <= limit + one else {
         return;
     }
 }
 "#,
     );
 
-    // The fact model should preserve the named subject from the left-hand side.
+    // The fact model should preserve the full proof expression on the left-hand side.
     assert_fact(
         &checked,
         &proof,
         FactSource::Observe,
-        "total",
+        "total + one",
         ObserveOp::LtEq,
         "limit + one",
     );

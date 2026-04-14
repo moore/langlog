@@ -954,18 +954,26 @@ fn main() {
 
 //= SPEC.md#llg-syn-06-observe-statements
 //= type=test
-//# `observe` statements MUST use the form `observe <name> <op> <expr> else <block>`.
+//# `observe` statements MUST use the form `observe <expr> <op> <expr> else <block>`.
 #[test]
 fn requirement_llg_syn_06_parses_relational_observe_statements() {
-    let parsed = parse_ok("fn main(limit: u32) { observe limit <= limit + 1 else { return; } }");
+    let parsed = parse_ok(
+        "fn main(value: u32, limit: u32) { observe value + 1 <= limit * 2 else { return; } }",
+    );
     let observe = observe_stmt(&first_function(&parsed).body.statements[0]);
 
-    assert_eq!(observe.subject.value, "limit");
-    assert_eq!(observe.op, ObserveOp::LtEq);
     assert!(matches!(
-        observe.value.kind,
+        observe.left.kind,
         ExprKind::Binary {
             op: BinaryOp::Add,
+            ..
+        }
+    ));
+    assert_eq!(observe.op, ObserveOp::LtEq);
+    assert!(matches!(
+        observe.right.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Mul,
             ..
         }
     ));
@@ -987,17 +995,22 @@ fn requirement_llg_syn_06_rejects_missing_else_blocks() {
 
 //= SPEC.md#llg-syn-06-observe-statements
 //= type=test
-//# The left-hand side of `observe` MUST be a bare name and MUST NOT be an arbitrary expression.
+//# The left-hand side of `observe` MUST accept the same phase 1 proof expression forms as the right-hand side.
 #[test]
-fn requirement_llg_syn_06_rejects_non_name_left_hand_sides() {
-    let indexed_name = parse_err(
-        "fn main(values: [u32; 4], limit: u32) { observe values[0] < limit else { return; } }",
+fn requirement_llg_syn_06_accepts_proof_expressions_on_the_left_hand_side() {
+    let parsed = parse_ok(
+        "fn main(values: [u32; 4], index: u32, limit: u32) { observe values[index] + 1 < limit else { return; } }",
     );
-    let array_literal =
-        parse_err("fn main(limit: u32) { observe [1, 2] < limit else { return; } }");
+    let observe = observe_stmt(&first_function(&parsed).body.statements[0]);
 
-    assert_diagnostic_contains(&indexed_name, "expected an `observe` comparison operator");
-    assert_diagnostic_contains(&array_literal, "expected a name after `observe`");
+    assert!(matches!(
+        observe.left.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(observe.right.kind, ExprKind::Name(_)));
 }
 
 //= SPEC.md#llg-syn-06-observe-statements
@@ -1029,18 +1042,35 @@ fn main(value: u32, limit: u32) {
 
 //= SPEC.md#llg-syn-06-observe-statements
 //= type=test
-//# In phase 1, the right-hand side of `observe` MUST be limited to scalar expression forms and MUST reject tuple, array, block, and range expressions.
+//# In phase 1, `observe` proof expressions MUST reject tuple, array, block, range, logical, equality, and comparison subexpressions.
 #[test]
-fn requirement_llg_syn_06_rejects_non_scalar_phase_1_observe_values() {
-    let tuple_value = parse_err("fn main(value: u32) { observe value == (1, 2) else { return; } }");
-    let array_value = parse_err("fn main(value: u32) { observe value == [1, 2] else { return; } }");
-    let block_value = parse_err("fn main(value: u32) { observe value == { 1 } else { return; } }");
-    let range_value = parse_err("fn main(value: u32) { observe value == 0 .. 4 else { return; } }");
+fn requirement_llg_syn_06_rejects_non_proof_expression_operands() {
+    let tuple_left = parse_err("fn main(value: u32) { observe (1, 2) == value else { return; } }");
+    let array_right = parse_err("fn main(value: u32) { observe value == [1, 2] else { return; } }");
+    let block_right = parse_err("fn main(value: u32) { observe value == { 1 } else { return; } }");
+    let range_right =
+        parse_err("fn main(value: u32) { observe value == (0 .. 4) else { return; } }");
+    let equality_left = parse_err(
+        "fn main(a: u32, b: u32, c: u32) { observe ((a == b)) + c < 10 else { return; } }",
+    );
+    let comparison_left = parse_err(
+        "fn main(a: u32, b: u32, c: u32) { observe ((a < b)) + c < 10 else { return; } }",
+    );
+    let logical_right =
+        parse_err("fn main(a: u32, b: bool, c: bool) { observe a < (b && c) else { return; } }");
 
-    for parsed in [&tuple_value, &array_value, &block_value, &range_value] {
+    for parsed in [
+        &tuple_left,
+        &array_right,
+        &block_right,
+        &range_right,
+        &equality_left,
+        &comparison_left,
+        &logical_right,
+    ] {
         assert_diagnostic_contains(
             parsed,
-            "phase 1 `observe` values must be scalar expressions",
+            "phase 1 `observe` operands must be proof expressions",
         );
     }
 }

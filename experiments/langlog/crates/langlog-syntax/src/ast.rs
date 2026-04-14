@@ -141,9 +141,9 @@ pub struct ReturnStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserveStmt {
     pub span: Span,
-    pub subject: Spanned<String>,
+    pub left: Expr,
     pub op: ObserveOp,
-    pub value: Expr,
+    pub right: Expr,
     pub else_block: Block,
 }
 

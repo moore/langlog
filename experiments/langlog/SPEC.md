@@ -107,15 +107,15 @@ properties that should be enforced structurally rather than by convention:
 ## LLG-SYN-06 Observe Statements
 
 - `observe` statements MUST use the form
-  `observe <name> <op> <expr> else <block>`.
+  `observe <expr> <op> <expr> else <block>`.
 - An `observe` statement without an `else` block MUST be rejected with a syntax
   diagnostic.
-- The left-hand side of `observe` MUST be a bare name and MUST NOT be an
-  arbitrary expression.
+- The left-hand side of `observe` MUST accept the same phase 1 proof
+  expression forms as the right-hand side.
 - The phase 1 `observe` operator set MUST include `==`, `!=`, `<`, `<=`, `>`,
   and `>=`.
-- In phase 1, the right-hand side of `observe` MUST be limited to scalar
-  expression forms and MUST reject tuple, array, block, and range expressions.
+- In phase 1, `observe` proof expressions MUST reject tuple, array, block,
+  range, logical, equality, and comparison subexpressions.
 
 ## LLG-TYPE-01 Phase 1 Types
 
@@ -172,6 +172,12 @@ properties that should be enforced structurally rather than by convention:
 - The semantic phase MUST require the `else` block of `observe` to be terminal
   so control cannot continue after a failed observation.
 
+## LLG-SEMA-03 Mutability And Stable Facts
+
+- The semantic phase MUST reject assignment to immutable bindings.
+- In phase 1, the semantic phase MUST reject `observe` proof expressions that
+  directly reference mutable bindings.
+
 ## LLG-PROOF-01 Proof-Required Operations
 
 - The proof phase MUST reject arithmetic that may overflow unless safety is
@@ -187,8 +193,8 @@ properties that should be enforced structurally rather than by convention:
   range checks, length checks, and membership tests.
 - The proof phase MUST incorporate explicit `observe` statements into the fact
   model on the continuing path after a guarded `observe` succeeds.
-- In phase 1, an `observe` fact MUST relate a named left-hand side symbol to a
-  scalar-valued right-hand side expression.
+- In phase 1, an `observe` fact MUST relate a left-hand proof expression to a
+  right-hand proof expression.
 
 ## LLG-REL-01 Collections And Relations
 

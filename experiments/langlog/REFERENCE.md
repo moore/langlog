@@ -104,7 +104,7 @@ Rules:
 
 ```langlog
 if total > 10 {
-    observe total < 1000 else {
+    observe total + 1 < 1001 else {
         return total;
     }
 } else {
@@ -163,7 +163,7 @@ return;
 ### `observe`
 
 ```langlog
-observe total <= 1000 else {
+observe total + 1 <= 1001 else {
     return total;
 }
 ```
@@ -172,13 +172,16 @@ observe total <= 1000 else {
 
 Rules:
 
-- Phase 1 `observe` uses the form `observe <name> <op> <expr> else <block>`.
+- Phase 1 `observe` uses the form `observe <expr> <op> <expr> else <block>`.
 - The `else` block is mandatory.
-- The left-hand side must be a bare name.
+- Both sides must be phase 1 proof expressions.
 - The supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`.
-- The right-hand side is limited to scalar expression forms in phase 1.
-- Tuple, array, block, and range expressions are rejected on the right-hand
-  side in phase 1.
+- Phase 1 proof expressions allow scalar literals, names, grouping, unary
+  operators, arithmetic, calls, and indexing.
+- Tuple, array, block, range, logical, equality, and comparison subexpressions
+  are rejected inside phase 1 proof expressions.
+- In phase 1, semantic checking rejects proof expressions that directly
+  reference `mut` bindings.
 - Semantic checking requires the `else` block to be terminal.
 - When the observed relation is true, the proof phase records the relational
   fact for later checking.
