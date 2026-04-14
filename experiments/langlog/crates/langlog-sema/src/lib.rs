@@ -222,6 +222,10 @@ impl<'a> Analyzer<'a> {
             Stmt::Observe(stmt) => {
                 self.resolve_name(stmt.subject.value.as_str(), stmt.subject.span, scopes);
                 self.analyze_expr(&stmt.value, scopes, function);
+                self.analyze_block(&stmt.else_block, scopes, function);
+                if !is_terminal_block(&stmt.else_block) {
+                    self.report_non_terminal_observe_else(stmt.else_block.span);
+                }
             }
         }
     }
@@ -455,6 +459,14 @@ impl<'a> Analyzer<'a> {
             ),
         );
     }
+
+    fn report_non_terminal_observe_else(&mut self, else_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("`observe` `else` blocks must be terminal in phase 1").with_label(
+                Label::primary(else_span, "false observations must not fall through"),
+            ),
+        );
+    }
 }
 
 fn name_span(expr: &Expr) -> Span {
@@ -472,6 +484,51 @@ fn is_bounded_iterable_type(ty: &langlog_syntax::ast::Type) -> bool {
             matches!(base.value.as_str(), "Set" | "Map")
         }
         _ => false,
+    }
+}
+
+fn is_terminal_block(block: &Block) -> bool {
+    block.trailing_expr.is_none() && block.statements.last().is_some_and(is_terminal_statement)
+}
+
+fn is_terminal_statement(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Return(_) => true,
+        Stmt::If(stmt) => {
+            is_terminal_block(&stmt.then_block)
+                && stmt
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(is_terminal_else_branch)
+        }
+        Stmt::Match(stmt) => {
+            !stmt.arms.is_empty()
+                && stmt
+                    .arms
+                    .iter()
+                    .all(|arm| is_terminal_match_body(&arm.body))
+        }
+        _ => false,
+    }
+}
+
+fn is_terminal_else_branch(branch: &ElseBranch) -> bool {
+    match branch {
+        ElseBranch::Block(block) => is_terminal_block(block),
+        ElseBranch::If(stmt) => {
+            is_terminal_block(&stmt.then_block)
+                && stmt
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(is_terminal_else_branch)
+        }
+    }
+}
+
+fn is_terminal_match_body(body: &MatchBody) -> bool {
+    match body {
+        MatchBody::Block(block) => is_terminal_block(block),
+        MatchBody::Expr(_) => false,
     }
 }
 

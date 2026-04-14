@@ -370,7 +370,9 @@ fn requirement_llg_sema_02_rejects_unbounded_iteration_forms() {
         r#"
 fn main() {
     for value in 0 .. 4 {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
@@ -386,7 +388,9 @@ fn main() {
         r#"
 fn main() {
     for value in [1, 2, 3] {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
@@ -402,7 +406,9 @@ fn main() {
         r#"
 fn main(values: [u32; 4]) {
     for value in values {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
@@ -418,7 +424,9 @@ fn main(values: [u32; 4]) {
         r#"
 fn main(values: Set<u32, 16>) {
     for value in values {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
@@ -435,7 +443,9 @@ fn main(values: Set<u32, 16>) {
 fn main() {
     let values = [1, 2, 3];
     for value in values {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
@@ -453,7 +463,9 @@ fn main() {
 fn main() {
     let count = 3;
     for value in count {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
@@ -467,10 +479,65 @@ fn helper() -> u32 { 4 }
 
 fn main() {
     for value in helper() {
-        observe value >= 0;
+        observe value >= 0 else {
+            return;
+        }
     }
 }
 "#,
         "helper()",
+    );
+}
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# The semantic phase MUST require the `else` block of `observe` to be terminal so control cannot continue after a failed observation.
+#[test]
+fn requirement_llg_sema_02_requires_observe_else_blocks_to_be_terminal() {
+    let terminal_else = analyze_ok(
+        r#"
+fn main(total: u32, limit: u32) {
+    observe total < limit else {
+        if limit == 0 {
+            return;
+        } else {
+            return;
+        }
+    }
+
+    total;
+}
+"#,
+    );
+    // Accept an observe else-block when every path in that block terminates.
+    assert!(
+        !terminal_else.has_errors(),
+        "{:#?}",
+        terminal_else.diagnostics
+    );
+
+    let non_terminal_else = analyze_ok(
+        r#"
+fn main(total: u32, limit: u32) {
+    observe total < limit else {
+        let fallback = 0;
+    }
+
+    total;
+}
+"#,
+    );
+    assert!(non_terminal_else.has_errors());
+
+    let main = function(&non_terminal_else, "main");
+    let Stmt::Observe(observe) = &main.body.statements[0] else {
+        panic!("expected observe statement");
+    };
+
+    // Reject an observe else-block when the false path can fall through.
+    assert_primary_diagnostic(
+        &non_terminal_else,
+        "`observe` `else` blocks must be terminal in phase 1",
+        observe.else_block.span,
     );
 }

@@ -484,14 +484,16 @@ impl<'a> Parser<'a> {
         let op = self.parse_observe_operator()?;
         let value = self.parse_expression(0)?;
         self.validate_observe_value(&value);
-        let end = self.expect_tag(TokenTag::Semi, "expected `;` after `observe`")?;
-        let span = start.span.cover(end.span).unwrap_or(start.span);
+        self.expect_tag(TokenTag::Else, "expected `else` after `observe`")?;
+        let else_block = self.parse_block()?;
+        let span = start.span.cover(else_block.span).unwrap_or(start.span);
 
         Some(ObserveStmt {
             span,
             subject,
             op,
             value,
+            else_block,
         })
     }
 
@@ -918,7 +920,9 @@ fn sum(values: [u32; 4]) -> u32 {
     for value in values {
         total = total + value;
     }
-    observe total < 100;
+    observe total < 100 else {
+        return total;
+    }
     return total;
 }
 "#,
@@ -956,6 +960,10 @@ fn sum(values: [u32; 4]) -> u32 {
                 assert_eq!(stmt.subject.value, "total");
                 assert_eq!(stmt.op, ObserveOp::Lt);
                 assert!(matches!(stmt.value.kind, ExprKind::Int(100)));
+                assert!(matches!(
+                    stmt.else_block.statements.as_slice(),
+                    [Stmt::Return(_)]
+                ));
             }
             other => panic!("expected observe statement, got {other:?}"),
         }

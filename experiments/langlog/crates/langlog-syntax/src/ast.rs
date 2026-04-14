@@ -144,6 +144,7 @@ pub struct ObserveStmt {
     pub subject: Spanned<String>,
     pub op: ObserveOp,
     pub value: Expr,
+    pub else_block: Block,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -262,9 +262,13 @@ fn main() {
     total = total + 1;
     total;
     if true {
-        observe total > 0;
+        observe total > 0 else {
+            return;
+        }
     } else {
-        observe total == 0;
+        observe total == 0 else {
+            return;
+        }
     }
     match true {
         true => { total = 1; },
@@ -273,7 +277,9 @@ fn main() {
     for value in [1, 2] {
         total = total + value;
     }
-    observe total > 0;
+    observe total > 0 else {
+        return;
+    }
     return;
 }
 "#,
@@ -316,7 +322,9 @@ fn requirement_llg_syn_02_rejects_missing_semicolons() {
         r#"
 fn main() {
     1
-    observe value == 1;
+    observe value == 1 else {
+        return;
+    }
 }
 "#,
     );
@@ -946,10 +954,10 @@ fn main() {
 
 //= SPEC.md#llg-syn-06-observe-statements
 //= type=test
-//# `observe` statements MUST use the form `observe <name> <op> <expr>;`.
+//# `observe` statements MUST use the form `observe <name> <op> <expr> else <block>`.
 #[test]
 fn requirement_llg_syn_06_parses_relational_observe_statements() {
-    let parsed = parse_ok("fn main(limit: u32) { observe limit <= limit + 1; }");
+    let parsed = parse_ok("fn main(limit: u32) { observe limit <= limit + 1 else { return; } }");
     let observe = observe_stmt(&first_function(&parsed).body.statements[0]);
 
     assert_eq!(observe.subject.value, "limit");
@@ -961,6 +969,20 @@ fn requirement_llg_syn_06_parses_relational_observe_statements() {
             ..
         }
     ));
+    assert!(matches!(
+        observe.else_block.statements.as_slice(),
+        [Stmt::Return(_)]
+    ));
+}
+
+//= SPEC.md#llg-syn-06-observe-statements
+//= type=test
+//# An `observe` statement without an `else` block MUST be rejected with a syntax diagnostic.
+#[test]
+fn requirement_llg_syn_06_rejects_missing_else_blocks() {
+    let parsed = parse_err("fn main(limit: u32) { observe limit <= 10 }");
+
+    assert_diagnostic_contains(&parsed, "expected `else` after `observe`");
 }
 
 //= SPEC.md#llg-syn-06-observe-statements
@@ -968,9 +990,11 @@ fn requirement_llg_syn_06_parses_relational_observe_statements() {
 //# The left-hand side of `observe` MUST be a bare name and MUST NOT be an arbitrary expression.
 #[test]
 fn requirement_llg_syn_06_rejects_non_name_left_hand_sides() {
-    let indexed_name =
-        parse_err("fn main(values: [u32; 4], limit: u32) { observe values[0] < limit; }");
-    let array_literal = parse_err("fn main(limit: u32) { observe [1, 2] < limit; }");
+    let indexed_name = parse_err(
+        "fn main(values: [u32; 4], limit: u32) { observe values[0] < limit else { return; } }",
+    );
+    let array_literal =
+        parse_err("fn main(limit: u32) { observe [1, 2] < limit else { return; } }");
 
     assert_diagnostic_contains(&indexed_name, "expected an `observe` comparison operator");
     assert_diagnostic_contains(&array_literal, "expected a name after `observe`");
@@ -984,12 +1008,12 @@ fn requirement_llg_syn_06_supports_the_phase_1_observe_operator_set() {
     let parsed = parse_ok(
         r#"
 fn main(value: u32, limit: u32) {
-    observe value == limit;
-    observe value != limit;
-    observe value < limit;
-    observe value <= limit;
-    observe value > limit;
-    observe value >= limit;
+    observe value == limit else { return; }
+    observe value != limit else { return; }
+    observe value < limit else { return; }
+    observe value <= limit else { return; }
+    observe value > limit else { return; }
+    observe value >= limit else { return; }
 }
 "#,
     );
@@ -1008,10 +1032,10 @@ fn main(value: u32, limit: u32) {
 //# In phase 1, the right-hand side of `observe` MUST be limited to scalar expression forms and MUST reject tuple, array, block, and range expressions.
 #[test]
 fn requirement_llg_syn_06_rejects_non_scalar_phase_1_observe_values() {
-    let tuple_value = parse_err("fn main(value: u32) { observe value == (1, 2); }");
-    let array_value = parse_err("fn main(value: u32) { observe value == [1, 2]; }");
-    let block_value = parse_err("fn main(value: u32) { observe value == { 1 }; }");
-    let range_value = parse_err("fn main(value: u32) { observe value == 0 .. 4; }");
+    let tuple_value = parse_err("fn main(value: u32) { observe value == (1, 2) else { return; } }");
+    let array_value = parse_err("fn main(value: u32) { observe value == [1, 2] else { return; } }");
+    let block_value = parse_err("fn main(value: u32) { observe value == { 1 } else { return; } }");
+    let range_value = parse_err("fn main(value: u32) { observe value == 0 .. 4 else { return; } }");
 
     for parsed in [&tuple_value, &array_value, &block_value, &range_value] {
         assert_diagnostic_contains(
@@ -1284,7 +1308,9 @@ fn main() {
         r#"
 fn main() {
     let value = ;
-    observe value == 1;
+    observe value == 1 else {
+        return;
+    }
 }
 "#,
     );

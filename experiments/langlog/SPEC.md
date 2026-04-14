@@ -106,7 +106,10 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-SYN-06 Observe Statements
 
-- `observe` statements MUST use the form `observe <name> <op> <expr>;`.
+- `observe` statements MUST use the form
+  `observe <name> <op> <expr> else <block>`.
+- An `observe` statement without an `else` block MUST be rejected with a syntax
+  diagnostic.
 - The left-hand side of `observe` MUST be a bare name and MUST NOT be an
   arbitrary expression.
 - The phase 1 `observe` operator set MUST include `==`, `!=`, `<`, `<=`, `>`,
@@ -166,6 +169,8 @@ properties that should be enforced structurally rather than by convention:
   loop model; phase 1 bounded iterables are range expressions, array literals,
   and bindings whose declared types or initializers make them fixed arrays or
   explicit-capacity `Set`/`Map` values.
+- The semantic phase MUST require the `else` block of `observe` to be terminal
+  so control cannot continue after a failed observation.
 
 ## LLG-PROOF-01 Proof-Required Operations
 
@@ -181,7 +186,7 @@ properties that should be enforced structurally rather than by convention:
 - The proof phase MUST derive facts from control-flow tests such as comparisons,
   range checks, length checks, and membership tests.
 - The proof phase MUST incorporate explicit `observe` statements into the fact
-  model.
+  model on the continuing path after a guarded `observe` succeeds.
 - In phase 1, an `observe` fact MUST relate a named left-hand side symbol to a
   scalar-valued right-hand side expression.
 

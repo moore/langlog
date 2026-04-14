@@ -286,11 +286,11 @@ mod tests {
 
     #[test]
     fn source_file_extracts_spans() {
-        let source = SourceFile::new("demo.llg", "observe count <= limit;\n");
+        let source = SourceFile::new("demo.llg", "observe count <= limit else { return; }\n");
         let span = source.span(8, 13);
 
         assert_eq!(source.span_text(span), Some("count"));
-        assert_eq!(source.line_span(1), Some(source.span(0, 23)));
+        assert_eq!(source.line_span(1), Some(source.span(0, 39)));
     }
 
     #[test]

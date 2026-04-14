@@ -208,6 +208,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Observe(stmt) => {
                 self.check_expr(&stmt.value, state);
+                self.check_block(&stmt.else_block, state);
                 self.facts.push(ProofFact {
                     source: FactSource::Observe,
                     origin_span: stmt.span,

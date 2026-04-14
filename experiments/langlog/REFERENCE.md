@@ -104,9 +104,13 @@ Rules:
 
 ```langlog
 if total > 10 {
-    observe total < 1000;
+    observe total < 1000 else {
+        return total;
+    }
 } else {
-    observe total >= 0;
+    observe total >= 0 else {
+        return total;
+    }
 }
 ```
 
@@ -159,21 +163,28 @@ return;
 ### `observe`
 
 ```langlog
-observe total <= 1000;
+observe total <= 1000 else {
+    return total;
+}
 ```
 
 `observe` records an explicit fact in the source program.
 
 Rules:
 
-- Phase 1 `observe` uses the form `observe <name> <op> <expr>;`.
+- Phase 1 `observe` uses the form `observe <name> <op> <expr> else <block>`.
+- The `else` block is mandatory.
 - The left-hand side must be a bare name.
 - The supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - The right-hand side is limited to scalar expression forms in phase 1.
 - Tuple, array, block, and range expressions are rejected on the right-hand
   side in phase 1.
-- The proof phase currently records relational facts from explicit `observe`
-  statements and simple comparison-based `if` conditions.
+- Semantic checking requires the `else` block to be terminal.
+- When the observed relation is true, the proof phase records the relational
+  fact for later checking.
+- The `else` block runs when the observed relation is false.
+- The proof phase currently also records simple comparison-based `if`
+  conditions.
 - The proof phase currently rejects division or remainder operations that are
   not proven non-zero, and indexing expressions that are not proven in bounds.
 - Arithmetic overflow checking is still ahead of the current implementation.

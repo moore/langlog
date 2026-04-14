@@ -236,7 +236,10 @@ mod tests {
         assert!(rendered.contains("fn main( {"));
         assert!(rendered.contains("^"));
 
-        let source = SourceFile::new("diagnostic.llg", "observe count <= limit;\n");
+        let source = SourceFile::new(
+            "diagnostic.llg",
+            "observe count <= limit else { return; }\n",
+        );
         let span = source.span(8, 13);
         let diagnostic = Diagnostic::error("example error")
             .with_label(Label::primary(span, "spans the whole name"));

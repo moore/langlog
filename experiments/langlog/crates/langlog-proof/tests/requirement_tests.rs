@@ -111,14 +111,18 @@ fn main(total: u32, limit: u32, baseline: u32) {
 
 //= SPEC.md#llg-proof-02-observations
 //= type=test
-//# The proof phase MUST incorporate explicit `observe` statements into the fact model.
+//# The proof phase MUST incorporate explicit `observe` statements into the fact model on the continuing path after a guarded `observe` succeeds.
 #[test]
 fn requirement_llg_proof_02_incorporates_observe_statements() {
     let (checked, proof) = check_ok(
         r#"
 fn main(total: u32, limit: u32) {
-    observe total <= limit;
-    observe total != 0;
+    observe total <= limit else {
+        return;
+    }
+    observe total != 0 else {
+        return;
+    }
 }
 "#,
     );
@@ -159,7 +163,9 @@ fn requirement_llg_proof_02_represents_phase_1_observe_facts_as_relations() {
     let (checked, proof) = check_ok(
         r#"
 fn main(total: u32, limit: u32, one: u32) {
-    observe total <= limit + one;
+    observe total <= limit + one else {
+        return;
+    }
 }
 "#,
     );
@@ -206,7 +212,9 @@ fn main(total: u32, denom: u32) {
     let (_, observed_safe) = check_ok(
         r#"
 fn main(total: u32, denom: u32) {
-    observe denom != 0;
+    observe denom != 0 else {
+        return;
+    }
     total / denom;
 }
 "#,
@@ -264,7 +272,9 @@ fn main() {
     let (_, observed_safe) = check_ok(
         r#"
 fn main(values: [u32; 4], index: u32) {
-    observe index < 4;
+    observe index < 4 else {
+        return;
+    }
     values[index];
 }
 "#,

@@ -98,21 +98,25 @@ proof engine can use later. The syntax for that is `observe`:
 
 ```langlog
 fn bounded(total: u32) -> u32 {
-    observe total <= 1000;
+    observe total <= 1000 else {
+        return total;
+    }
     total
 }
 ```
 
 Today:
 
-- `observe` parses as `observe <name> <op> <expr>;`
+- `observe` parses as `observe <name> <op> <expr> else <block>`
+- the `else` block is mandatory
 - the left-hand side must be a bare name
 - the supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`
 - tuple, array, block, and range expressions are rejected on the right-hand
   side in phase 1
 - it appears in the AST
-- the proof phase now records relational facts from explicit `observe`
-  statements
+- semantic checking requires the `else` block to be terminal
+- when the observed relation is true, the proof phase records the relational
+  fact from the statement
 - the proof phase also records simple comparison facts from `if` conditions
 - the proof phase now rejects division or remainder by zero and out-of-bounds
   indexing when safety is not proven
@@ -128,9 +132,13 @@ bounds safety.
 ```langlog
 fn clamp_flag(total: u32) -> u32 {
     if total > 100 {
-        observe total < 1000;
+        observe total < 1000 else {
+            return total;
+        }
     } else {
-        observe total >= 0;
+        observe total >= 0 else {
+            return total;
+        }
     }
 
     total
@@ -202,9 +210,13 @@ fn sum(values: [u32; 4]) -> u32 {
     }
 
     if total > 100 {
-        observe total < 1000;
+        observe total < 1000 else {
+            return total;
+        }
     } else {
-        observe total >= 0;
+        observe total >= 0 else {
+            return total;
+        }
     }
 
     total
