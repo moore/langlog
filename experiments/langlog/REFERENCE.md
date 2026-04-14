@@ -319,6 +319,8 @@ The current semantic checker already enforces these rules:
 
 - `let` annotations, assignment values, returns, and call arguments must match
   declared types and function signatures.
+- tuple, `Option`, `Result`, `Set`, and `Map` types participate in those same
+  compatibility checks.
 - `if` conditions and logical operators must use `bool`.
 - arithmetic operators, ordering comparisons, and range bounds must use `u32`.
 - array literals must be homogeneous, and indexing requires an array target

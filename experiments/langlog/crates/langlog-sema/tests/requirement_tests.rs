@@ -895,3 +895,105 @@ fn main(flag: bool) {
         expr_stmt(&main.body, 2).span,
     );
 }
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# The semantic phase MUST recognize tuple, `Option`, `Result`, `Set`, and `Map` types in bindings, returns, call compatibility, and equality checks.
+#[test]
+fn requirement_llg_sema_04_recognizes_structured_and_builtin_generic_types() {
+    let valid = analyze_ok(
+        r#"
+fn pair_id(value: (u32, bool)) -> (u32, bool) { value }
+fn maybe_id(value: Option<u32>) -> Option<u32> { value }
+fn outcome_id(value: Result<u32, Error>) -> Result<u32, Error> { value }
+fn set_id(value: Set<u32, 16>) -> Set<u32, 16> { value }
+fn map_id(value: Map<u32, bool, 32>) -> Map<u32, bool, 32> { value }
+
+fn main(
+    pair: (u32, bool),
+    maybe: Option<u32>,
+    outcome: Result<u32, Error>,
+    members: Set<u32, 16>,
+    table: Map<u32, bool, 32>,
+) {
+    let pair_copy: (u32, bool) = pair_id(pair);
+    let maybe_copy: Option<u32> = maybe_id(maybe);
+    let outcome_copy: Result<u32, Error> = outcome_id(outcome);
+    let members_copy: Set<u32, 16> = set_id(members);
+    let table_copy: Map<u32, bool, 32> = map_id(table);
+    pair_copy == pair;
+    maybe_copy == maybe;
+    outcome_copy == outcome;
+    members_copy == members;
+    table_copy == table;
+}
+"#,
+    );
+    // Accept tuple and built-in generic shell types in lets, calls, returns, and equality checks.
+    assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn maybe_id(value: Option<u32>) -> Option<u32> { value }
+
+fn main(
+    pair: (u32, bool),
+    maybe: Option<u32>,
+    outcome: Result<u32, Error>,
+    members: Set<u32, 16>,
+    table: Map<u32, bool, 32>,
+) {
+    let wrong_pair: (u32, u32) = pair;
+    maybe_id(pair);
+    let wrong_members: Set<bool, 16> = members;
+    let wrong_map: Map<u32, u32, 32> = table;
+    maybe == outcome;
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+
+    let main = function(&invalid, "main");
+    let wrong_pair = let_stmt(&main.body, 0);
+    let wrong_call_arg = match &expr_stmt(&main.body, 1).kind {
+        ExprKind::Call { args, .. } => &args[0],
+        other => panic!("expected call expression, got {other:?}"),
+    };
+    let wrong_members = let_stmt(&main.body, 2);
+    let wrong_map = let_stmt(&main.body, 3);
+
+    // Reject tuple bindings whose annotation does not match the tuple value.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected (u32, u32), found (u32, bool)",
+        wrong_pair.span,
+    );
+
+    // Reject calls that pass a tuple where `Option<u32>` is required.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected Option<u32>, found (u32, bool)",
+        wrong_call_arg.span,
+    );
+
+    // Reject `Set` bindings whose element type does not match.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected Set<bool, 16>, found Set<u32, 16>",
+        wrong_members.span,
+    );
+
+    // Reject `Map` bindings whose value type does not match.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected Map<u32, u32, 32>, found Map<u32, bool, 32>",
+        wrong_map.span,
+    );
+
+    // Reject equality checks across different built-in generic shells.
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected Option<u32>, found Result<u32, Error>",
+        expr_stmt(&main.body, 4).span,
+    );
+}

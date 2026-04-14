@@ -10,15 +10,14 @@ allocation.
 
 - Current phase: `M2 semantic typing plus early proof checks`
 - Last completed milestone: `M1 Lexer and parser to AST`
-- Next concrete task: Extend the new initial type checker across tuples,
-  `Option`, `Result`, `Set`, and `Map`, then use typed expressions to add
-  overflow obligations to the proof phase.
+- Next concrete task: Use the now-typed scalar and structured expressions to
+  add overflow obligations to the proof phase.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Implemented semantic baseline: name resolution, recursion rejection, bounded
   loop enforcement, mutability checks, guarded `observe`, and an initial type
-  checker for scalar operators, calls, arrays, indexing, assignments, and
-  returns are all in place.
+  checker for scalar operators, tuples, built-in generic shells, calls, arrays,
+  indexing, assignments, and returns are all in place.
 - Implemented proof baseline: control-flow and `observe` facts already drive
   divide-by-zero and out-of-bounds indexing checks.
 - Project task runner: use `./tasks.sh` in `experiments/langlog/` to run the
@@ -58,9 +57,8 @@ into AST and report parse errors with precise spans.
 
 - [ ] Lower AST into a typed HIR.
 - [x] Implement name resolution and scope handling.
-- [x] Add the initial type checker for scalar operators, calls, arrays,
-  indexing, assignments, and returns.
-- [ ] Extend type checking across tuples, `Option`, `Result`, `Set`, and `Map`.
+- [x] Add the initial type checker for scalar operators, tuples, built-in
+  generic shells, calls, arrays, indexing, assignments, and returns.
 - [x] Reject recursion.
 - [x] Reject unbounded loop forms and keep iteration syntax bounded.
 

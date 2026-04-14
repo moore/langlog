@@ -189,6 +189,8 @@ properties that should be enforced structurally rather than by convention:
   and range bounds to use `u32`.
 - The semantic phase MUST require array literals to have a homogeneous element
   type, and MUST require indexing to use an array target plus a `u32` index.
+- The semantic phase MUST recognize tuple, `Option`, `Result`, `Set`, and
+  `Map` types in bindings, returns, call compatibility, and equality checks.
 
 ## LLG-PROOF-01 Proof-Required Operations
 

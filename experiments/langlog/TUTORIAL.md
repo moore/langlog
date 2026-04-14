@@ -71,6 +71,8 @@ The current semantic checker also enforces these initial type rules:
 
 - `let` annotations, assignment values, returns, and call arguments must match
   declared types and function signatures
+- tuple, `Option`, `Result`, `Set`, and `Map` types participate in those same
+  compatibility checks
 - `if` conditions and logical operators must use `bool`
 - arithmetic operators, ordering comparisons, and range bounds must use `u32`
 - array literals must be homogeneous, and indexing requires an array target
@@ -259,8 +261,6 @@ Use it as the main parser smoke test while the compiler grows.
 The parser is no longer the only stage. The next compiler milestones are:
 
 - lower the AST into HIR
-- extend the new initial type checker across tuples, `Option`, `Result`, `Set`,
-  and `Map`
 - add overflow obligations to the proof phase
 - enforce the first collection relation
 
