@@ -1,6 +1,7 @@
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -11,16 +12,30 @@ fn main() -> ExitCode {
 }
 
 fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
-    match (args.next().as_deref(), args.next(), args.next()) {
-        (Some("check"), Some(path), None) => run_check(PathBuf::from(path)),
+    match (
+        args.next().as_deref(),
+        args.next(),
+        args.next(),
+        args.next(),
+    ) {
+        (Some("check"), Some(path), None, None) => run_check(PathBuf::from(path), false),
+        (Some("check"), Some(flag), Some(path), None) if flag == "--warnings-as-errors" => {
+            run_check(PathBuf::from(path), true)
+        }
         _ => {
-            eprintln!("usage: langlog check <path>");
+            eprintln!("usage: langlog check [--warnings-as-errors] <path>");
             ExitCode::from(2)
         }
     }
 }
 
-fn run_check(path: PathBuf) -> ExitCode {
+struct CheckOutput {
+    stdout: String,
+    stderr: String,
+    exit: ExitCode,
+}
+
+fn run_check(path: PathBuf, warnings_as_errors: bool) -> ExitCode {
     let source = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) => {
@@ -42,24 +57,73 @@ fn run_check(path: PathBuf) -> ExitCode {
     }
 
     let proof = langlog_proof::check(&checked);
-    if proof.has_errors() {
-        emit_diagnostics(&checked.parsed.source, &proof.diagnostics);
-        return ExitCode::from(1);
+    let output = finish_proof_check(&checked, &path, &proof, warnings_as_errors);
+    if !output.stderr.is_empty() {
+        eprint!("{}", output.stderr);
     }
-
-    println!(
-        "checked {} item(s) in {} (obligations: {}, observations: {})",
-        checked.parsed.module.items.len(),
-        path.display(),
-        proof.obligations,
-        proof.observations
-    );
-
-    ExitCode::SUCCESS
+    if !output.stdout.is_empty() {
+        print!("{}", output.stdout);
+    }
+    output.exit
 }
 
 fn emit_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) {
     eprint!("{}", render_diagnostics(source, diagnostics));
+}
+
+fn finish_proof_check(
+    checked: &langlog_sema::CheckedProgram,
+    path: &Path,
+    proof: &langlog_proof::CheckedProof,
+    warnings_as_errors: bool,
+) -> CheckOutput {
+    let diagnostics = if warnings_as_errors {
+        promote_warnings(&proof.diagnostics)
+    } else {
+        proof.diagnostics.clone()
+    };
+
+    if diagnostics
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.severity, Severity::Error))
+    {
+        return CheckOutput {
+            stdout: String::new(),
+            stderr: render_diagnostics(&checked.parsed.source, &diagnostics),
+            exit: ExitCode::from(1),
+        };
+    }
+
+    let stderr = if diagnostics.is_empty() {
+        String::new()
+    } else {
+        render_diagnostics(&checked.parsed.source, &diagnostics)
+    };
+
+    CheckOutput {
+        stdout: format!(
+            "checked {} item(s) in {} (obligations: {}, observations: {})\n",
+            checked.parsed.module.items.len(),
+            path.display(),
+            proof.obligations,
+            proof.observations
+        ),
+        stderr,
+        exit: ExitCode::SUCCESS,
+    }
+}
+
+fn promote_warnings(diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .cloned()
+        .map(|mut diagnostic| {
+            if matches!(diagnostic.severity, Severity::Warning) {
+                diagnostic.severity = Severity::Error;
+            }
+            diagnostic
+        })
+        .collect()
 }
 
 fn render_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) -> String {
@@ -159,13 +223,14 @@ fn underline_width(source: &SourceFile, span: Span, line: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_diagnostics, run};
+    use super::{finish_proof_check, render_diagnostics, run};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
-    use std::process;
+    use std::process::{self, ExitCode};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use langlog_proof::CheckedProof;
     use langlog_syntax::{Diagnostic, Label, SourceFile};
 
     struct TempSource {
@@ -201,6 +266,23 @@ mod tests {
         let success = run(["check".to_string(), source.path.display().to_string()].into_iter());
 
         assert_eq!(success, std::process::ExitCode::SUCCESS);
+    }
+
+    //= SPEC.md#llg-cli-01-single-file-front-end
+    //= type=test
+    //# The phase 1 front end MUST accept `langlog check --warnings-as-errors <path>`.
+    #[test]
+    fn requirement_llg_cli_01_accepts_check_warnings_as_errors_command() {
+        let source = TempSource::new("fn main() {}");
+
+        let success = run([
+            "check".to_string(),
+            "--warnings-as-errors".to_string(),
+            source.path.display().to_string(),
+        ]
+        .into_iter());
+
+        assert_eq!(success, ExitCode::SUCCESS);
     }
 
     //= SPEC.md#llg-cli-01-single-file-front-end
@@ -246,5 +328,53 @@ mod tests {
         let rendered = render_diagnostics(&source, &[diagnostic]);
 
         assert!(rendered.contains("^^^^^ spans the whole name"));
+    }
+
+    //= SPEC.md#llg-cli-02-cli-output-behavior
+    //= type=test
+    //# When a successful check includes warnings, the CLI MUST print the warnings to stderr while keeping the success summary on stdout.
+    #[test]
+    fn requirement_llg_cli_02_keeps_success_summaries_and_warning_output_on_separate_streams() {
+        let parsed = langlog_syntax::parse("warning.llg", "fn main() {}\n");
+        let checked = langlog_sema::analyze(parsed);
+        let warning_span = checked.parsed.source.span(3, 7);
+        let proof = CheckedProof {
+            obligations: 1,
+            observations: 0,
+            diagnostics: vec![Diagnostic::warning("example warning")
+                .with_label(Label::primary(warning_span, "warning label"))],
+            facts: Vec::new(),
+        };
+
+        let output = finish_proof_check(&checked, checked.parsed.source.path(), &proof, false);
+
+        assert_eq!(output.exit, ExitCode::SUCCESS);
+        assert!(output.stdout.contains("checked 1 item(s)"));
+        assert!(output.stderr.contains("warning: example warning"));
+        assert!(output.stderr.contains("warning.llg:1:4"));
+    }
+
+    //= SPEC.md#llg-cli-02-cli-output-behavior
+    //= type=test
+    //# `langlog check --warnings-as-errors <path>` MUST promote warnings to failing diagnostics.
+    #[test]
+    fn requirement_llg_cli_02_promotes_warnings_to_errors_when_requested() {
+        let parsed = langlog_syntax::parse("warning.llg", "fn main() {}\n");
+        let checked = langlog_sema::analyze(parsed);
+        let warning_span = checked.parsed.source.span(3, 7);
+        let proof = CheckedProof {
+            obligations: 0,
+            observations: 0,
+            diagnostics: vec![Diagnostic::warning("example warning")
+                .with_label(Label::primary(warning_span, "warning label"))],
+            facts: Vec::new(),
+        };
+
+        let output = finish_proof_check(&checked, checked.parsed.source.path(), &proof, true);
+
+        assert_eq!(output.exit, ExitCode::from(1));
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("error: example warning"));
+        assert!(!output.stderr.contains("warning: example warning"));
     }
 }

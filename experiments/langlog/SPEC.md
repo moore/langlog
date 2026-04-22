@@ -23,14 +23,19 @@ properties that should be enforced structurally rather than by convention:
 ## LLG-CLI-01 Single-File Front End
 
 - The phase 1 front end MUST accept `langlog check <path>`.
+- The phase 1 front end MUST accept `langlog check --warnings-as-errors <path>`.
 - The phase 1 front end MUST treat `<path>` as a single source file.
 
 ## LLG-CLI-02 CLI Output Behavior
 
 - When `langlog check <path>` succeeds, the CLI MUST print a success summary to
   stdout.
+- When a successful check includes warnings, the CLI MUST print those warnings
+  to stderr while keeping the success summary on stdout.
 - When syntax analysis fails, the CLI MUST print diagnostics to stderr.
 - Success and syntax-error reporting MUST not write to the opposite stream.
+- `langlog check --warnings-as-errors <path>` MUST promote warnings to failing
+  diagnostics.
 
 ## LLG-LEX-01 Comments
 
@@ -209,6 +214,12 @@ properties that should be enforced structurally rather than by convention:
   model on the continuing path after a guarded `observe` succeeds.
 - In phase 1, an `observe` fact MUST relate a left-hand proof expression to a
   right-hand proof expression.
+- Control-flow comparisons over mutable bindings MUST be tracked for diagnostics
+  but MUST NOT discharge proof obligations.
+- The proof phase MUST emit a warning when a mutable control-flow comparison
+  would otherwise discharge a real obligation.
+- Binding-based proof facts MUST attach to binding identity rather than
+  identifier text so shadowing keeps facts distinct.
 
 ## LLG-REL-01 Collections And Relations
 

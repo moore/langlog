@@ -41,6 +41,7 @@ pub struct ResolvedName {
     pub declaration_span: Span,
     pub kind: BindingKind,
     pub name: String,
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +414,7 @@ impl<'a> Analyzer<'a> {
                 declaration_span: binding.span,
                 kind: binding.kind,
                 name: name.to_owned(),
+                mutable: binding.mutable,
             });
             return Some(binding);
         }

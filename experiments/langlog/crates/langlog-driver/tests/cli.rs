@@ -37,6 +37,13 @@ fn run_check(path: &Path) -> std::process::Output {
         .unwrap()
 }
 
+fn run_check_warnings_as_errors(path: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_langlog"))
+        .args(["check", "--warnings-as-errors", &path.display().to_string()])
+        .output()
+        .unwrap()
+}
+
 //= SPEC.md#llg-cli-02-cli-output-behavior
 //= type=test
 //# When `langlog check <path>` succeeds, the CLI MUST print a success summary to stdout.
@@ -122,4 +129,36 @@ fn main(total: u32, denom: u32) {
     assert!(failure_stderr.contains("error: possible divide-by-zero is not proven safe"));
     assert!(failure_stderr.contains(&broken.path.display().to_string()));
     assert!(failure_stderr.contains("total / denom;"));
+}
+
+#[test]
+fn check_reports_overflow_failures_to_stderr() {
+    let broken = TempSource::new(
+        r#"
+fn main(total: u32, step: u32) {
+    total + step;
+}
+"#,
+    );
+    let failure = run_check(&broken.path);
+
+    assert!(!failure.status.success());
+    let failure_stdout = String::from_utf8(failure.stdout).unwrap();
+    let failure_stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(failure_stdout.is_empty());
+    assert!(failure_stderr.contains("error: possible arithmetic overflow is not proven safe"));
+    assert!(failure_stderr.contains(&broken.path.display().to_string()));
+    assert!(failure_stderr.contains("total + step;"));
+}
+
+#[test]
+fn check_accepts_warnings_as_errors_flag() {
+    let source = TempSource::new("fn main() {}");
+    let success = run_check_warnings_as_errors(&source.path);
+
+    assert!(success.status.success());
+    let success_stdout = String::from_utf8(success.stdout).unwrap();
+    let success_stderr = String::from_utf8(success.stderr).unwrap();
+    assert!(success_stdout.contains("checked 1 item(s)"));
+    assert!(success_stderr.is_empty());
 }

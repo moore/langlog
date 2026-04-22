@@ -10,8 +10,8 @@ allocation.
 
 - Current phase: `M2 semantic typing plus early proof checks`
 - Last completed milestone: `M1 Lexer and parser to AST`
-- Next concrete task: Use the now-typed scalar and structured expressions to
-  add overflow obligations to the proof phase.
+- Next concrete task: Enforce the first typed collection relation using the
+  existing `Set` and `Map` shells.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Implemented semantic baseline: name resolution, recursion rejection, bounded
@@ -19,7 +19,9 @@ allocation.
   checker for scalar operators, tuples, built-in generic shells, calls, arrays,
   indexing, assignments, and returns are all in place.
 - Implemented proof baseline: control-flow and `observe` facts already drive
-  divide-by-zero and out-of-bounds indexing checks.
+  overflow, divide-by-zero, and out-of-bounds indexing checks; stable facts are
+  now keyed by binding identity, and mutable control-flow comparisons warn but
+  do not discharge obligations.
 - Project task runner: use `./tasks.sh` in `experiments/langlog/` to run the
   default fast checks in one place. Mutation testing is intentionally excluded
   from `./tasks.sh`; run `cargo mutants` manually when you explicitly want that
@@ -69,7 +71,7 @@ rejected, and unbounded loop forms are rejected.
 
 - [ ] Define a control-flow-based proof IR from HIR.
 - [x] Represent obligations for divide/mod by zero and out-of-bounds indexing.
-- [ ] Add overflow obligations.
+- [x] Add overflow obligations.
 - [x] Infer facts from control flow, comparisons, length checks, and membership
   tests.
 - [x] Support explicit `observe` facts when inference is insufficient.

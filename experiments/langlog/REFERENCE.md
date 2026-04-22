@@ -12,7 +12,10 @@ See also:
 ## Files And Compilation
 
 - A phase 1 Langlog program is a single source file.
-- The only supported command is `langlog check <path>`.
+- The supported commands are `langlog check <path>` and
+  `langlog check --warnings-as-errors <path>`.
+- Successful checks print their summary to stdout. Warnings print to stderr.
+- `--warnings-as-errors` promotes warnings into failing diagnostics.
 - The parser accepts one or more top-level function items.
 - Multi-file compilation, imports, modules, and packages do not exist yet.
 
@@ -186,11 +189,14 @@ Rules:
 - When the observed relation is true, the proof phase records the relational
   fact for later checking.
 - The `else` block runs when the observed relation is false.
-- The proof phase currently also records simple comparison-based `if`
-  conditions.
-- The proof phase currently rejects division or remainder operations that are
-  not proven non-zero, and indexing expressions that are not proven in bounds.
-- Arithmetic overflow checking is still ahead of the current implementation.
+- The proof phase also records simple comparison-based `if` conditions.
+- Facts inferred from `if` conditions are proof-usable only when they refer to
+  stable non-`mut` bindings.
+- Comparisons over `mut` bindings are retained only for diagnostics: they can
+  trigger warnings when an obligation would otherwise rely on them, but they do
+  not discharge proofs.
+- The proof phase currently rejects arithmetic overflow, division or remainder
+  by zero, and indexing expressions that are not proven safe.
 
 ## Patterns
 

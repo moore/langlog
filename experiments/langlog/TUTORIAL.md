@@ -22,6 +22,12 @@ If the file parses, the driver reports how many top-level items were checked. If
 the file is malformed, it prints a labeled source error with line and column
 information.
 
+If you want warnings to fail the check, use:
+
+```text
+cargo run -p langlog-driver --bin langlog -- check --warnings-as-errors examples/tutorial.llg
+```
+
 ## 2. Write Your First Function
 
 Every current Langlog file is a list of functions:
@@ -134,12 +140,15 @@ Today:
 - when the observed relation is true, the proof phase records the relational
   fact from the statement
 - the proof phase also records simple comparison facts from `if` conditions
-- the proof phase now rejects division or remainder by zero and out-of-bounds
-  indexing when safety is not proven
-- arithmetic overflow checking is still ahead of the current implementation
+- those `if`-derived facts discharge obligations only for stable non-`mut`
+  bindings
+- comparisons over `mut` bindings are retained only for diagnostics and can
+  warn when an obligation would otherwise rely on them
+- the proof phase now rejects arithmetic overflow, division or remainder by
+  zero, and out-of-bounds indexing when safety is not proven
 
-Later, `observe` will help discharge obligations such as overflow safety and
-bounds safety.
+`observe` already helps discharge overflow, divide-by-zero, and bounds
+obligations in phase 1.
 
 ## 6. Branch With `if`
 
@@ -162,7 +171,9 @@ fn clamp_flag(total: u32) -> u32 {
 ```
 
 In the current front end, `if` is parsed as a statement. It is not yet an
-expression form.
+expression form. Comparison-based `if` facts can help discharge proof
+obligations, but only when the referenced bindings are stable rather than
+`mut`.
 
 ## 7. Use `match`
 
@@ -261,7 +272,6 @@ Use it as the main parser smoke test while the compiler grows.
 The parser is no longer the only stage. The next compiler milestones are:
 
 - lower the AST into HIR
-- add overflow obligations to the proof phase
 - enforce the first collection relation
 
 So the right way to think about Langlog today is:

@@ -1,8 +1,8 @@
 use langlog_proof::{check, CheckedProof, FactSource};
 use langlog_sema::{analyze, CheckedProgram};
-use langlog_syntax::{parse, LabelStyle, ObserveOp};
+use langlog_syntax::{parse, LabelStyle, ObserveOp, Severity};
 
-fn check_ok(source: &str) -> (CheckedProgram, CheckedProof) {
+fn check_proof(source: &str) -> (CheckedProgram, CheckedProof) {
     let parsed = parse("requirement.llg", source);
     assert!(!parsed.has_errors(), "{:#?}", parsed.diagnostics);
 
@@ -10,21 +10,18 @@ fn check_ok(source: &str) -> (CheckedProgram, CheckedProof) {
     assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
 
     let proof = check(&checked);
-    assert!(!proof.has_errors(), "{:#?}", proof.diagnostics);
+    (checked, proof)
+}
 
+fn check_ok(source: &str) -> (CheckedProgram, CheckedProof) {
+    let (checked, proof) = check_proof(source);
+    assert!(!proof.has_errors(), "{:#?}", proof.diagnostics);
     (checked, proof)
 }
 
 fn check_err(source: &str) -> (CheckedProgram, CheckedProof) {
-    let parsed = parse("requirement.llg", source);
-    assert!(!parsed.has_errors(), "{:#?}", parsed.diagnostics);
-
-    let checked = analyze(parsed);
-    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
-
-    let proof = check(&checked);
+    let (checked, proof) = check_proof(source);
     assert!(proof.has_errors(), "{:#?}", proof.diagnostics);
-
     (checked, proof)
 }
 
@@ -54,8 +51,25 @@ fn assert_primary_diagnostic(
     message: &str,
     expected_span_text: &str,
 ) {
+    assert_primary_diagnostic_with_severity(
+        checked,
+        proof,
+        Severity::Error,
+        message,
+        expected_span_text,
+    );
+}
+
+fn assert_primary_diagnostic_with_severity(
+    checked: &CheckedProgram,
+    proof: &CheckedProof,
+    severity: Severity,
+    message: &str,
+    expected_span_text: &str,
+) {
     assert!(proof.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message == message
+        diagnostic.severity == severity
+            && diagnostic.message == message
             && diagnostic.labels.iter().any(|label| {
                 label.style == LabelStyle::Primary
                     && checked.parsed.source.span_text(label.span) == Some(expected_span_text)
@@ -161,8 +175,11 @@ fn main(total: u32, limit: u32) {
 fn requirement_llg_proof_02_represents_phase_1_observe_facts_as_relations() {
     let (checked, proof) = check_ok(
         r#"
-fn main(total: u32, limit: u32, one: u32) {
-    observe total + one <= limit + one else {
+fn main(total: u32) {
+    observe total <= 4294967294 else {
+        return;
+    }
+    observe total + 1 <= 4294967295 else {
         return;
     }
 }
@@ -174,13 +191,113 @@ fn main(total: u32, limit: u32, one: u32) {
         &checked,
         &proof,
         FactSource::Observe,
-        "total + one",
+        "total + 1",
         ObserveOp::LtEq,
-        "limit + one",
+        "4294967295",
     );
 
-    // This example introduces exactly one phase 1 observe relation.
-    assert_eq!(proof.observations, 1);
+    // This example includes the bound fact and the derived arithmetic observe relation.
+    assert_eq!(proof.observations, 2);
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# The proof phase MUST reject arithmetic that may overflow unless safety is proven.
+#[test]
+fn requirement_llg_proof_01_rejects_possible_overflow_without_proof() {
+    let (checked, failing_proof) = check_err(
+        r#"
+fn main(total: u32, step: u32, factor: u32) {
+    total + step;
+    total - step;
+    total * factor;
+}
+"#,
+    );
+
+    // Reject an unproven addition that may overflow `u32`.
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible arithmetic overflow is not proven safe",
+        "total + step",
+    );
+
+    // Reject an unproven subtraction that may underflow `u32`.
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible arithmetic overflow is not proven safe",
+        "total - step",
+    );
+
+    // Reject an unproven multiplication that may overflow `u32`.
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible arithmetic overflow is not proven safe",
+        "total * factor",
+    );
+
+    // Each arithmetic expression should create its own undischarged obligation.
+    assert_eq!(failing_proof.obligations, 3);
+    assert_eq!(failing_proof.diagnostics.len(), 3);
+
+    let (_, literal_safe) = check_ok(
+        r#"
+fn main() {
+    4294967294 + 1;
+    1 - 1;
+    429496729 * 10;
+}
+"#,
+    );
+
+    // Constant arithmetic at the edge of `u32` should be accepted when it stays in range.
+    assert_eq!(literal_safe.obligations, 3);
+
+    let (_, observed_safe) = check_ok(
+        r#"
+fn main(total: u32, factor: u32) {
+    observe total <= 4294967294 else {
+        return;
+    }
+    total + 1;
+
+    observe total >= 1 else {
+        return;
+    }
+    total - 1;
+
+    observe factor <= 429496729 else {
+        return;
+    }
+    factor * 10;
+}
+"#,
+    );
+
+    // Explicit bounds should discharge addition, subtraction, and multiplication obligations.
+    assert_eq!(observed_safe.obligations, 3);
+
+    let (_, control_flow_safe) = check_ok(
+        r#"
+fn main(total: u32, factor: u32) {
+    if total <= 4294967294 {
+        total + 1;
+    }
+    if total >= 1 {
+        total - 1;
+    }
+    if factor <= 429496729 {
+        factor * 10;
+    }
+}
+"#,
+    );
+
+    // Control-flow facts should also discharge the same overflow obligations.
+    assert_eq!(control_flow_safe.obligations, 3);
 }
 
 //= SPEC.md#llg-proof-01-proof-required-operations
@@ -294,4 +411,206 @@ fn main(values: [u32; 4], index: u32) {
 
     // A control-flow bound check should discharge the indexing obligation in the guarded block.
     assert_eq!(control_flow_safe.obligations, 1);
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Control-flow comparisons over mutable bindings MUST be tracked for diagnostics but MUST NOT discharge proof obligations.
+#[test]
+fn requirement_llg_proof_02_does_not_use_mutable_control_flow_facts_to_discharge_obligations() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(total: u32) {
+    let mut denom = 1;
+    if denom > 0 {
+        total / denom;
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible divide-by-zero is not proven safe",
+        "denom",
+    );
+    assert_primary_diagnostic_with_severity(
+        &checked,
+        &proof,
+        Severity::Warning,
+        "mutable control-flow comparison cannot discharge this proof obligation",
+        "denom > 0",
+    );
+    assert_eq!(proof.obligations, 1);
+    assert_eq!(proof.diagnostics.len(), 2);
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Warnings about mutable control-flow facts MUST appear only when such a fact would otherwise discharge a real obligation.
+#[test]
+fn requirement_llg_proof_02_warns_only_when_mutable_control_flow_would_discharge_an_obligation() {
+    let (_, no_obligation_warning) = check_ok(
+        r#"
+fn main() {
+    let mut index = 0;
+    if index < 4 {
+        index;
+    }
+    if index < 4 {
+        [10, 20, 30, 40][0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        !no_obligation_warning.has_warnings(),
+        "{:#?}",
+        no_obligation_warning.diagnostics
+    );
+
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4]) {
+    let mut index = 0;
+    if index < 4 {
+        values[index];
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+    assert_primary_diagnostic_with_severity(
+        &checked,
+        &proof,
+        Severity::Warning,
+        "mutable control-flow comparison cannot discharge this proof obligation",
+        "index < 4",
+    );
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Mutable control-flow facts MUST NOT survive reassignment as if they were stable proofs.
+#[test]
+fn requirement_llg_proof_02_rejects_mutable_reassignment_regressions() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], total: u32) {
+    let mut sum = total;
+    if sum <= 4294967294 {
+        sum = 4294967295;
+        sum + 1;
+    }
+
+    let mut denom = 1;
+    if denom != 0 {
+        denom = 0;
+        total / denom;
+    }
+
+    let mut index = 0;
+    if index < 4 {
+        index = 4;
+        values[index];
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible arithmetic overflow is not proven safe",
+        "sum + 1",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible divide-by-zero is not proven safe",
+        "denom",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+
+    let warning_count = proof
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .count();
+    assert_eq!(warning_count, 3, "{:#?}", proof.diagnostics);
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Binding-based proof facts MUST attach to binding identity rather than identifier text so shadowing does not inherit outer facts.
+#[test]
+fn requirement_llg_proof_02_distinguishes_shadowed_bindings_when_applying_facts() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], total: u32) {
+    observe total <= 4294967294 else {
+        return;
+    }
+    {
+        let total = 4294967295;
+        total + 1;
+    };
+
+    let denom = 1;
+    observe denom != 0 else {
+        return;
+    }
+    {
+        let denom = 0;
+        total / denom;
+    };
+
+    let index = 0;
+    observe index < 4 else {
+        return;
+    }
+    {
+        let index = 4;
+        values[index];
+    };
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible arithmetic overflow is not proven safe",
+        "total + 1",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible divide-by-zero is not proven safe",
+        "denom",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+    assert!(
+        !proof.has_warnings(),
+        "shadowing regressions should fail without mutable-control-flow warnings: {:#?}",
+        proof.diagnostics
+    );
 }
