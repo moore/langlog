@@ -67,6 +67,10 @@ Current parser rules:
 - Initializers are optional.
 - `mut` is optional.
 
+Successful semantic checking still requires enough information to determine the
+binding type, so phase 1 accepts either an annotation or an initializer but not
+neither.
+
 Semantic checking now enforces mutability:
 
 - assignment is rejected unless the target binding was declared `mut`
@@ -81,6 +85,9 @@ The current semantic checker also enforces these initial type rules:
   compatibility checks
 - `if` conditions and logical operators must use `bool`
 - arithmetic operators, ordering comparisons, and range bounds must use `u32`
+- phase 1 rejects bindings and literals whose types would remain unknown after
+  checking, including `let` bindings with neither annotation nor initializer
+  and empty array literals
 - array literals must be homogeneous, and indexing requires an array target
   plus a `u32` index
 

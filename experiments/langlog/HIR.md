@@ -235,6 +235,11 @@ set:
 migration is in progress, but it should not appear in a successfully checked
 HIR artifact.
 
+In the current front end, programs that would otherwise leave HIR types
+unknown are rejected during semantic checking instead. The first two concrete
+cases are `let` bindings with neither an annotation nor an initializer, and
+empty array literals without a contextual element type.
+
 ## AST To HIR Mapping Notes
 
 The first HIR elaboration is expected to follow these rules:

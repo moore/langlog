@@ -6,6 +6,10 @@ use langlog_syntax::ast::{
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span};
 
+mod hir;
+
+pub use hir::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingKind {
     Item,
@@ -49,6 +53,7 @@ pub struct CheckedProgram {
     pub parsed: ParsedModule,
     pub diagnostics: Vec<Diagnostic>,
     pub resolutions: Vec<ResolvedName>,
+    pub hir: Option<HirProgram>,
 }
 
 impl CheckedProgram {
@@ -76,11 +81,24 @@ pub fn analyze(parsed: ParsedModule) -> CheckedProgram {
     let mut type_checker = TypeChecker::new(&parsed);
     type_checker.check_module();
     diagnostics.extend(type_checker.diagnostics);
+    let hir = if diagnostics
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.severity, Severity::Error))
+    {
+        None
+    } else {
+        Some(hir::lower_program(
+            &parsed,
+            &resolutions,
+            &type_checker.facts,
+        ))
+    };
 
     CheckedProgram {
         parsed,
         diagnostics,
         resolutions,
+        hir,
     }
 }
 
@@ -156,6 +174,49 @@ impl SemanticType {
 
     fn is_u32(&self) -> bool {
         matches!(self, Self::U32)
+    }
+
+    fn contains_unknown(&self) -> bool {
+        match self {
+            Self::Unit
+            | Self::Bool
+            | Self::U32
+            | Self::Named(_)
+            | Self::Function(_)
+            | Self::Unknown => matches!(self, Self::Unknown),
+            Self::Tuple(elements) => elements.iter().any(SemanticType::contains_unknown),
+            Self::Array { element, .. } | Self::Option(element) | Self::Range(element) => {
+                element.contains_unknown()
+            }
+            Self::Result { ok, err } => ok.contains_unknown() || err.contains_unknown(),
+            Self::Set { element, .. } => element.contains_unknown(),
+            Self::Map { key, value, .. } => key.contains_unknown() || value.contains_unknown(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TypeFacts {
+    expr_types: HashMap<Span, SemanticType>,
+    binding_types: HashMap<Span, SemanticType>,
+}
+
+impl TypeFacts {
+    fn record_expr(&mut self, span: Span, ty: SemanticType) -> SemanticType {
+        self.expr_types.insert(span, ty.clone());
+        ty
+    }
+
+    fn record_binding(&mut self, span: Span, ty: SemanticType) {
+        self.binding_types.insert(span, ty);
+    }
+
+    fn expr_type(&self, span: Span) -> Option<&SemanticType> {
+        self.expr_types.get(&span)
+    }
+
+    fn binding_type(&self, span: Span) -> Option<&SemanticType> {
+        self.binding_types.get(&span)
     }
 }
 
@@ -630,6 +691,7 @@ struct TypeChecker<'a> {
     parsed: &'a ParsedModule,
     diagnostics: Vec<Diagnostic>,
     item_signatures: HashMap<String, FunctionType>,
+    facts: TypeFacts,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -648,6 +710,7 @@ impl<'a> TypeChecker<'a> {
             parsed,
             diagnostics: Vec::new(),
             item_signatures,
+            facts: TypeFacts::default(),
         }
     }
 
@@ -662,7 +725,10 @@ impl<'a> TypeChecker<'a> {
         let mut scopes = TypeScopeStack::default();
         scopes.push();
         for param in &function.params {
-            scopes.insert(param.name.value.clone(), lower_type(&param.ty));
+            let param_type = lower_type(&param.ty);
+            self.facts
+                .record_binding(param.name.span, param_type.clone());
+            scopes.insert(param.name.value.clone(), param_type);
         }
 
         let expected_return = function
@@ -712,6 +778,9 @@ impl<'a> TypeChecker<'a> {
                     .value
                     .as_ref()
                     .map(|expr| self.check_expr(expr, scopes));
+                if stmt.ty.is_none() && stmt.value.is_none() {
+                    self.report_let_requires_type_or_initializer(stmt.name.span);
+                }
                 if let (Some(annotation), Some(value_type)) = (&stmt.ty, &value_type) {
                     self.require_same_type(stmt.span, &lower_type(annotation), value_type);
                 }
@@ -721,6 +790,8 @@ impl<'a> TypeChecker<'a> {
                     .map(lower_type)
                     .or(value_type)
                     .unwrap_or(SemanticType::Unknown);
+                self.facts
+                    .record_binding(stmt.name.span, binding_type.clone());
                 scopes.insert(stmt.name.value.clone(), binding_type);
             }
             Stmt::Assign(stmt) => {
@@ -807,6 +878,7 @@ impl<'a> TypeChecker<'a> {
     ) {
         match &pattern.kind {
             PatternKind::Binding(name) => {
+                self.facts.record_binding(name.span, value_type.clone());
                 scopes.insert(name.value.clone(), value_type.clone());
             }
             PatternKind::Wildcard | PatternKind::Int(_) | PatternKind::Bool(_) => {}
@@ -814,7 +886,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_expr(&mut self, expr: &Expr, scopes: &mut TypeScopeStack) -> SemanticType {
-        match &expr.kind {
+        let ty = match &expr.kind {
             ExprKind::Int(_) => SemanticType::U32,
             ExprKind::Bool(_) => SemanticType::Bool,
             ExprKind::Name(name) => scopes
@@ -832,7 +904,7 @@ impl<'a> TypeChecker<'a> {
                     .map(|element| self.check_expr(element, scopes))
                     .collect(),
             ),
-            ExprKind::Array(elements) => self.check_array_expr(elements, scopes),
+            ExprKind::Array(elements) => self.check_array_expr(expr.span, elements, scopes),
             ExprKind::Block(block) => self.check_block(block, scopes, &SemanticType::Unknown),
             ExprKind::Unary { op, expr } => {
                 let operand = self.check_expr(expr, scopes);
@@ -866,10 +938,22 @@ impl<'a> TypeChecker<'a> {
                 self.check_index_expr(expr.span, &target_type, index.span, &index_type)
             }
             ExprKind::Grouped(expr) => self.check_expr(expr, scopes),
-        }
+        };
+
+        self.facts.record_expr(expr.span, ty)
     }
 
-    fn check_array_expr(&mut self, elements: &[Expr], scopes: &mut TypeScopeStack) -> SemanticType {
+    fn check_array_expr(
+        &mut self,
+        span: Span,
+        elements: &[Expr],
+        scopes: &mut TypeScopeStack,
+    ) -> SemanticType {
+        if elements.is_empty() {
+            self.report_empty_array_literal_requires_context(span);
+            return SemanticType::Unknown;
+        }
+
         let mut element_type = None;
         for element in elements {
             let current = self.check_expr(element, scopes);
@@ -1050,6 +1134,25 @@ impl<'a> TypeChecker<'a> {
         self.diagnostics.push(
             Diagnostic::error("indexing requires an array target")
                 .with_label(Label::primary(span, "this expression is not an array")),
+        );
+    }
+
+    fn report_let_requires_type_or_initializer(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("let bindings require a type annotation or initializer").with_label(
+                Label::primary(span, "add a type annotation or initializer here"),
+            ),
+        );
+    }
+
+    fn report_empty_array_literal_requires_context(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("empty array literals require an explicit element type").with_label(
+                Label::primary(
+                    span,
+                    "add a type annotation or a non-empty array literal here",
+                ),
+            ),
         );
     }
 }

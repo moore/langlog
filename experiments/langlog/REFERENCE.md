@@ -78,6 +78,8 @@ Rules:
 - `mut` is optional.
 - The type annotation is optional.
 - The initializer is optional.
+- Successful semantic checking still requires at least one of the type
+  annotation or initializer so the binding type is known.
 - The statement must end with `;`.
 
 ### Assignment
@@ -329,6 +331,9 @@ The current semantic checker already enforces these rules:
   compatibility checks.
 - `if` conditions and logical operators must use `bool`.
 - arithmetic operators, ordering comparisons, and range bounds must use `u32`.
+- phase 1 rejects bindings and literals whose types would remain unknown after
+  checking, including `let` bindings with neither annotation nor initializer
+  and empty array literals.
 - array literals must be homogeneous, and indexing requires an array target
   plus a `u32` index.
 

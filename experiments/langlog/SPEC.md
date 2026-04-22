@@ -196,6 +196,10 @@ properties that should be enforced structurally rather than by convention:
   `bool`.
 - The semantic phase MUST require arithmetic operators, ordering comparisons,
   and range bounds to use `u32`.
+- The semantic phase MUST reject phase 1 programs whose types would remain
+  unknown after checking; this includes `let` bindings without either a type
+  annotation or an initializer, and empty array literals without an explicit
+  element type.
 - The semantic phase MUST require array literals to have a homogeneous element
   type, and MUST require indexing to use an array target plus a `u32` index.
 - The semantic phase MUST recognize tuple, `Option`, `Result`, `Set`, and

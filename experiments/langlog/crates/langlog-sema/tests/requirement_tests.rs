@@ -1,4 +1,7 @@
-use langlog_sema::{analyze, BindingKind, CheckedProgram};
+use langlog_sema::{
+    analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction, HirStmt,
+    HirType,
+};
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt};
 use langlog_syntax::{parse, LabelStyle, Span};
 
@@ -19,6 +22,17 @@ fn function<'a>(checked: &'a CheckedProgram, name: &str) -> &'a langlog_syntax::
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing function {name:?}"))
+}
+
+fn hir_function<'a>(checked: &'a CheckedProgram, name: &str) -> &'a HirFunction {
+    checked
+        .hir
+        .as_ref()
+        .expect("expected lowered HIR")
+        .functions
+        .iter()
+        .find(|function| function.name == name)
+        .unwrap_or_else(|| panic!("missing HIR function {name:?}"))
 }
 
 fn name_span(expr: &Expr) -> Span {
@@ -78,6 +92,27 @@ fn assign_target(block: &Block, index: usize) -> &Expr {
     match &block.statements[index] {
         Stmt::Assign(stmt) => &stmt.target,
         other => panic!("expected assignment statement at index {index}, got {other:?}"),
+    }
+}
+
+fn hir_let_stmt(block: &HirBlock, index: usize) -> &langlog_sema::HirLetStmt {
+    match &block.statements[index] {
+        HirStmt::Let(stmt) => stmt,
+        other => panic!("expected HIR let statement at index {index}, got {other:?}"),
+    }
+}
+
+fn hir_expr_stmt(block: &HirBlock, index: usize) -> &HirExpr {
+    match &block.statements[index] {
+        HirStmt::Expr(stmt) => &stmt.expr,
+        other => panic!("expected HIR expression statement at index {index}, got {other:?}"),
+    }
+}
+
+fn hir_observe_stmt(block: &HirBlock, index: usize) -> &langlog_sema::HirObserveStmt {
+    match &block.statements[index] {
+        HirStmt::Observe(stmt) => stmt,
+        other => panic!("expected HIR observe statement at index {index}, got {other:?}"),
     }
 }
 
@@ -995,5 +1030,301 @@ fn main(
         &invalid,
         "type mismatch: expected Option<u32>, found Result<u32, Error>",
         expr_stmt(&main.body, 4).span,
+    );
+}
+
+//= HIR.md#llg-hir-01-pipeline-and-lowering
+//= type=test
+//# The front end MUST lower successfully checked programs from AST into typed HIR before generating proof IR or MIR.
+#[test]
+fn requirement_llg_hir_01_lowers_checked_programs_into_typed_hir_before_later_irs() {
+    let checked = analyze_ok(
+        r#"
+fn main(value: u32) -> u32 {
+    let copy = value;
+    copy
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let hir_main = hir_function(&checked, "main");
+    assert_eq!(hir_main.name, "main");
+    assert_eq!(hir_main.return_type, HirType::U32);
+}
+
+//= HIR.md#llg-hir-01-pipeline-and-lowering
+//= type=test
+//# Every HIR node MUST preserve a source span sufficient for diagnostics and traceability.
+#[test]
+fn requirement_llg_hir_01_preserves_hir_source_spans_for_diagnostics_and_traceability() {
+    let checked = analyze_ok(
+        r#"
+fn main(value: u32) {
+    let copy = value;
+    observe copy < 10 else { return; }
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let main = function(&checked, "main");
+    let hir_main = hir_function(&checked, "main");
+    let ast_let = let_stmt(&main.body, 0);
+    let hir_let = hir_let_stmt(&hir_main.body, 0);
+    let ast_observe = observe_stmt(&main.body, 1);
+    let hir_observe = hir_observe_stmt(&hir_main.body, 1);
+
+    assert_eq!(hir_main.span, main.span);
+    assert_eq!(hir_main.body.span, main.body.span);
+    assert_eq!(hir_let.span, ast_let.span);
+    assert_eq!(hir_let.binding.span, ast_let.name.span);
+    assert_eq!(
+        checked.parsed.source.span_text(hir_let.binding.span),
+        Some("copy")
+    );
+    assert_eq!(hir_observe.span, ast_observe.span);
+    assert_eq!(hir_observe.left.span, ast_observe.left.span);
+    assert_eq!(hir_observe.right.span, ast_observe.right.span);
+    assert_eq!(hir_observe.else_block.span, ast_observe.else_block.span);
+}
+
+//= HIR.md#llg-hir-02-identities-and-resolution
+//= type=test
+//# Every HIR function item, parameter, and local binding MUST carry a stable semantic identity, and every HIR name use MUST resolve to either an item identity or a binding identity.
+#[test]
+fn requirement_llg_hir_02_attaches_stable_identities_and_resolved_references() {
+    let checked = analyze_ok(
+        r#"
+fn helper(value: u32) -> u32 { value }
+
+fn main(param: u32) {
+    let local = helper(param);
+    helper(local);
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let helper = function(&checked, "helper");
+    let main = function(&checked, "main");
+    let hir_helper = hir_function(&checked, "helper");
+    let hir_main = hir_function(&checked, "main");
+    let hir_local = hir_let_stmt(&hir_main.body, 0);
+
+    assert_eq!(hir_helper.id.declaration_span, helper.name.span);
+    assert_eq!(
+        hir_helper.params[0].id.declaration_span,
+        helper.params[0].name.span
+    );
+    assert_eq!(hir_main.id.declaration_span, main.name.span);
+    assert_eq!(
+        hir_main.params[0].id.declaration_span,
+        main.params[0].name.span
+    );
+    assert_eq!(
+        hir_local.binding.id.declaration_span,
+        let_stmt(&main.body, 0).name.span
+    );
+
+    let initializer = hir_local.value.as_ref().expect("expected HIR initializer");
+    let HirExprKind::Call { callee, args } = &initializer.kind else {
+        panic!("expected HIR call initializer, got {:?}", initializer.kind);
+    };
+    let HirExprKind::Item(item_id) = callee.kind else {
+        panic!("expected HIR item callee, got {:?}", callee.kind);
+    };
+    let HirExprKind::Binding(param_id) = args[0].kind else {
+        panic!("expected HIR parameter argument, got {:?}", args[0].kind);
+    };
+    assert_eq!(item_id.declaration_span, helper.name.span);
+    assert_eq!(param_id.declaration_span, main.params[0].name.span);
+
+    let call_expr = hir_expr_stmt(&hir_main.body, 1);
+    let HirExprKind::Call { callee, args } = &call_expr.kind else {
+        panic!("expected HIR call expression, got {:?}", call_expr.kind);
+    };
+    let HirExprKind::Item(item_id) = callee.kind else {
+        panic!("expected HIR item callee, got {:?}", callee.kind);
+    };
+    let HirExprKind::Binding(local_id) = args[0].kind else {
+        panic!(
+            "expected HIR local binding argument, got {:?}",
+            args[0].kind
+        );
+    };
+    assert_eq!(item_id.declaration_span, helper.name.span);
+    assert_eq!(local_id.declaration_span, let_stmt(&main.body, 0).name.span);
+}
+
+//= HIR.md#llg-hir-03-types-and-mutability
+//= type=test
+//# Every HIR binding MUST record its mutability and type directly, and every HIR expression MUST record its type directly.
+#[test]
+fn requirement_llg_hir_03_records_mutability_and_types_directly_on_hir_nodes() {
+    let checked = analyze_ok(
+        r#"
+fn add_one(value: u32) -> u32 { value + 1 }
+
+fn main(flag: bool, input: u32) {
+    let mut total = add_one(input);
+    let pair = (total, flag);
+    pair;
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let hir_main = hir_function(&checked, "main");
+    let total = hir_let_stmt(&hir_main.body, 0);
+    let pair = hir_let_stmt(&hir_main.body, 1);
+
+    assert_eq!(hir_main.params[0].ty, HirType::Bool);
+    assert_eq!(hir_main.params[1].ty, HirType::U32);
+    assert!(total.binding.mutable);
+    assert_eq!(total.binding.ty, HirType::U32);
+    assert_eq!(
+        total.value.as_ref().expect("expected HIR initializer").ty,
+        HirType::U32
+    );
+    assert_eq!(
+        pair.binding.ty,
+        HirType::Tuple(vec![HirType::U32, HirType::Bool])
+    );
+    assert_eq!(
+        hir_expr_stmt(&hir_main.body, 2).ty,
+        HirType::Tuple(vec![HirType::U32, HirType::Bool])
+    );
+}
+
+//= HIR.md#llg-hir-04-normalization-boundary
+//= type=test
+//# Omitted surface function return types MUST lower to explicit `()` return types in HIR, grouped expressions MUST NOT survive as distinct HIR nodes, and HIR blocks MUST represent trailing result positions explicitly.
+#[test]
+fn requirement_llg_hir_04_normalizes_returns_grouping_and_block_results() {
+    let checked = analyze_ok(
+        r#"
+fn helper(value: u32) -> u32 { value }
+
+fn main(input: u32) {
+    let value = (helper(input));
+    {
+        value
+    };
+}
+
+fn unit() {}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let main = function(&checked, "main");
+    let hir_main = hir_function(&checked, "main");
+    let grouped_value = let_stmt(&main.body, 0)
+        .value
+        .as_ref()
+        .expect("expected grouped initializer");
+    let hir_value = hir_let_stmt(&hir_main.body, 0)
+        .value
+        .as_ref()
+        .expect("expected HIR grouped initializer");
+
+    assert_eq!(hir_function(&checked, "unit").return_type, HirType::Unit);
+    assert_eq!(hir_value.span, grouped_value.span);
+    assert!(matches!(hir_value.kind, HirExprKind::Call { .. }));
+
+    let block_expr = hir_expr_stmt(&hir_main.body, 1);
+    let HirExprKind::Block(block) = &block_expr.kind else {
+        panic!("expected HIR block expression, got {:?}", block_expr.kind);
+    };
+    assert!(block.result.is_some(), "expected explicit HIR block result");
+}
+
+//= HIR.md#llg-hir-04-normalization-boundary
+//= type=test
+//# In HIR v0, `observe` MUST remain an explicit HIR statement that preserves both proof expressions and the guarded `else` block.
+#[test]
+fn requirement_llg_hir_04_preserves_observe_as_an_explicit_hir_statement() {
+    let checked = analyze_ok(
+        r#"
+fn main(value: u32) {
+    observe value < 10 else {
+        return;
+    }
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let main = function(&checked, "main");
+    let hir_main = hir_function(&checked, "main");
+    let ast_observe = observe_stmt(&main.body, 0);
+    let hir_observe = hir_observe_stmt(&hir_main.body, 0);
+
+    assert_eq!(hir_observe.span, ast_observe.span);
+    assert!(matches!(hir_observe.left.kind, HirExprKind::Binding(_)));
+    assert!(matches!(hir_observe.right.kind, HirExprKind::Int(10)));
+    assert_eq!(hir_observe.else_block.statements.len(), 1);
+    assert!(matches!(
+        hir_observe.else_block.statements[0],
+        HirStmt::Return(_)
+    ));
+}
+
+//= HIR.md#llg-hir-05-successful-hir-well-formedness
+//= type=test
+//# Successfully checked HIR MUST NOT contain unresolved names or `Unknown` types.
+#[test]
+fn requirement_llg_hir_05_excludes_unresolved_names_and_unknown_types() {
+    let checked = analyze_ok(
+        r#"
+fn helper(value: u32) -> u32 { value }
+
+fn main(input: u32) {
+    let copy = helper(input);
+    copy;
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    assert!(
+        checked.hir.is_some(),
+        "expected well-formed HIR for checked program"
+    );
+
+    let missing_type = analyze_ok(
+        r#"
+fn main() {
+    let pending;
+}
+"#,
+    );
+    assert!(missing_type.has_errors());
+    assert!(missing_type.hir.is_none());
+    let pending = let_stmt(&function(&missing_type, "main").body, 0);
+    assert_primary_diagnostic(
+        &missing_type,
+        "let bindings require a type annotation or initializer",
+        pending.name.span,
+    );
+
+    let empty_array = analyze_ok(
+        r#"
+fn main() {
+    let items = [];
+}
+"#,
+    );
+    assert!(empty_array.has_errors());
+    assert!(empty_array.hir.is_none());
+    let items = let_stmt(&function(&empty_array, "main").body, 0);
+    assert_primary_diagnostic(
+        &empty_array,
+        "empty array literals require an explicit element type",
+        items
+            .value
+            .as_ref()
+            .expect("expected empty array initializer")
+            .span,
     );
 }
