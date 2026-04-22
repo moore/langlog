@@ -208,8 +208,8 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-PROOF-02 Observations
 
-- The proof phase MUST derive facts from control-flow tests such as comparisons,
-  range checks, length checks, and membership tests.
+- In the current phase, the proof phase MUST derive facts from comparison-based
+  control-flow tests.
 - The proof phase MUST incorporate explicit `observe` statements into the fact
   model on the continuing path after a guarded `observe` succeeds.
 - In phase 1, an `observe` fact MUST relate a left-hand proof expression to a

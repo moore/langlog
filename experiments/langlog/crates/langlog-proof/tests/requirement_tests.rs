@@ -79,7 +79,7 @@ fn assert_primary_diagnostic_with_severity(
 
 //= SPEC.md#llg-proof-02-observations
 //= type=test
-//# The proof phase MUST derive facts from control-flow tests such as comparisons, range checks, length checks, and membership tests.
+//# In the current phase, the proof phase MUST derive facts from comparison-based control-flow tests.
 #[test]
 fn requirement_llg_proof_02_derives_facts_from_control_flow_tests() {
     let (checked, proof) = check_ok(

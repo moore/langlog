@@ -72,8 +72,7 @@ rejected, and unbounded loop forms are rejected.
 - [ ] Define a control-flow-based proof IR from HIR.
 - [x] Represent obligations for divide/mod by zero and out-of-bounds indexing.
 - [x] Add overflow obligations.
-- [x] Infer facts from control flow, comparisons, length checks, and membership
-  tests.
+- [x] Infer facts from comparison-based control flow.
 - [x] Support explicit `observe` facts when inference is insufficient.
 - [x] Emit proof diagnostics when obligations are not discharged.
 
