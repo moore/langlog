@@ -13,6 +13,7 @@ User-facing docs:
 Compiler-facing docs:
 
 - [HIR.md](./HIR.md)
+- [PROOF_IR.md](./PROOF_IR.md)
 
 ## Goals
 

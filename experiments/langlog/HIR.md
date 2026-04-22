@@ -11,9 +11,11 @@ This document complements, but does not replace, the main language spec:
 
 - [SPEC.md](./SPEC.md) remains the authoritative surface-language and
   user-visible behavior spec.
+- [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific lowering boundary and
+  proof-facing invariants that sit after HIR.
 - [PLAN.md](./PLAN.md) tracks implementation sequencing and milestone status.
-- A future `SEMANTICS.md` should formalize static semantics over HIR and
-  dynamic semantics over MIR.
+- A future `SEMANTICS.md` should formalize static semantics over HIR, proof
+  judgments over Proof IR, and dynamic semantics over MIR.
 
 ## LLG-HIR-01 Pipeline And Lowering
 

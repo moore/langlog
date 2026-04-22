@@ -11,6 +11,10 @@ format = "markdown"
 source = "HIR.md"
 format = "markdown"
 
+[[specification]]
+source = "PROOF_IR.md"
+format = "markdown"
+
 [report.html]
 enabled = true
 

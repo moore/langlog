@@ -10,8 +10,8 @@ allocation.
 
 - Current phase: `M2 semantic typing plus early proof checks`
 - Last completed milestone: `M1 Lexer and parser to AST`
-- Next concrete task: Define the typed HIR, draft `HIR.md`, and move semantic
-  and proof inputs onto that representation before relation work continues.
+- Next concrete task: Lower HIR into Proof IR and move proof discharge onto
+  that representation before relation work continues.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Implemented semantic baseline: name resolution, recursion rejection, bounded
@@ -28,9 +28,11 @@ allocation.
   slower check.
 - Documentation split:
   - `SPEC.md` remains the surface-language and user-visible behavior spec.
-  - `HIR.md` will define AST-to-HIR elaboration plus HIR invariants.
+  - `HIR.md` defines AST-to-HIR elaboration plus HIR invariants.
+  - `PROOF_IR.md` defines HIR-to-Proof-IR lowering plus proof-facing
+    invariants.
   - A future `SEMANTICS.md` should define formal static semantics over HIR and
-    dynamic semantics over MIR.
+    Proof IR and dynamic semantics over MIR.
 - Formatting defaults: `rustfmt` and `rumdl` are both pinned to a 100-column
   line length so requirement text stays stable across Rust and Markdown tooling.
 
@@ -78,7 +80,8 @@ rejected, and unbounded loop forms are rejected.
 
 ### M3 Proof engine for obligations and observations
 
-- [ ] Define a control-flow-based proof IR from HIR.
+- [x] Draft `PROOF_IR.md` and define the initial HIR-to-Proof-IR boundary.
+- [ ] Lower HIR into a control-flow-based Proof IR.
 - [x] Represent obligations for divide/mod by zero and out-of-bounds indexing.
 - [x] Add overflow obligations.
 - [x] Infer facts from comparison-based control flow.
@@ -138,7 +141,10 @@ Exit criteria: MIR lowers to LLVM IR and native binaries can be produced.
 - `SPEC.md` is the authoritative draft language spec for phase 1 decisions.
 - `HIR.md` is the semantic IR spec for elaboration and compiler-facing
   invariants; it complements `SPEC.md` rather than replacing it.
-- Future formal semantics should target HIR and MIR rather than raw parser AST.
+- `PROOF_IR.md` is the proof-facing IR spec for lowering and obligation
+  structure between HIR and proof discharge.
+- Future formal semantics should target HIR, Proof IR, and MIR rather than raw
+  parser AST.
 - Diagnostics-only front end before execution backends.
 - Potentially failing arithmetic and indexing are proof-required, not silently
   runtime-checked.
