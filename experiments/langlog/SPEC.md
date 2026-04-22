@@ -10,6 +10,10 @@ User-facing docs:
 - [TUTORIAL.md](./TUTORIAL.md)
 - [TRACEABILITY.md](./TRACEABILITY.md)
 
+Compiler-facing docs:
+
+- [HIR.md](./HIR.md)
+
 ## Goals
 
 Langlog is a standalone systems language experiment focused on reliability

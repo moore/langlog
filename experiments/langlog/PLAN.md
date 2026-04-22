@@ -10,8 +10,8 @@ allocation.
 
 - Current phase: `M2 semantic typing plus early proof checks`
 - Last completed milestone: `M1 Lexer and parser to AST`
-- Next concrete task: Enforce the first typed collection relation using the
-  existing `Set` and `Map` shells.
+- Next concrete task: Define the typed HIR, draft `HIR.md`, and move semantic
+  and proof inputs onto that representation before relation work continues.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Implemented semantic baseline: name resolution, recursion rejection, bounded
@@ -26,6 +26,11 @@ allocation.
   default fast checks in one place. Mutation testing is intentionally excluded
   from `./tasks.sh`; run `cargo mutants` manually when you explicitly want that
   slower check.
+- Documentation split:
+  - `SPEC.md` remains the surface-language and user-visible behavior spec.
+  - `HIR.md` will define AST-to-HIR elaboration plus HIR invariants.
+  - A future `SEMANTICS.md` should define formal static semantics over HIR and
+    dynamic semantics over MIR.
 - Formatting defaults: `rustfmt` and `rumdl` are both pinned to a 100-column
   line length so requirement text stays stable across Rust and Markdown tooling.
 
@@ -57,7 +62,11 @@ into AST and report parse errors with precise spans.
 
 ### M2 HIR plus semantic checks
 
+- [ ] Draft `HIR.md` and define the initial AST-to-HIR elaboration boundary.
 - [ ] Lower AST into a typed HIR.
+- [ ] Re-home binding identity, mutability, and type attachment into HIR
+  construction so later phases stop depending on parser AST plus semantic side
+  tables.
 - [x] Implement name resolution and scope handling.
 - [x] Add the initial type checker for scalar operators, tuples, built-in
   generic shells, calls, arrays, indexing, assignments, and returns.
@@ -92,6 +101,8 @@ Exit criteria: one declared relation is enforced and proven during checking.
 ### M5 MIR plus interpreter or VM
 
 - [ ] Lower checked programs into MIR.
+- [ ] Draft `SEMANTICS.md` for formal dynamic semantics over MIR once the MIR
+  surface stabilizes.
 - [ ] Define executable semantics for the phase 1 language surface.
 - [ ] Implement an interpreter or VM for MIR.
 - [ ] Preserve proof-approved semantics without inserting hidden fallback
@@ -125,6 +136,9 @@ Exit criteria: MIR lowers to LLVM IR and native binaries can be produced.
 - Standalone compiler, not proc macros.
 - Rust-like syntax for the first language surface.
 - `SPEC.md` is the authoritative draft language spec for phase 1 decisions.
+- `HIR.md` is the semantic IR spec for elaboration and compiler-facing
+  invariants; it complements `SPEC.md` rather than replacing it.
+- Future formal semantics should target HIR and MIR rather than raw parser AST.
 - Diagnostics-only front end before execution backends.
 - Potentially failing arithmetic and indexing are proof-required, not silently
   runtime-checked.

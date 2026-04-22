@@ -7,6 +7,10 @@ pattern = "crates/**/*.rs"
 source = "SPEC.md"
 format = "markdown"
 
+[[specification]]
+source = "HIR.md"
+format = "markdown"
+
 [report.html]
 enabled = true
 

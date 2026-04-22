@@ -1,12 +1,16 @@
 # Duvet Traceability
 
 Langlog uses [Duvet](https://awslabs.github.io/duvet/) to trace normative
-requirements in [SPEC.md](./SPEC.md) to implementation and planned work.
+requirements in [SPEC.md](./SPEC.md) and [HIR.md](./HIR.md) to implementation
+and planned work.
 
 ## Layout
 
 - `.duvet/config.toml` configures Duvet for this experiment.
-- `SPEC.md` contains the normative requirements using RFC 2119 terms.
+- `SPEC.md` contains the normative surface-language requirements using RFC 2119
+  terms.
+- `HIR.md` contains normative compiler-facing semantic-IR requirements using
+  RFC 2119 terms.
 - Rust test files use Duvet annotations such as `//=` and `//#` to trace both
   implemented requirements and planned work.
 - Planned but not yet implemented requirements are tracked with `type=todo`
@@ -27,6 +31,8 @@ This uses `.duvet/config.toml` by default and writes reports under
 
 - Parser and diagnostic requirements are verified by tests in `langlog-syntax`
   and `langlog-driver`.
+- HIR requirements should be traced by tests or placeholder todo tests in the
+  crate that owns HIR lowering and validation.
 - Each normative requirement bullet should map to exactly one
   `requirement_*` test function.
 - Each `requirement_*` test function should trace exactly one normative
