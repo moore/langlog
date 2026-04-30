@@ -1,0 +1,15 @@
+[package]
+name = "langlog-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+langlog-sema = { path = "../langlog-sema" }
+langlog-syntax = { path = "../langlog-syntax" }
+wat = "1"
+
+[dev-dependencies]
+wasmtime = "28"
+
+[lib]
+path = "src/lib.rs"

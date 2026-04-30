@@ -29,13 +29,19 @@ properties that should be enforced structurally rather than by convention:
 
 - The phase 1 front end MUST accept `langlog check <path>`.
 - The phase 1 front end MUST accept `langlog check --warnings-as-errors <path>`.
+- The phase 1 front end MUST accept `langlog build --target wasm <path>`.
+- The phase 1 front end MUST use `.langlog-config` build settings when
+  building source files below that config file.
 - The phase 1 front end MUST treat `<path>` as a single source file.
 
 ## LLG-CLI-02 CLI Output Behavior
 
 - When `langlog check <path>` succeeds, the CLI MUST print a success summary to
   stdout.
-- When a successful check includes warnings, the CLI MUST print those warnings
+- When `langlog build --target wasm <path>` succeeds, the CLI MUST print the
+  output artifact path to stdout.
+- The CLI MUST reject unsupported build targets as usage errors.
+- When a successful check includes warnings, the CLI MUST print the warnings
   to stderr while keeping the success summary on stdout.
 - When syntax analysis fails, the CLI MUST print diagnostics to stderr.
 - Success and syntax-error reporting MUST not write to the opposite stream.
@@ -128,6 +134,8 @@ properties that should be enforced structurally rather than by convention:
   and `>=`.
 - In phase 1, `observe` proof expressions MUST reject tuple, array, block,
   range, logical, equality, and comparison subexpressions.
+- In phase 1, `observe` proof expressions MUST reject non-proof call callees,
+  call arguments, index targets, and index values.
 
 ## LLG-TYPE-01 Phase 1 Types
 
@@ -231,10 +239,12 @@ properties that should be enforced structurally rather than by convention:
   right-hand proof expression.
 - Control-flow comparisons over mutable bindings MUST be tracked for diagnostics
   but MUST NOT discharge proof obligations.
-- The proof phase MUST emit a warning when a mutable control-flow comparison
+- Warnings about mutable control-flow facts MUST appear only when such a fact
   would otherwise discharge a real obligation.
+- Mutable control-flow facts MUST NOT survive reassignment as if they were
+  stable proofs.
 - Binding-based proof facts MUST attach to binding identity rather than
-  identifier text so shadowing keeps facts distinct.
+  identifier text so shadowing does not inherit outer facts.
 
 ## LLG-REL-01 Collections And Relations
 

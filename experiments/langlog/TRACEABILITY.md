@@ -41,7 +41,7 @@ This uses `.duvet/config.toml` by default and writes reports under
   requirement bullet.
 - Each planned-but-unimplemented requirement should map to exactly one ignored
   `todo_*` placeholder test.
-- `scripts/check_requirement_tests.py` enforces that Duvet annotations live on
+- `cargo run -p langlog-xtask -- check-requirements` enforces that Duvet annotations live on
   test functions and that the one-to-one shape holds before the Duvet report
   runs.
 - Unit tests outside the requirement suites should cover non-normative helper

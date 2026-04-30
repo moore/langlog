@@ -24,8 +24,8 @@ run_markdown_format() {
 }
 
 run_duvet() {
-    echo "==> python3 scripts/check_requirement_tests.py"
-    python3 scripts/check_requirement_tests.py
+    echo "==> cargo run -p langlog-xtask -- check-requirements"
+    cargo run -p langlog-xtask -- check-requirements
     echo "==> duvet report --require-tests true"
     duvet report --require-tests true
 }

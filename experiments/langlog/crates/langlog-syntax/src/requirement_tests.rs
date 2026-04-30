@@ -1080,12 +1080,9 @@ fn requirement_llg_syn_06_rejects_non_proof_expression_operands() {
 //# In phase 1, `observe` proof expressions MUST reject non-proof call callees, call arguments, index targets, and index values.
 #[test]
 fn requirement_llg_syn_06_rejects_non_proof_call_and_index_subexpressions() {
-    let invalid_call_callee =
-        parse_err("fn main() { observe ({ 1 })(2) == 2 else { return; } }");
-    let invalid_call_arg =
-        parse_err("fn main(f: u32) { observe f([1]) == 1 else { return; } }");
-    let invalid_index_target =
-        parse_err("fn main() { observe [1][0] == 1 else { return; } }");
+    let invalid_call_callee = parse_err("fn main() { observe ({ 1 })(2) == 2 else { return; } }");
+    let invalid_call_arg = parse_err("fn main(f: u32) { observe f([1]) == 1 else { return; } }");
+    let invalid_index_target = parse_err("fn main() { observe [1][0] == 1 else { return; } }");
     let invalid_index_value =
         parse_err("fn main(values: [u32; 4]) { observe values[[0]] == 1 else { return; } }");
 
@@ -1498,8 +1495,14 @@ fn main(value: u32) {
     };
 
     assert_eq!(match_stmt.arms.len(), 2);
-    assert!(matches!(match_stmt.arms[0].pattern.kind, PatternKind::Int(1)));
-    assert!(matches!(match_stmt.arms[1].pattern.kind, PatternKind::Int(2)));
+    assert!(matches!(
+        match_stmt.arms[0].pattern.kind,
+        PatternKind::Int(1)
+    ));
+    assert!(matches!(
+        match_stmt.arms[1].pattern.kind,
+        PatternKind::Int(2)
+    ));
 }
 
 //= SPEC.md#llg-diag-03-parser-recovery
