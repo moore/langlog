@@ -911,7 +911,8 @@ fn observe_expr_is_phase1_proof_expr(expr: &Expr) -> bool {
 mod tests {
     use crate::ast::{BinaryOp, ExprKind, Item, ObserveOp, PatternKind, Stmt, TypeKind};
     use crate::lexer::lex;
-    use crate::parser::parse_lexed;
+    use crate::parser::{parse_lexed, Parser};
+    use crate::token::TokenTag;
 
     #[test]
     fn parses_a_function_with_core_statements() {
@@ -971,5 +972,47 @@ fn sum(values: [u32; 4]) -> u32 {
             other => panic!("expected observe statement, got {other:?}"),
         }
         assert!(matches!(&function.body.statements[3], Stmt::Return(_)));
+    }
+
+    //= SPEC.md#llg-syn-03-expressions-and-precedence
+    //= type=test
+    //# The AST for a binary expression MUST group operands according to the specified operator precedence and associativity rules.
+    #[test]
+    fn requirement_llg_syn_03_groups_binary_expressions_by_operator_precedence() {
+        let lexed = lex("expr.llg", "a + b * c - d");
+        let mut parser = Parser::new(&lexed.source, &lexed.tokens, lexed.diagnostics.clone());
+        let expr = parser
+            .parse_expression(11)
+            .expect("expected expression at minimum binding power");
+
+        assert!(parser.diagnostics.is_empty(), "{:#?}", parser.diagnostics);
+        match expr.kind {
+            ExprKind::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                assert!(matches!(right.kind, ExprKind::Name(_)));
+                match left.kind {
+                    ExprKind::Binary {
+                        op: BinaryOp::Add,
+                        left,
+                        right,
+                    } => {
+                        assert!(matches!(left.kind, ExprKind::Name(_)));
+                        assert!(matches!(
+                            right.kind,
+                            ExprKind::Binary {
+                                op: BinaryOp::Mul,
+                                ..
+                            }
+                        ));
+                    }
+                    other => panic!("expected additive left operand, got {other:?}"),
+                }
+            }
+            other => panic!("expected left-associated subtract expression, got {other:?}"),
+        }
+        assert!(parser.at(TokenTag::Eof));
     }
 }

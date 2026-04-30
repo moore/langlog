@@ -90,6 +90,8 @@ properties that should be enforced structurally rather than by convention:
   and indexing expressions.
 - The supported binary operators MUST include `..`, `||`, `&&`, `==`, `!=`,
   `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, and `%`.
+- The AST for a binary expression MUST group operands according to the
+  specified operator precedence and associativity rules.
 - Binary operators with the same precedence MUST associate to the left.
 - Postfix call and indexing MUST bind tighter than unary operators.
 - Unary operators MUST bind tighter than multiplicative operators.

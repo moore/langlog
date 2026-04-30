@@ -6,6 +6,3 @@ examine_globs = [
     "crates/langlog-driver/src/**/*.rs",
     "crates/langlog-syntax/src/**/*.rs",
 ]
-exclude_re = [
-    '^crates/langlog-syntax/src/parser\.rs:582:24:',
-]
