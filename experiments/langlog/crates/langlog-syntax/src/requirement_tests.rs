@@ -1395,6 +1395,115 @@ fn main() {
 
 //= SPEC.md#llg-diag-03-parser-recovery
 //= type=test
+//# Parser recovery MUST preserve following valid statements after a malformed nested expression.
+#[test]
+fn requirement_llg_diag_03_preserves_statements_after_malformed_nested_expressions() {
+    let broken_call_argument = parse_err(
+        r#"
+fn main(f: u32) {
+    let value = f(* 0, 1);
+    return;
+}
+"#,
+    );
+    let broken_index = parse_err(
+        r#"
+fn main(values: [u32; 4]) {
+    let value = values[;
+    return;
+}
+"#,
+    );
+    let broken_tuple_element = parse_err(
+        r#"
+fn main() {
+    let value = (1, ;
+    return;
+}
+"#,
+    );
+    let broken_array_element = parse_err(
+        r#"
+fn main() {
+    let value = [1, ;
+    return;
+}
+"#,
+    );
+    let broken_before_statement_keyword = parse_err(
+        r#"
+fn main(f: u32) {
+    let value = f(* 0
+    return;
+}
+"#,
+    );
+    let broken_before_block_end = parse_err(
+        r#"
+fn main(f: u32) {
+    let value = f(* 0
+}
+"#,
+    );
+
+    let statements = &first_function(&broken_call_argument).body.statements;
+    assert_eq!(statements.len(), 2);
+    let Stmt::Let(let_stmt) = &statements[0] else {
+        panic!("expected recovered let statement, got {:?}", statements[0]);
+    };
+    assert!(matches!(
+        let_stmt.value.as_ref().map(|expr| &expr.kind),
+        Some(ExprKind::Call { args, .. }) if args.len() == 1
+    ));
+    assert!(matches!(statements[1], Stmt::Return(_)));
+
+    for parsed in [&broken_index, &broken_tuple_element, &broken_array_element] {
+        let statements = &first_function(parsed).body.statements;
+        assert_eq!(statements.len(), 1);
+        assert!(matches!(statements[0], Stmt::Return(_)));
+    }
+
+    let statements = &first_function(&broken_before_statement_keyword)
+        .body
+        .statements;
+    assert_eq!(statements.len(), 1);
+    assert!(matches!(statements[0], Stmt::Return(_)));
+
+    assert_eq!(broken_before_block_end.module.items.len(), 1);
+    assert!(first_function(&broken_before_block_end)
+        .body
+        .statements
+        .is_empty());
+}
+
+//= SPEC.md#llg-diag-03-parser-recovery
+//= type=test
+//# Parser recovery MUST preserve following match arms after a malformed match arm.
+#[test]
+fn requirement_llg_diag_03_preserves_match_arms_after_malformed_match_arms() {
+    let parsed = parse_err(
+        r#"
+fn main(value: u32) {
+    match value {
+        0 => * 0,
+        1 => 10,
+        2 => 20
+    }
+}
+"#,
+    );
+    let statements = &first_function(&parsed).body.statements;
+    let Stmt::Match(match_stmt) = &statements[0] else {
+        panic!("expected match statement, got {:?}", statements[0]);
+    };
+
+    assert_eq!(match_stmt.arms.len(), 2);
+    assert!(matches!(match_stmt.arms[0].pattern.kind, PatternKind::Int(1)));
+    assert!(matches!(match_stmt.arms[1].pattern.kind, PatternKind::Int(2)));
+}
+
+//= SPEC.md#llg-diag-03-parser-recovery
+//= type=test
 //# A missing semicolon before `}` MUST not cascade into additional syntax errors for the same statement.
 #[test]
 fn requirement_llg_diag_03_missing_semicolons_before_rbrace_do_not_cascade() {

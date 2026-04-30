@@ -164,6 +164,10 @@ properties that should be enforced structurally rather than by convention:
   top-level input.
 - Parser recovery MUST preserve following valid statements after a malformed
   statement.
+- Parser recovery MUST preserve following valid statements after a malformed
+  nested expression.
+- Parser recovery MUST preserve following match arms after a malformed match
+  arm.
 - A missing semicolon before `}` MUST not cascade into additional syntax errors
   for the same statement.
 

@@ -419,12 +419,48 @@ impl<'a> Parser<'a> {
         let mut arms = Vec::new();
 
         while !self.at(TokenTag::RBrace) && !self.at(TokenTag::Eof) {
-            let pattern = self.parse_pattern()?;
-            self.expect_tag(TokenTag::FatArrow, "expected `=>` after match pattern")?;
+            let pattern = match self.parse_pattern() {
+                Some(pattern) => pattern,
+                None => {
+                    self.synchronize_match_arm();
+                    if self.bump_if(TokenTag::Comma) {
+                        continue;
+                    }
+                    break;
+                }
+            };
+            if self
+                .expect_tag(TokenTag::FatArrow, "expected `=>` after match pattern")
+                .is_none()
+            {
+                self.synchronize_match_arm();
+                if self.bump_if(TokenTag::Comma) {
+                    continue;
+                }
+                break;
+            }
             let body = if self.at(TokenTag::LBrace) {
-                MatchBody::Block(self.parse_block()?)
+                match self.parse_block() {
+                    Some(block) => MatchBody::Block(block),
+                    None => {
+                        self.synchronize_match_arm();
+                        if self.bump_if(TokenTag::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
             } else {
-                MatchBody::Expr(self.parse_expression(0)?)
+                match self.parse_expression(0) {
+                    Some(expr) => MatchBody::Expr(expr),
+                    None => {
+                        self.synchronize_match_arm();
+                        if self.bump_if(TokenTag::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
             };
 
             let end_span = match &body {
@@ -645,7 +681,22 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     if !self.at(TokenTag::RParen) {
                         loop {
-                            args.push(self.parse_expression(0)?);
+                            match self.parse_expression(0) {
+                                Some(arg) => args.push(arg),
+                                None => {
+                                    self.synchronize_expression_list_item(TokenTag::RParen);
+                                    if self.bump_if(TokenTag::Comma) {
+                                        if self.at(TokenTag::RParen) {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    if self.at(TokenTag::RParen) {
+                                        break;
+                                    }
+                                    return None;
+                                }
+                            }
                             if self.bump_if(TokenTag::Comma) {
                                 if self.at(TokenTag::RParen) {
                                     break;
@@ -667,7 +718,16 @@ impl<'a> Parser<'a> {
                 }
                 TokenTag::LBracket => {
                     self.bump();
-                    let index = self.parse_expression(0)?;
+                    let index = match self.parse_expression(0) {
+                        Some(index) => index,
+                        None => {
+                            self.synchronize_expression_list_item(TokenTag::RBracket);
+                            if self.at(TokenTag::RBracket) {
+                                self.bump();
+                            }
+                            return None;
+                        }
+                    };
                     let end = self.expect_tag(TokenTag::RBracket, "expected `]` after index")?;
                     let span = expr.span.cover(end.span).unwrap_or(expr.span);
                     expr = Expr::new(
@@ -727,11 +787,27 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        let first = self.parse_expression(0)?;
+        let first = match self.parse_expression(0) {
+            Some(first) => first,
+            None => {
+                self.synchronize_expression_list_item(TokenTag::RParen);
+                self.expect_tag(TokenTag::RParen, "expected `)` after expression")?;
+                return None;
+            }
+        };
         if self.bump_if(TokenTag::Comma) {
             let mut elements = vec![first];
             while !self.at(TokenTag::RParen) && !self.at(TokenTag::Eof) {
-                elements.push(self.parse_expression(0)?);
+                match self.parse_expression(0) {
+                    Some(element) => elements.push(element),
+                    None => {
+                        self.synchronize_expression_list_item(TokenTag::RParen);
+                        if self.bump_if(TokenTag::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
                 if !self.bump_if(TokenTag::Comma) {
                     break;
                 }
@@ -751,7 +827,19 @@ impl<'a> Parser<'a> {
         let mut elements = Vec::new();
         if !self.at(TokenTag::RBracket) {
             loop {
-                elements.push(self.parse_expression(0)?);
+                match self.parse_expression(0) {
+                    Some(element) => elements.push(element),
+                    None => {
+                        self.synchronize_expression_list_item(TokenTag::RBracket);
+                        if self.bump_if(TokenTag::Comma) {
+                            if self.at(TokenTag::RBracket) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
                 if self.bump_if(TokenTag::Comma) {
                     if self.at(TokenTag::RBracket) {
                         break;
@@ -846,6 +934,26 @@ impl<'a> Parser<'a> {
                     self.bump();
                 }
             }
+        }
+    }
+
+    fn synchronize_expression_list_item(&mut self, close: TokenTag) {
+        while !self.at(TokenTag::Eof) {
+            if self.at(close)
+                || self.at(TokenTag::Comma)
+                || self.at(TokenTag::Semi)
+                || self.at(TokenTag::RBrace)
+                || self.starts_statement()
+            {
+                break;
+            }
+            self.bump();
+        }
+    }
+
+    fn synchronize_match_arm(&mut self) {
+        while !self.at(TokenTag::Eof) && !self.at(TokenTag::Comma) && !self.at(TokenTag::RBrace) {
+            self.bump();
         }
     }
 
