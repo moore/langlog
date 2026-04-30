@@ -1,11 +1,10 @@
 use std::env;
-use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use langlog_syntax::{Diagnostic, Label, LabelStyle, Severity, SourceFile, Span};
+use langlog_compiler::{build_wasm, check_source, CheckOptions, CheckOutcome};
 
 fn main() -> ExitCode {
     run(env::args().skip(1))
@@ -42,13 +41,14 @@ struct CheckOutput {
 }
 
 fn run_check(path: PathBuf, warnings_as_errors: bool) -> ExitCode {
-    let checked = match check_source(&path) {
-        Ok(checked) => checked,
+    let source = match read_source(&path) {
+        Ok(source) => source,
         Err(exit) => return exit,
     };
-
-    let proof = langlog_proof::check(&checked);
-    let output = finish_proof_check(&checked, &path, &proof, warnings_as_errors);
+    let output = finish_check(
+        check_source(path.clone(), source, CheckOptions { warnings_as_errors }),
+        &path,
+    );
     if !output.stderr.is_empty() {
         eprint!("{}", output.stderr);
     }
@@ -58,28 +58,14 @@ fn run_check(path: PathBuf, warnings_as_errors: bool) -> ExitCode {
     output.exit
 }
 
-fn check_source(path: &Path) -> Result<langlog_sema::CheckedProgram, ExitCode> {
-    let source = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+fn read_source(path: &Path) -> Result<String, ExitCode> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents),
         Err(error) => {
             eprintln!("failed to read {}: {error}", path.display());
-            return Err(ExitCode::from(1));
+            Err(ExitCode::from(1))
         }
-    };
-
-    let parsed = langlog_syntax::parse(path, source);
-    if parsed.has_errors() {
-        emit_diagnostics(&parsed.source, &parsed.diagnostics);
-        return Err(ExitCode::from(1));
     }
-
-    let checked = langlog_sema::analyze(parsed);
-    if checked.has_errors() {
-        emit_diagnostics(&checked.parsed.source, &checked.diagnostics);
-        return Err(ExitCode::from(1));
-    }
-
-    Ok(checked)
 }
 
 fn run_build(path: PathBuf, target_arg: Option<String>) -> ExitCode {
@@ -99,26 +85,18 @@ fn run_build(path: PathBuf, target_arg: Option<String>) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let checked = match check_source(&path) {
-        Ok(checked) => checked,
+    let source = match read_source(&path) {
+        Ok(source) => source,
         Err(exit) => return exit,
     };
-    let proof = langlog_proof::check(&checked);
-    let output = finish_proof_check(&checked, &path, &proof, false);
-    if output.exit != ExitCode::SUCCESS {
-        if !output.stderr.is_empty() {
-            eprint!("{}", output.stderr);
-        }
-        return output.exit;
+    let outcome = build_wasm(path.clone(), source);
+    if outcome.has_errors() {
+        eprint!("{}", outcome.check.rendered_diagnostics());
+        return ExitCode::from(1);
     }
-
-    let module = match langlog_wasm::compile(&checked) {
-        Ok(module) => module,
-        Err(diagnostics) => {
-            emit_diagnostics(&checked.parsed.source, &diagnostics);
-            return ExitCode::from(1);
-        }
-    };
+    let module = outcome
+        .artifact
+        .expect("successful Wasm build has an artifact");
 
     let output_path = config.output_path(&path);
     if let Some(parent) = output_path.parent() {
@@ -233,171 +211,44 @@ fn parse_config_string(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
-fn emit_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) {
-    eprint!("{}", render_diagnostics(source, diagnostics));
-}
-
-fn finish_proof_check(
-    checked: &langlog_sema::CheckedProgram,
-    path: &Path,
-    proof: &langlog_proof::CheckedProof,
-    warnings_as_errors: bool,
-) -> CheckOutput {
-    let diagnostics = if warnings_as_errors {
-        promote_warnings(&proof.diagnostics)
-    } else {
-        proof.diagnostics.clone()
-    };
-
-    if diagnostics
-        .iter()
-        .any(|diagnostic| matches!(diagnostic.severity, Severity::Error))
-    {
+fn finish_check(outcome: CheckOutcome, path: &Path) -> CheckOutput {
+    if outcome.has_errors() {
         return CheckOutput {
             stdout: String::new(),
-            stderr: render_diagnostics(&checked.parsed.source, &diagnostics),
+            stderr: outcome.rendered_diagnostics(),
             exit: ExitCode::from(1),
         };
     }
 
-    let stderr = if diagnostics.is_empty() {
+    let stderr = if outcome.diagnostics.is_empty() {
         String::new()
     } else {
-        render_diagnostics(&checked.parsed.source, &diagnostics)
+        outcome.rendered_diagnostics()
     };
 
     CheckOutput {
         stdout: format!(
             "checked {} item(s) in {} (obligations: {}, observations: {})\n",
-            checked.parsed.module.items.len(),
+            outcome.item_count,
             path.display(),
-            proof.obligations,
-            proof.observations
+            outcome.obligations,
+            outcome.observations
         ),
         stderr,
         exit: ExitCode::SUCCESS,
     }
 }
 
-fn promote_warnings(diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
-    diagnostics
-        .iter()
-        .cloned()
-        .map(|mut diagnostic| {
-            if matches!(diagnostic.severity, Severity::Warning) {
-                diagnostic.severity = Severity::Error;
-            }
-            diagnostic
-        })
-        .collect()
-}
-
-fn render_diagnostics(source: &SourceFile, diagnostics: &[Diagnostic]) -> String {
-    let mut rendered = String::new();
-    for diagnostic in diagnostics {
-        render_diagnostic(source, diagnostic, &mut rendered);
-    }
-    rendered
-}
-
-fn render_diagnostic(source: &SourceFile, diagnostic: &Diagnostic, rendered: &mut String) {
-    let severity = match diagnostic.severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-    };
-
-    let _ = writeln!(rendered, "{severity}: {}", diagnostic.message);
-    for label in &diagnostic.labels {
-        render_label(source, label, rendered);
-    }
-
-    for note in &diagnostic.notes {
-        let _ = writeln!(rendered, "note: {note}");
-    }
-
-    rendered.push('\n');
-}
-
-fn render_label(source: &SourceFile, label: &Label, rendered: &mut String) {
-    let Some(location) = source.location(label.span.start()) else {
-        let _ = writeln!(rendered, " --> {}", source.path().display());
-        return;
-    };
-
-    let line = location.line;
-    let line_number = line.to_string();
-    let gutter_width = line_number.len();
-    let underline_len = underline_width(source, label.span, line);
-    let marker = match label.style {
-        LabelStyle::Primary => '^',
-        LabelStyle::Secondary => '-',
-    }
-    .to_string()
-    .repeat(underline_len.max(1));
-    let padding = " ".repeat(location.column.saturating_sub(1));
-
-    let _ = writeln!(
-        rendered,
-        "{:>width$} --> {}:{}:{}",
-        "",
-        source.path().display(),
-        line,
-        location.column,
-        width = gutter_width
-    );
-    let _ = writeln!(rendered, "{:>width$} |", "", width = gutter_width);
-    if let Some(text) = source.line_text(line) {
-        let _ = writeln!(
-            rendered,
-            "{line_number:>width$} | {text}",
-            width = gutter_width
-        );
-        match &label.message {
-            Some(message) => {
-                let _ = writeln!(
-                    rendered,
-                    "{:>width$} | {padding}{marker} {message}",
-                    "",
-                    width = gutter_width
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    rendered,
-                    "{:>width$} | {padding}{marker}",
-                    "",
-                    width = gutter_width
-                );
-            }
-        }
-    }
-}
-
-fn underline_width(source: &SourceFile, span: Span, line: usize) -> usize {
-    let Some(line_span) = source.line_span(line) else {
-        return 1;
-    };
-
-    let line_end = span.end().as_usize().min(line_span.end().as_usize());
-    let line_start = span.start().as_usize().min(line_end);
-
-    source.contents()[line_start..line_end]
-        .chars()
-        .count()
-        .max(1)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{finish_proof_check, render_diagnostics, run};
+    use super::{finish_check, run};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
     use std::process::{self, ExitCode};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use langlog_proof::CheckedProof;
-    use langlog_syntax::{Diagnostic, Label, SourceFile};
+    use langlog_compiler::{CheckOutcome, Diagnostic, Label, Severity, SourceFile};
 
     struct TempSource {
         path: PathBuf,
@@ -469,50 +320,23 @@ mod tests {
         assert_eq!(extra_path, std::process::ExitCode::from(2));
     }
 
-    //= SPEC.md#llg-diag-02-rendered-syntax-diagnostics
-    //= type=test
-    //# The CLI MUST render syntax errors with file path, line, column, source line text, and an underline spanning the full primary source span.
-    #[test]
-    fn requirement_llg_diag_02_renders_source_linked_syntax_errors() {
-        let parsed = langlog_syntax::parse("broken.llg", "fn main( {");
-        assert!(parsed.has_errors());
-
-        let rendered = render_diagnostics(&parsed.source, &parsed.diagnostics);
-
-        assert!(rendered.contains("error: expected a parameter name"));
-        assert!(rendered.contains("broken.llg:1:10"));
-        assert!(rendered.contains("fn main( {"));
-        assert!(rendered.contains("^"));
-
-        let source = SourceFile::new(
-            "diagnostic.llg",
-            "observe count <= limit else { return; }\n",
-        );
-        let span = source.span(8, 13);
-        let diagnostic = Diagnostic::error("example error")
-            .with_label(Label::primary(span, "spans the whole name"));
-        let rendered = render_diagnostics(&source, &[diagnostic]);
-
-        assert!(rendered.contains("^^^^^ spans the whole name"));
-    }
-
     //= SPEC.md#llg-cli-02-cli-output-behavior
     //= type=test
     //# When a successful check includes warnings, the CLI MUST print the warnings to stderr while keeping the success summary on stdout.
     #[test]
     fn requirement_llg_cli_02_keeps_success_summaries_and_warning_output_on_separate_streams() {
-        let parsed = langlog_syntax::parse("warning.llg", "fn main() {}\n");
-        let checked = langlog_sema::analyze(parsed);
-        let warning_span = checked.parsed.source.span(3, 7);
-        let proof = CheckedProof {
+        let source = SourceFile::new("warning.llg", "fn main() {}\n");
+        let warning_span = source.span(3, 7);
+        let outcome = CheckOutcome {
+            source,
+            item_count: 1,
             obligations: 1,
             observations: 0,
             diagnostics: vec![Diagnostic::warning("example warning")
                 .with_label(Label::primary(warning_span, "warning label"))],
-            facts: Vec::new(),
         };
 
-        let output = finish_proof_check(&checked, checked.parsed.source.path(), &proof, false);
+        let output = finish_check(outcome, PathBuf::from("warning.llg").as_path());
 
         assert_eq!(output.exit, ExitCode::SUCCESS);
         assert!(output.stdout.contains("checked 1 item(s)"));
@@ -525,18 +349,20 @@ mod tests {
     //# `langlog check --warnings-as-errors <path>` MUST promote warnings to failing diagnostics.
     #[test]
     fn requirement_llg_cli_02_promotes_warnings_to_errors_when_requested() {
-        let parsed = langlog_syntax::parse("warning.llg", "fn main() {}\n");
-        let checked = langlog_sema::analyze(parsed);
-        let warning_span = checked.parsed.source.span(3, 7);
-        let proof = CheckedProof {
+        let source = SourceFile::new("warning.llg", "fn main() {}\n");
+        let warning_span = source.span(3, 7);
+        let mut diagnostic = Diagnostic::warning("example warning")
+            .with_label(Label::primary(warning_span, "warning label"));
+        diagnostic.severity = Severity::Error;
+        let outcome = CheckOutcome {
+            source,
+            item_count: 1,
             obligations: 0,
             observations: 0,
-            diagnostics: vec![Diagnostic::warning("example warning")
-                .with_label(Label::primary(warning_span, "warning label"))],
-            facts: Vec::new(),
+            diagnostics: vec![diagnostic],
         };
 
-        let output = finish_proof_check(&checked, checked.parsed.source.path(), &proof, true);
+        let output = finish_check(outcome, PathBuf::from("warning.llg").as_path());
 
         assert_eq!(output.exit, ExitCode::from(1));
         assert!(output.stdout.is_empty());

@@ -4,6 +4,7 @@ members = [
     "crates/langlog-syntax",
     "crates/langlog-sema",
     "crates/langlog-proof",
+    "crates/langlog-compiler",
     "crates/langlog-wasm",
     "crates/langlog-xtask",
 ]

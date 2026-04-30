@@ -591,13 +591,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "langlog-driver"
+name = "langlog-compiler"
 version = "0.1.0"
 dependencies = [
  "langlog-proof",
  "langlog-sema",
  "langlog-syntax",
  "langlog-wasm",
+]
+
+[[package]]
+name = "langlog-driver"
+version = "0.1.0"
+dependencies = [
+ "langlog-compiler",
 ]
 
 [[package]]

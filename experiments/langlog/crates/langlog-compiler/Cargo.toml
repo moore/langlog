@@ -1,0 +1,13 @@
+[package]
+name = "langlog-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+langlog-proof = { path = "../langlog-proof" }
+langlog-sema = { path = "../langlog-sema" }
+langlog-syntax = { path = "../langlog-syntax" }
+langlog-wasm = { path = "../langlog-wasm" }
+
+[lib]
+path = "src/lib.rs"

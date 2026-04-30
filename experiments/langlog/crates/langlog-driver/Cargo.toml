@@ -4,10 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-langlog-proof = { path = "../langlog-proof" }
-langlog-sema = { path = "../langlog-sema" }
-langlog-syntax = { path = "../langlog-syntax" }
-langlog-wasm = { path = "../langlog-wasm" }
+langlog-compiler = { path = "../langlog-compiler" }
 
 [[bin]]
 name = "langlog"
