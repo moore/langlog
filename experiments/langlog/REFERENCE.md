@@ -1,8 +1,8 @@
 # Langlog Reference Manual
 
-Status: parser reference for the current experimental front end. This document
-describes the surface language accepted by `langlog check` today. It does not
-promise that every parsed program already has full semantic checking behind it.
+Status: phase 1 language and tooling reference for the current experiment.
+This document describes the surface language accepted by `langlog check`, the
+initial semantic and proof checks, and the current Wasm V1 backend.
 
 See also:
 
@@ -12,10 +12,21 @@ See also:
 ## Files And Compilation
 
 - A phase 1 Langlog program is a single source file.
-- The supported commands are `langlog check <path>` and
+- The supported check commands are `langlog check <path>` and
   `langlog check --warnings-as-errors <path>`.
+- The supported build command is `langlog build --target wasm <path>`.
 - Successful checks print their summary to stdout. Warnings print to stderr.
 - `--warnings-as-errors` promotes warnings into failing diagnostics.
+- Successful Wasm builds print the output artifact path to stdout.
+- Build configuration may be provided by a `.langlog-config` file discovered
+  from the source directory upward:
+
+  ```toml
+  [build]
+  target = "wasm"
+  out_dir = "target/langlog"
+  ```
+
 - The parser accepts one or more top-level function items.
 - Multi-file compilation, imports, modules, and packages do not exist yet.
 
@@ -182,9 +193,11 @@ Rules:
 - Both sides must be phase 1 proof expressions.
 - The supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - Phase 1 proof expressions allow scalar literals, names, grouping, unary
-  operators, arithmetic, calls, and indexing.
+  operators, and arithmetic.
 - Tuple, array, block, range, logical, equality, and comparison subexpressions
   are rejected inside phase 1 proof expressions.
+- Non-proof call callees, call arguments, index targets, and index values are
+  rejected inside phase 1 proof expressions.
 - In phase 1, semantic checking rejects proof expressions that directly
   reference `mut` bindings.
 - Semantic checking requires the `else` block to be terminal.
@@ -279,6 +292,22 @@ Indexing:
 values[index]
 ```
 
+## Playground Host Builtins
+
+The browser playground and Wasm backend expose a small terminal-oriented host
+API. These names are reserved and do not need user declarations:
+
+```langlog
+read_u32() -> u32
+print_u32(value: u32) -> ()
+print_bool(value: bool) -> ()
+print_newline() -> ()
+```
+
+`read_u32` consumes one whitespace-separated unsigned integer token from the
+playground stdin field. Invalid or exhausted input is a runtime trap in the
+host, not a compile-time diagnostic.
+
 ## Blocks
 
 Blocks use Rust-like braces:
@@ -337,6 +366,29 @@ The current semantic checker already enforces these rules:
 - array literals must be homogeneous, and indexing requires an array target
   plus a `u32` index.
 
+## Wasm V1 Backend
+
+`langlog build --target wasm <path>` compiles checked programs to WebAssembly.
+The backend runs only after syntax, semantic, and proof checks succeed.
+
+Wasm V1 supports:
+
+- `fn main() -> u32`
+- `u32` and `bool` values, both lowered as Wasm `i32`
+- local `let`, mutable assignment, expression statements, and block results
+- arithmetic, comparisons, `if`, direct calls, and `return`
+- playground host builtins lowered as `langlog_host` imports
+
+Wasm V1 rejects:
+
+- arrays and indexing
+- tuples
+- `match`
+- `for`
+- `observe` lowering
+- generic collections
+- `main` forms other than `fn main() -> u32`
+
 ## Diagnostics
 
 `langlog check` reports syntax errors with:
@@ -366,6 +418,6 @@ These are important current limits, not future promises:
 - `if` and `match` are statements, not expressions.
 - Field access and method syntax do not exist yet.
 - String literals do not exist yet.
-- Assignment targets are not semantically validated yet.
-- Type checking, name resolution, recursion rejection, and proof checking are
-  still in progress.
+- Wasm execution currently covers only the Wasm V1 subset described above.
+- Type checking, name resolution, recursion rejection, and proof checking
+  exist, but they intentionally cover only the current phase 1 language model.

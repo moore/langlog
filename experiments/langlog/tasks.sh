@@ -35,6 +35,9 @@ run_playground() {
     test -f playground/index.html
     test -f playground/app.js
     test -f playground/style.css
+    test -f REFERENCE.md
+    test -f TUTORIAL.md
+    test -f SPEC.md
     echo "==> cargo build -p langlog-playground-wasm --target wasm32-unknown-unknown"
     cargo build -p langlog-playground-wasm --target wasm32-unknown-unknown
     if ! command -v wasm-bindgen >/dev/null 2>&1; then
@@ -44,18 +47,24 @@ install it with `cargo install wasm-bindgen-cli`
 EOF
         return 1
     fi
+    echo "==> assemble target/playground-site"
+    rm -rf target/playground-site
+    mkdir -p target/playground-site/pkg
+    cp playground/index.html playground/app.js playground/style.css target/playground-site/
+    cp REFERENCE.md TUTORIAL.md SPEC.md target/playground-site/
+    cp -R examples target/playground-site/
     echo "==> wasm-bindgen --target web"
     wasm-bindgen \
         --target web \
-        --out-dir playground/pkg \
+        --out-dir target/playground-site/pkg \
         target/wasm32-unknown-unknown/debug/langlog_playground_wasm.wasm
 }
 
 run_playground_serve() {
     run_playground
     local port="${PORT:-8000}"
-    echo "==> serving playground at http://127.0.0.1:${port}"
-    python3 -m http.server "$port" --directory playground
+    echo "==> serving playground at http://127.0.0.1:${port}/"
+    python3 -m http.server "$port" --directory target/playground-site
 }
 
 refuse_cargo_mutants() {

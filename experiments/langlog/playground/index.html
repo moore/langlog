@@ -15,6 +15,8 @@
           <button id="checkButton" type="button">Check</button>
           <button id="buildButton" type="button">Build</button>
           <button id="runButton" type="button">Run</button>
+          <button class="doc-link" data-doc="REFERENCE.md" type="button">Reference</button>
+          <button class="doc-link" data-doc="TUTORIAL.md" type="button">Tutorial</button>
         </div>
       </header>
 
@@ -46,6 +48,14 @@
 
       </section>
     </main>
+
+    <aside id="docsDrawer" class="docs-drawer" aria-hidden="true">
+      <div class="docs-header">
+        <h2 id="docsTitle">Docs</h2>
+        <button id="docsCloseButton" type="button" aria-label="Close documentation">Close</button>
+      </div>
+      <div id="docsContent" class="docs-content"></div>
+    </aside>
 
     <script type="module" src="./app.js"></script>
   </body>

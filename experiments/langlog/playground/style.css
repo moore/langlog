@@ -175,6 +175,96 @@ textarea {
   color: #eaf2eb;
 }
 
+.docs-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 30;
+  width: min(620px, 42vw);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #b9c3bb;
+  background: #ffffff;
+  box-shadow: -18px 0 40px rgba(23, 32, 25, 0.18);
+  transform: translateX(100%);
+  transition: transform 160ms ease-out;
+}
+
+.docs-drawer.open {
+  transform: translateX(0);
+}
+
+.docs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #d9e0da;
+}
+
+.docs-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 28px;
+  color: #1c2621;
+  line-height: 1.55;
+}
+
+.docs-content h1,
+.docs-content h2,
+.docs-content h3 {
+  color: #172019;
+}
+
+.docs-content h1 {
+  font-size: 28px;
+  margin: 0 0 18px;
+}
+
+.docs-content h2 {
+  font-size: 20px;
+  margin: 26px 0 10px;
+}
+
+.docs-content h3 {
+  font-size: 16px;
+  margin: 20px 0 8px;
+}
+
+.docs-content p,
+.docs-content ul,
+.docs-content ol {
+  margin: 0 0 12px;
+}
+
+.docs-content pre {
+  display: block;
+  height: auto;
+  max-height: 360px;
+  margin: 0 0 14px;
+  flex: none;
+  white-space: pre;
+}
+
+.docs-content code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.95em;
+}
+
+.docs-content :not(pre) > code {
+  border: 1px solid #d9e0da;
+  border-radius: 4px;
+  background: #f4f7f4;
+  padding: 1px 4px;
+}
+
+.docs-content a {
+  color: #23614b;
+}
+
 @media (max-width: 860px) {
   body {
     overflow: auto;
@@ -183,6 +273,10 @@ textarea {
   .shell {
     height: auto;
     min-height: 100vh;
+  }
+
+  .docs-drawer {
+    width: min(92vw, 620px);
   }
 
   .toolbar,

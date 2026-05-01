@@ -108,8 +108,13 @@ const stdin = document.querySelector("#stdinInput");
 const examplesSelect = document.querySelector("#exampleSelect");
 const diagnosticsTab = document.querySelector("#diagnosticsTab");
 const watTab = document.querySelector("#watTab");
+const docsDrawer = document.querySelector("#docsDrawer");
+const docsTitle = document.querySelector("#docsTitle");
+const docsContent = document.querySelector("#docsContent");
+const docsCloseButton = document.querySelector("#docsCloseButton");
 
 let initialized = false;
+const docsCache = new Map();
 
 async function ensureInitialized() {
   if (!initialized) {
@@ -153,6 +158,146 @@ function selectOutputTab(name) {
   watTab.setAttribute("aria-selected", String(!showDiagnostics));
   diagnostics.classList.toggle("active", showDiagnostics);
   wat.classList.toggle("active", !showDiagnostics);
+}
+
+async function openDocs(path) {
+  docsTitle.textContent = path === "REFERENCE.md" ? "Reference" : "Tutorial";
+  docsContent.innerHTML = "<p>Loading...</p>";
+  docsDrawer.classList.add("open");
+  docsDrawer.setAttribute("aria-hidden", "false");
+
+  try {
+    if (!docsCache.has(path)) {
+      const response = await fetch(path);
+      if (!response.ok) {
+        throw new Error(`failed to load ${path}`);
+      }
+      docsCache.set(path, await response.text());
+    }
+    docsContent.innerHTML = renderMarkdown(docsCache.get(path));
+  } catch (error) {
+    docsContent.textContent = error.message;
+  }
+}
+
+function closeDocs() {
+  docsDrawer.classList.remove("open");
+  docsDrawer.setAttribute("aria-hidden", "true");
+}
+
+function renderMarkdown(markdown) {
+  const blocks = [];
+  const lines = markdown.split(/\r?\n/);
+  let paragraph = [];
+  let list = [];
+  let ordered = false;
+  let code = null;
+
+  function flushParagraph() {
+    if (paragraph.length > 0) {
+      blocks.push(`<p>${renderInline(paragraph.join(" "))}</p>`);
+      paragraph = [];
+    }
+  }
+
+  function flushList() {
+    if (list.length > 0) {
+      const tag = ordered ? "ol" : "ul";
+      blocks.push(`<${tag}>${list.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${tag}>`);
+      list = [];
+      ordered = false;
+    }
+  }
+
+  for (const line of lines) {
+    if (code) {
+      if (line.startsWith("```")) {
+        blocks.push(`<pre><code>${escapeHtml(code.lines.join("\n"))}</code></pre>`);
+        code = null;
+      } else {
+        code.lines.push(line);
+      }
+      continue;
+    }
+
+    if (line.startsWith("```")) {
+      flushParagraph();
+      flushList();
+      code = { lines: [] };
+      continue;
+    }
+
+    const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length;
+      blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const unorderedItem = /^-\s+(.*)$/.exec(line);
+    if (unorderedItem) {
+      flushParagraph();
+      if (list.length > 0 && ordered) {
+        flushList();
+      }
+      ordered = false;
+      list.push(unorderedItem[1]);
+      continue;
+    }
+
+    const orderedItem = /^\d+\.\s+(.*)$/.exec(line);
+    if (orderedItem) {
+      flushParagraph();
+      if (list.length > 0 && !ordered) {
+        flushList();
+      }
+      ordered = true;
+      list.push(orderedItem[1]);
+      continue;
+    }
+
+    if (line.trim() === "") {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    paragraph.push(line.trim());
+  }
+
+  flushParagraph();
+  flushList();
+  if (code) {
+    blocks.push(`<pre><code>${escapeHtml(code.lines.join("\n"))}</code></pre>`);
+  }
+
+  return blocks.join("\n");
+}
+
+function renderInline(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
+      const safeHref = /^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith("http")
+        ? "#"
+        : href;
+      return `<a href="${escapeAttribute(safeHref)}" target="_blank" rel="noreferrer">${label}</a>`;
+    });
+}
+
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replaceAll("'", "&#39;");
 }
 
 function tokenizeInput() {
@@ -224,6 +369,19 @@ document.querySelector("#runButton").addEventListener("click", runProgram);
 
 diagnosticsTab.addEventListener("click", () => selectOutputTab("diagnostics"));
 watTab.addEventListener("click", () => selectOutputTab("wat"));
+docsCloseButton.addEventListener("click", closeDocs);
+
+document.querySelectorAll("[data-doc]").forEach((button) => {
+  button.addEventListener("click", () => {
+    openDocs(button.dataset.doc);
+  });
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && docsDrawer.classList.contains("open")) {
+    closeDocs();
+  }
+});
 
 examplesSelect.addEventListener("change", () => {
   editor.value = examples[Number(examplesSelect.value)].source;

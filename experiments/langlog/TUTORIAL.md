@@ -1,9 +1,8 @@
 # Langlog Tutorial
 
 This tutorial introduces the current Langlog prototype as it exists today: a
-parser-first compiler front end with span-rich syntax errors. You can already
-write `.llg` files and run them through `langlog check`, even though execution
-and most semantic analysis are still ahead of the project.
+single-file language experiment with syntax diagnostics, semantic checks, proof
+checks, a Wasm V1 backend, and a browser playground.
 
 Use these docs together:
 
@@ -28,7 +27,50 @@ If you want warnings to fail the check, use:
 cargo run -p langlog-driver --bin langlog -- check --warnings-as-errors examples/tutorial.llg
 ```
 
-## 2. Write Your First Function
+## 2. Use The Playground
+
+The browser playground lets you edit one Langlog source file, check it, build
+it to Wasm, and run the exported `main` function.
+
+- Use **Check** to see syntax, semantic, and proof diagnostics.
+- Use **Build** to generate Wasm and inspect the WAT output.
+- Use **Run** to instantiate the generated Wasm and call `main`.
+- The terminal stdin field is whitespace-separated `u32` input for
+  `read_u32()`.
+
+The smallest runnable program is:
+
+```langlog
+fn main() -> u32 {
+    42
+}
+```
+
+Playground terminal I/O uses host builtins:
+
+```langlog
+fn main() -> u32 {
+    let value: u32 = read_u32();
+    print_u32(value);
+    print_newline();
+    value
+}
+```
+
+## 3. Build To Wasm
+
+From the command line, build the current Wasm V1 subset with:
+
+```text
+cargo run -p langlog-driver --bin langlog -- build --target wasm path/to/main.llg
+```
+
+Wasm V1 currently supports `fn main() -> u32`, scalar `u32` and `bool` values,
+locals, assignment, arithmetic, comparisons, `if`, direct calls, `return`, and
+the playground host builtins. It still rejects arrays/indexing, tuples, `match`,
+`for`, `observe` lowering, generic collections, and non-`u32` `main`.
+
+## 4. Write Your First Function
 
 Every current Langlog file is a list of functions:
 
@@ -49,7 +91,7 @@ Even though Langlog is inspired by Rust syntax, it is a separate language
 experiment. The goal is not Rust compatibility. The goal is a smaller language
 that can eventually prove stronger reliability properties.
 
-## 3. Bind Values With `let`
+## 5. Bind Values With `let`
 
 Use `let` for local bindings:
 
@@ -91,7 +133,7 @@ The current semantic checker also enforces these initial type rules:
 - array literals must be homogeneous, and indexing requires an array target
   plus a `u32` index
 
-## 4. Use Arrays And Loops
+## 6. Use Arrays And Loops
 
 Arrays are written with square brackets:
 
@@ -118,7 +160,7 @@ design is stricter: loops have to be bounded. The parser still accepts any
 expression after `in`, but semantic checking now rejects loop iterables outside
 the phase 1 bounded model.
 
-## 5. State Facts With `observe`
+## 7. State Facts With `observe`
 
 One of Langlog’s core ideas is that programs should be able to state facts the
 proof engine can use later. The syntax for that is `observe`:
@@ -140,6 +182,8 @@ Today:
 - the supported operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`
 - tuple, array, block, range, logical, equality, and comparison
   subexpressions are rejected inside phase 1 proof expressions
+- non-proof call callees, call arguments, index targets, and index values are
+  rejected inside phase 1 proof expressions
 - it appears in the AST
 - semantic checking rejects proof expressions that directly reference `mut`
   bindings
@@ -157,7 +201,7 @@ Today:
 `observe` already helps discharge overflow, divide-by-zero, and bounds
 obligations in phase 1.
 
-## 6. Branch With `if`
+## 8. Branch With `if`
 
 `if` uses Rust-like syntax:
 
@@ -182,7 +226,7 @@ expression form. Comparison-based `if` facts can help discharge proof
 obligations, but only when the referenced bindings are stable rather than
 `mut`.
 
-## 7. Use `match`
+## 9. Use `match`
 
 The parser also supports `match` statements:
 
@@ -210,7 +254,7 @@ Current pattern support is intentionally small:
 That is enough to start shaping the AST and later semantic passes without
 pretending the pattern language is finished.
 
-## 8. Read Parser Errors
+## 10. Read Parser Errors
 
 If you write malformed syntax:
 
@@ -231,7 +275,7 @@ error: expected a parameter name
 That error quality matters because the same span system will later be used by
 name-resolution, type-checking, and proof diagnostics.
 
-## 9. A Complete Example
+## 11. A Complete Example
 
 This file is included as [examples/tutorial.llg](./examples/tutorial.llg):
 
@@ -274,15 +318,18 @@ fn choose(flag: bool) -> u32 {
 
 Use it as the main parser smoke test while the compiler grows.
 
-## 10. What Comes Next
+## 12. What Comes Next
 
-The parser is no longer the only stage. The next compiler milestones are:
+The parser is no longer the only stage. Current next compiler milestones are:
 
-- lower the AST into HIR
 - enforce the first collection relation
+- define richer runtime semantics
+- broaden Wasm lowering beyond the V1 subset
+- improve playground and documentation polish
 
 So the right way to think about Langlog today is:
 
 - the syntax is becoming concrete
-- the semantic and proof layers exist, but they are still intentionally partial
+- the semantic, proof, and Wasm layers exist, but they are still intentionally
+  partial
 - the reliability model is the point of the experiment
