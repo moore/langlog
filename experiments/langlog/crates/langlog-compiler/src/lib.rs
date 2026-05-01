@@ -306,7 +306,7 @@ fn main(total: u32) {
     fn build_wasm_returns_backend_diagnostics_without_panicking() {
         let outcome = build_wasm(
             "memory.llg",
-            "fn main() -> u32 { let values: [u32; 1] = [1]; 1 }",
+            "fn helper() -> [u32; 1] { [1] }\nfn main() -> u32 { 1 }",
         );
 
         assert!(outcome.has_errors());
@@ -315,7 +315,7 @@ fn main(total: u32) {
             .check
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("not supported by Wasm v1")));
+            .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
     }
 
     //= SPEC.md#llg-diag-02-rendered-syntax-diagnostics

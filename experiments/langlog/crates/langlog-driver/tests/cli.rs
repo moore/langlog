@@ -323,10 +323,8 @@ fn main(total: u32, denom: u32) -> u32 {
 fn build_reports_backend_failures_to_stderr() {
     let source = TempSource::new(
         r#"
-fn main() -> u32 {
-    let values: [u32; 1] = [1];
-    1
-}
+fn helper() -> [u32; 1] { [1] }
+fn main() -> u32 { 1 }
 "#,
     );
     let failure = run_build_wasm(&source.path);
@@ -335,7 +333,7 @@ fn main() -> u32 {
     let stdout = String::from_utf8(failure.stdout).unwrap();
     let stderr = String::from_utf8(failure.stderr).unwrap();
     assert!(stdout.is_empty());
-    assert!(stderr.contains("not supported by Wasm v1"));
+    assert!(stderr.contains("returns compile to Wasm v1"));
 }
 
 #[test]

@@ -34,7 +34,7 @@ const examples = [
 `,
   },
   {
-    name: "Repo smoke",
+    name: "Array sum",
     source: `fn sum(values: [u32; 4]) -> u32 {
     let mut total: u32 = 0;
 
@@ -45,48 +45,14 @@ const examples = [
     total
 }
 
-fn bounded(total: u32, limit: u32, one: u32) -> u32 {
-    observe total + one <= limit + one else {
-        return total;
-    }
-
-    if total > 100 {
-        observe total + 1 < 1001 else {
-            return total;
-        }
-    }
-
-    return total;
+fn main() -> u32 {
+    sum([1, 2, 3, 4])
 }
 `,
   },
   {
-    name: "Repo tutorial",
-    source: `fn sum(values: [u32; 4]) -> u32 {
-    let mut total: u32 = 0;
-
-    for value in values {
-        total = total + value;
-    }
-
-    total
-}
-
-fn bounded(total: u32, limit: u32, one: u32) -> u32 {
-    observe total + one <= limit + one else {
-        return total;
-    }
-
-    if total > 100 {
-        observe total + 1 < 1001 else {
-            return total;
-        }
-    }
-
-    total
-}
-
-fn choose(flag: bool) -> u32 {
+    name: "Match",
+    source: `fn choose(flag: bool) -> u32 {
     let mut value: u32 = 0;
 
     match flag {
@@ -95,6 +61,21 @@ fn choose(flag: bool) -> u32 {
     }
 
     value
+}
+
+fn main() -> u32 {
+    choose(true)
+}
+`,
+  },
+  {
+    name: "Observe",
+    source: `fn main() -> u32 {
+    observe 1 < 2 else {
+        return 0;
+    }
+
+    42
 }
 `,
   },

@@ -375,17 +375,17 @@ Wasm V1 supports:
 
 - `fn main() -> u32`
 - `u32` and `bool` values, both lowered as Wasm `i32`
+- fixed-size arrays of `u32` or `bool` values
 - local `let`, mutable assignment, expression statements, and block results
-- arithmetic, comparisons, `if`, direct calls, and `return`
+- arithmetic, comparisons, array indexing, `if`, `match`, `for`, direct calls,
+  `observe`, and `return`
 - playground host builtins lowered as `langlog_host` imports
 
 Wasm V1 rejects:
 
-- arrays and indexing
-- tuples
-- `match`
-- `for`
-- `observe` lowering
+- aggregate return values
+- non-scalar array elements
+- general tuple operations beyond storing and passing fixed scalar tuples
 - generic collections
 - `main` forms other than `fn main() -> u32`
 

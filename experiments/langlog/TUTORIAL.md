@@ -66,9 +66,10 @@ cargo run -p langlog-driver --bin langlog -- build --target wasm path/to/main.ll
 ```
 
 Wasm V1 currently supports `fn main() -> u32`, scalar `u32` and `bool` values,
-locals, assignment, arithmetic, comparisons, `if`, direct calls, `return`, and
-the playground host builtins. It still rejects arrays/indexing, tuples, `match`,
-`for`, `observe` lowering, generic collections, and non-`u32` `main`.
+fixed-size scalar arrays, locals, assignment, arithmetic, comparisons,
+indexing, `if`, `match`, `for`, direct calls, `observe`, `return`, and the
+playground host builtins. It still rejects aggregate return values, non-scalar
+array elements, generic collections, and non-`u32` `main`.
 
 ## 4. Write Your First Function
 
