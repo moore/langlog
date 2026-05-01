@@ -14,6 +14,8 @@ Compiler-facing docs:
 
 - [HIR.md](./HIR.md)
 - [PROOF_IR.md](./PROOF_IR.md)
+- [WASM.md](./WASM.md)
+- [TOOLS.md](./TOOLS.md)
 
 ## Goals
 
@@ -30,6 +32,8 @@ properties that should be enforced structurally rather than by convention:
 - The phase 1 front end MUST accept `langlog check <path>`.
 - The phase 1 front end MUST accept `langlog check --warnings-as-errors <path>`.
 - The phase 1 front end MUST accept `langlog build --target wasm <path>`.
+- The phase 1 front end MUST check in-memory source text without filesystem
+  access.
 - The phase 1 front end MUST use `.langlog-config` build settings when
   building source files below that config file.
 - The phase 1 front end MUST treat `<path>` as a single source file.
@@ -41,9 +45,20 @@ properties that should be enforced structurally rather than by convention:
 - When `langlog build --target wasm <path>` succeeds, the CLI MUST print the
   output artifact path to stdout.
 - The CLI MUST reject unsupported build targets as usage errors.
+- The CLI MUST reject malformed build target flags as usage errors.
 - When a successful check includes warnings, the CLI MUST print the warnings
   to stderr while keeping the success summary on stdout.
 - When syntax analysis fails, the CLI MUST print diagnostics to stderr.
+- When semantic analysis fails, the CLI MUST print diagnostics to stderr.
+- When proof analysis fails during `langlog check`, the CLI MUST print
+  diagnostics to stderr.
+- When arithmetic proof analysis fails during `langlog check`, the CLI MUST
+  print diagnostics to stderr.
+- When `.langlog-config` cannot be read, the CLI MUST print an error to stderr.
+- `langlog check --warnings-as-errors <path>` MUST succeed when no warnings are
+  emitted.
+- The compiler interface MUST promote warnings to failing diagnostics when
+  requested.
 - Success and syntax-error reporting MUST not write to the opposite stream.
 - `langlog check --warnings-as-errors <path>` MUST promote warnings to failing
   diagnostics.

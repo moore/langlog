@@ -15,6 +15,14 @@ format = "markdown"
 source = "PROOF_IR.md"
 format = "markdown"
 
+[[specification]]
+source = "WASM.md"
+format = "markdown"
+
+[[specification]]
+source = "TOOLS.md"
+format = "markdown"
+
 [report.html]
 enabled = true
 

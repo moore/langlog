@@ -1329,8 +1329,11 @@ fn main() {
     );
 }
 
+//= WASM.md#llg-wasm-05-host-builtins
+//= type=test
+//# The semantic phase MUST resolve host builtin calls without user declarations.
 #[test]
-fn host_builtins_resolve_and_type_check_without_user_declarations() {
+fn requirement_llg_wasm_05_resolves_host_builtins_without_user_declarations() {
     let checked = analyze_ok(
         r#"
 fn main() -> u32 {
@@ -1352,8 +1355,11 @@ fn main() -> u32 {
     }));
 }
 
+//= WASM.md#llg-wasm-05-host-builtins
+//= type=test
+//# HIR MUST lower host builtin calls to explicit host builtin callees.
 #[test]
-fn host_builtin_calls_lower_to_explicit_hir_callees() {
+fn requirement_llg_wasm_05_lowers_host_builtin_calls_to_explicit_hir_callees() {
     let checked = analyze_ok(
         r#"
 fn main() -> u32 {
@@ -1377,8 +1383,11 @@ fn main() -> u32 {
     assert_eq!(args.len(), 1);
 }
 
+//= WASM.md#llg-wasm-05-host-builtins
+//= type=test
+//# User functions MUST NOT use reserved host builtin names.
 #[test]
-fn host_builtin_names_are_reserved_for_functions() {
+fn requirement_llg_wasm_05_reserves_host_builtin_names_for_functions() {
     let checked = analyze_ok("fn print_u32(value: u32) {}\n");
 
     assert!(checked.has_errors());
@@ -1388,8 +1397,11 @@ fn host_builtin_names_are_reserved_for_functions() {
         .any(|diagnostic| diagnostic.message.contains("reserved for a host builtin")));
 }
 
+//= WASM.md#llg-wasm-05-host-builtins
+//= type=test
+//# Host builtin calls MUST NOT create recursion edges.
 #[test]
-fn host_builtin_calls_do_not_create_recursion_edges() {
+fn requirement_llg_wasm_05_excludes_host_builtin_calls_from_recursion_edges() {
     let checked = analyze_ok(
         r#"
 fn main() -> u32 {

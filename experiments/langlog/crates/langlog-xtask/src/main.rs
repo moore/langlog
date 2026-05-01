@@ -326,7 +326,7 @@ fn display(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_requirements, Summary};
+    use super::{check_requirements, workspace_root, Summary};
     use std::fs;
     use std::path::PathBuf;
     use std::process;
@@ -356,8 +356,11 @@ mod tests {
         }
     }
 
+    //= TOOLS.md#llg-tools-01-requirement-checker
+    //= type=test
+    //# The requirement checker MUST accept one cited implemented test and one cited todo test when both use the required annotation shape.
     #[test]
-    fn accepts_single_requirement_and_todo_tests() {
+    fn requirement_llg_tools_01_accepts_single_requirement_and_todo_tests() {
         let workspace = TempWorkspace::new(&format!(
             "\n{eq} SPEC.md#anchor\n{eq} type=test\n{quote} The parser MUST parse things.\n#[test]\nfn requirement_parses_things() {{}}\n\n{eq} SPEC.md#later\n{eq} type=todo\n{quote} The compiler MUST do later work.\n#[test]\nfn todo_later_work() {{}}\n",
             eq = "//=",
@@ -373,8 +376,11 @@ mod tests {
         );
     }
 
+    //= TOOLS.md#llg-tools-01-requirement-checker
+    //= type=test
+    //# The requirement checker MUST reject duplicate requirement traces.
     #[test]
-    fn rejects_duplicate_requirement_traces() {
+    fn requirement_llg_tools_01_rejects_duplicate_requirement_traces() {
         let workspace = TempWorkspace::new(&format!(
             "\n{eq} SPEC.md#anchor\n{eq} type=test\n{quote} The parser MUST parse things.\n#[test]\nfn requirement_one() {{}}\n\n{eq} SPEC.md#anchor\n{eq} type=test\n{quote} The parser MUST parse things.\n#[test]\nfn requirement_two() {{}}\n",
             eq = "//=",
@@ -387,8 +393,11 @@ mod tests {
             .any(|error| error.contains("duplicates requirement")));
     }
 
+    //= TOOLS.md#llg-tools-01-requirement-checker
+    //= type=test
+    //# The requirement checker MUST reject detached Duvet annotations.
     #[test]
-    fn rejects_detached_annotations() {
+    fn requirement_llg_tools_01_rejects_detached_annotations() {
         let workspace = TempWorkspace::new(&format!(
             "\n{eq} SPEC.md#anchor\nfn helper() {{}}\n",
             eq = "//="
@@ -398,5 +407,31 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("must have exactly one #[test]")));
+    }
+
+    //= TOOLS.md#llg-tools-02-mutation-testing
+    //= type=test
+    //# The default mutation-test lane MUST run only cited implemented requirement tests.
+    #[test]
+    fn requirement_llg_tools_02_default_mutation_lane_filters_to_requirement_tests() {
+        let config = fs::read_to_string(workspace_root().join(".cargo/mutants.toml")).unwrap();
+
+        assert!(config.contains("additional_cargo_test_args = [\"requirement_\"]"));
+    }
+
+    //= TOOLS.md#llg-tools-02-mutation-testing
+    //= type=test
+    //# The task runner MUST validate requirement annotations before running mutation testing.
+    #[test]
+    fn requirement_llg_tools_02_mutants_task_validates_requirements_first() {
+        let tasks = fs::read_to_string(workspace_root().join("tasks.sh")).unwrap();
+        let check = tasks
+            .find("cargo run -p langlog-xtask -- check-requirements")
+            .expect("expected requirements check in tasks.sh");
+        let mutants = tasks
+            .find("cargo mutants")
+            .expect("expected cargo mutants in tasks.sh");
+
+        assert!(check < mutants);
     }
 }

@@ -67,12 +67,11 @@ run_playground_serve() {
     python3 -m http.server "$port" --directory target/playground-site
 }
 
-refuse_cargo_mutants() {
-    cat >&2 <<'EOF'
-mutation testing is intentionally disabled in ./tasks.sh
-run `cargo mutants` manually when you explicitly want that expensive check
-EOF
-    return 2
+run_cargo_mutants() {
+    echo "==> cargo run -p langlog-xtask -- check-requirements"
+    cargo run -p langlog-xtask -- check-requirements
+    echo "==> cargo mutants"
+    cargo mutants
 }
 
 usage() {
@@ -88,7 +87,7 @@ Tasks:
   duvet    Run duvet report with test coverage required
   playground Build the browser playground Wasm package
   playground-serve Build and serve the browser playground on PORT or 8000
-  mutants  Refuse to run cargo-mutants; use `cargo mutants` manually instead
+  mutants  Run requirement-only cargo-mutants after validating requirement annotations
 EOF
 }
 
@@ -124,7 +123,7 @@ run_task() {
             run_playground_serve
             ;;
         mutants)
-            refuse_cargo_mutants
+            run_cargo_mutants
             ;;
         -h|--help|help)
             usage

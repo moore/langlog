@@ -1,8 +1,9 @@
 # Duvet Traceability
 
 Langlog uses [Duvet](https://awslabs.github.io/duvet/) to trace normative
-requirements in [SPEC.md](./SPEC.md), [HIR.md](./HIR.md), and
-[PROOF_IR.md](./PROOF_IR.md) to implementation and planned work.
+requirements in [SPEC.md](./SPEC.md), [HIR.md](./HIR.md),
+[PROOF_IR.md](./PROOF_IR.md), [WASM.md](./WASM.md), and
+[TOOLS.md](./TOOLS.md) to implementation and planned work.
 
 ## Layout
 
@@ -13,6 +14,10 @@ requirements in [SPEC.md](./SPEC.md), [HIR.md](./HIR.md), and
   RFC 2119 terms.
 - `PROOF_IR.md` contains normative compiler-facing proof-IR requirements using
   RFC 2119 terms.
+- `WASM.md` contains normative backend and host-ABI requirements using RFC 2119
+  terms.
+- `TOOLS.md` contains normative project tooling requirements using RFC 2119
+  terms.
 - Rust test files use Duvet annotations such as `//=` and `//#` to trace both
   implemented requirements and planned work.
 - Planned but not yet implemented requirements are tracked with `type=todo`
@@ -46,6 +51,12 @@ This uses `.duvet/config.toml` by default and writes reports under
   runs.
 - Unit tests outside the requirement suites should cover non-normative helper
   behavior and local invariants rather than duplicate spec-backed contracts.
+- `cargo test --workspace` runs all implementation and requirement tests.
+- `cargo mutants` is the requirement-coverage mutation lane and intentionally
+  runs only cited implemented tests whose names include `requirement_`.
+- If a mutant is caught by an uncited unit test but survives the requirement
+  mutation lane, treat that as evidence of a missing requirement or missing
+  citation, not as requirement coverage.
 - Semantic and proof requirements that are planned but not implemented are
   traced by placeholder tests in `langlog-sema/tests/` and
   `langlog-proof/tests/`, including future Proof IR work.

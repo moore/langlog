@@ -222,8 +222,11 @@ fn requirement_llg_cli_02_rejects_unsupported_build_targets() {
         .contains("unsupported build target `native`"));
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# The CLI MUST reject malformed build target flags as usage errors.
 #[test]
-fn build_rejects_unknown_target_flag_as_usage() {
+fn requirement_llg_cli_02_rejects_malformed_build_target_flags() {
     let source = TempSource::new("fn main() -> u32 { 42 }");
     let failure = Command::new(env!("CARGO_BIN_EXE_langlog"))
         .args([
@@ -241,8 +244,11 @@ fn build_rejects_unknown_target_flag_as_usage() {
         .contains("usage: langlog check"));
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# When semantic analysis fails, the CLI MUST print diagnostics to stderr.
 #[test]
-fn check_reports_semantic_failures_to_stderr() {
+fn requirement_llg_cli_02_prints_semantic_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
 fn main() {
@@ -261,8 +267,11 @@ fn main() {
     assert!(failure_stderr.contains("missing;"));
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# When proof analysis fails during `langlog check`, the CLI MUST print diagnostics to stderr.
 #[test]
-fn check_reports_proof_failures_to_stderr() {
+fn requirement_llg_cli_02_prints_check_proof_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
 fn main(total: u32, denom: u32) {
@@ -281,8 +290,11 @@ fn main(total: u32, denom: u32) {
     assert!(failure_stderr.contains("total / denom;"));
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# When arithmetic proof analysis fails during `langlog check`, the CLI MUST print diagnostics to stderr.
 #[test]
-fn check_reports_overflow_failures_to_stderr() {
+fn requirement_llg_cli_02_prints_check_arithmetic_proof_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
 fn main(total: u32, step: u32) {
@@ -301,8 +313,11 @@ fn main(total: u32, step: u32) {
     assert!(failure_stderr.contains("total + step;"));
 }
 
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm builds MUST stop before backend lowering when front-end or proof checks fail.
 #[test]
-fn build_reports_proof_failures_to_stderr() {
+fn requirement_llg_wasm_01_build_reports_proof_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
 fn main(total: u32, denom: u32) -> u32 {
@@ -319,8 +334,11 @@ fn main(total: u32, denom: u32) -> u32 {
         .contains("error: possible divide-by-zero is not proven safe"));
 }
 
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# When backend lowering fails during `langlog build --target wasm`, the CLI MUST print diagnostics to stderr.
 #[test]
-fn build_reports_backend_failures_to_stderr() {
+fn requirement_llg_wasm_01_build_reports_backend_failures_to_stderr() {
     let source = TempSource::new(
         r#"
 fn helper() -> [u32; 1] { [1] }
@@ -336,8 +354,11 @@ fn main() -> u32 { 1 }
     assert!(stderr.contains("returns compile to Wasm v1"));
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# When `.langlog-config` cannot be read, the CLI MUST print an error to stderr.
 #[test]
-fn build_reports_unreadable_config_as_error() {
+fn requirement_llg_cli_02_prints_unreadable_config_errors_to_stderr() {
     let project = TempProject::new();
     fs::create_dir(project.root.join(".langlog-config")).unwrap();
     let source = project.write("src/main.llg", "fn main() -> u32 { 42 }");
@@ -351,8 +372,11 @@ fn build_reports_unreadable_config_as_error() {
         .contains("failed to read"));
 }
 
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
+//# `langlog check --warnings-as-errors <path>` MUST succeed when no warnings are emitted.
 #[test]
-fn check_accepts_warnings_as_errors_flag() {
+fn requirement_llg_cli_02_accepts_warnings_as_errors_without_warnings() {
     let source = TempSource::new("fn main() {}");
     let success = run_check_warnings_as_errors(&source.path);
 

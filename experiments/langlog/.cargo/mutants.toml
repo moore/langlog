@@ -2,7 +2,7 @@ test_workspace = true
 timeout_multiplier = 2.0
 minimum_test_timeout = 5.0
 output = ".mutants.out"
+additional_cargo_test_args = ["requirement_"]
 examine_globs = [
-    "crates/langlog-driver/src/**/*.rs",
-    "crates/langlog-syntax/src/**/*.rs",
+    "crates/*/src/**/*.rs",
 ]

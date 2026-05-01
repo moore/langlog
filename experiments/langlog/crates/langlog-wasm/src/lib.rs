@@ -148,7 +148,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             .params
             .iter()
             .fold(String::new(), |mut params, param| {
-                match value_width(&param.ty) {
+                match supported_value_width(&param.ty) {
                     Some(width) => {
                         for _ in 0..width {
                             params.push_str(" (param i32)");
@@ -326,7 +326,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             HirExprKind::Call { callee, args } => {
                 for arg in args {
-                    if value_width(&arg.ty).is_none() {
+                    if supported_value_width(&arg.ty).is_none() {
                         self.unsupported(
                             arg.span,
                             "this argument type is not supported by Wasm v1",
@@ -557,7 +557,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     }
 
     fn ensure_wasm_type(&mut self, ty: &HirType, span: Span) {
-        if value_width(ty).is_none() {
+        if supported_value_width(ty).is_none() {
             self.unsupported(
                 span,
                 "only `u32`, `bool`, `()`, and fixed-size scalar aggregates compile to Wasm v1",
@@ -772,6 +772,17 @@ fn value_width(ty: &HirType) -> Option<u32> {
     }
 }
 
+fn supported_value_width(ty: &HirType) -> Option<u32> {
+    match ty {
+        HirType::Array { element, length } if is_scalar_wasm_type(element) => {
+            let length = u32::try_from(*length).ok()?;
+            length.checked_mul(1)
+        }
+        HirType::Array { .. } => None,
+        _ => value_width(ty),
+    }
+}
+
 fn is_scalar_wasm_type(ty: &HirType) -> bool {
     matches!(ty, HirType::U32 | HirType::Bool)
 }
@@ -846,8 +857,29 @@ mod tests {
         (result, store.into_data())
     }
 
+    fn checked_with_errors(source: &str) -> langlog_sema::CheckedProgram {
+        let parsed = langlog_syntax::parse("wasm-test.llg", source);
+        langlog_sema::analyze(parsed)
+    }
+
+    //= WASM.md#llg-wasm-01-build-gate-and-entry-point
+    //= type=test
+    //# The Wasm compiler MUST reject programs that do not have checked HIR.
     #[test]
-    fn emits_exported_main_wat() {
+    fn requirement_llg_wasm_01_rejects_programs_without_checked_hir() {
+        let checked = checked_with_errors("fn main() -> u32 { missing }");
+        let diagnostics = compile(&checked).expect_err("expected backend error");
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("semantic errors")));
+    }
+
+    //= WASM.md#llg-wasm-01-build-gate-and-entry-point
+    //= type=test
+    //# Wasm builds MUST export `fn main() -> u32` as `main`.
+    #[test]
+    fn requirement_llg_wasm_01_emits_exported_main_wat() {
         let checked = checked("fn main() -> u32 { 42 }");
         let module = compile(&checked).expect("expected Wasm module");
 
@@ -856,18 +888,53 @@ mod tests {
         assert!(!module.wasm.is_empty());
     }
 
+    //= WASM.md#llg-wasm-01-build-gate-and-entry-point
+    //= type=test
+    //# Wasm V1 MUST reject `main` forms other than `fn main() -> u32`.
     #[test]
-    fn executes_constant_main() {
+    fn requirement_llg_wasm_01_rejects_unsupported_main_shapes() {
+        let checked = checked("fn main(value: u32) -> u32 { value }");
+        let diagnostics = compile(&checked).expect_err("expected backend error");
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("requires `fn main() -> u32`")));
+    }
+
+    //= WASM.md#llg-wasm-01-build-gate-and-entry-point
+    //= type=test
+    //# Wasm V1 MUST reject aggregate return values.
+    #[test]
+    fn requirement_llg_wasm_01_rejects_aggregate_return_values() {
+        let checked = checked("fn helper() -> [u32; 1] { [1] }\nfn main() -> u32 { 1 }");
+        let diagnostics = compile(&checked).expect_err("expected backend error");
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
+    }
+
+    //= WASM.md#llg-wasm-02-scalar-execution
+    //= type=test
+    //# Wasm V1 MUST lower `u32` and `bool` values as Wasm `i32` values.
+    #[test]
+    fn requirement_llg_wasm_02_executes_constant_main() {
         assert_eq!(run_main("fn main() -> u32 { 42 }"), 42);
     }
 
+    //= WASM.md#llg-wasm-02-scalar-execution
+    //= type=test
+    //# Wasm V1 MUST execute arithmetic expressions over `u32` values.
     #[test]
-    fn executes_arithmetic_expression() {
+    fn requirement_llg_wasm_02_executes_arithmetic_expression() {
         assert_eq!(run_main("fn main() -> u32 { 6 * 7 }"), 42);
     }
 
+    //= WASM.md#llg-wasm-02-scalar-execution
+    //= type=test
+    //# Wasm V1 MUST execute direct function calls.
     #[test]
-    fn executes_direct_function_call() {
+    fn requirement_llg_wasm_02_executes_direct_function_call() {
         assert_eq!(
             run_main(
                 r#"
@@ -879,8 +946,11 @@ fn main() -> u32 { helper() }
         );
     }
 
+    //= WASM.md#llg-wasm-02-scalar-execution
+    //= type=test
+    //# Wasm V1 MUST execute `if` statements using scalar conditions.
     #[test]
-    fn executes_if_with_comparison_and_returns() {
+    fn requirement_llg_wasm_02_executes_if_with_comparison_and_returns() {
         assert_eq!(
             run_main(
                 r#"
@@ -897,8 +967,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-02-scalar-execution
+    //= type=test
+    //# Wasm V1 MUST execute mutable local assignment.
     #[test]
-    fn executes_mutable_assignment() {
+    fn requirement_llg_wasm_02_executes_mutable_assignment() {
         assert_eq!(
             run_main(
                 r#"
@@ -913,8 +986,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-03-arrays-and-loops
+    //= type=test
+    //# Wasm V1 MUST execute fixed-size scalar array literals and constant indexing.
     #[test]
-    fn executes_array_literal_and_constant_index() {
+    fn requirement_llg_wasm_03_executes_array_literal_and_constant_index() {
         assert_eq!(
             run_main(
                 r#"
@@ -928,8 +1004,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-03-arrays-and-loops
+    //= type=test
+    //# Wasm V1 MUST execute dynamic indexing into fixed-size scalar arrays.
     #[test]
-    fn executes_array_dynamic_index() {
+    fn requirement_llg_wasm_03_executes_array_dynamic_index() {
         assert_eq!(
             run_main(
                 r#"
@@ -944,8 +1023,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-03-arrays-and-loops
+    //= type=test
+    //# Wasm V1 MUST execute `for` loops over fixed-size scalar arrays.
     #[test]
-    fn executes_for_over_array() {
+    fn requirement_llg_wasm_03_executes_for_over_array() {
         assert_eq!(
             run_main(
                 r#"
@@ -963,8 +1045,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-03-arrays-and-loops
+    //= type=test
+    //# Wasm V1 MUST pass fixed-size scalar arrays to direct function calls.
     #[test]
-    fn executes_array_parameter_call() {
+    fn requirement_llg_wasm_03_executes_array_parameter_call() {
         assert_eq!(
             run_main(
                 r#"
@@ -985,8 +1070,24 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-03-arrays-and-loops
+    //= type=test
+    //# Wasm V1 MUST reject non-scalar array elements.
     #[test]
-    fn executes_match_statement_with_bool_patterns() {
+    fn requirement_llg_wasm_03_rejects_non_scalar_array_elements() {
+        let checked = checked("fn main() -> u32 { let values: [(u32, u32); 1] = [(1, 2)]; 0 }");
+        let diagnostics = compile(&checked).expect_err("expected backend error");
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("scalar aggregates")));
+    }
+
+    //= WASM.md#llg-wasm-04-match-and-observe
+    //= type=test
+    //# Wasm V1 MUST execute `match` statements over scalar boolean patterns.
+    #[test]
+    fn requirement_llg_wasm_04_executes_match_statement_with_bool_patterns() {
         assert_eq!(
             run_main(
                 r#"
@@ -1004,8 +1105,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-04-match-and-observe
+    //= type=test
+    //# Wasm V1 MUST execute `match` statements with scalar binding patterns.
     #[test]
-    fn executes_match_statement_with_binding_pattern() {
+    fn requirement_llg_wasm_04_executes_match_statement_with_binding_pattern() {
         assert_eq!(
             run_main(
                 r#"
@@ -1022,8 +1126,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-04-match-and-observe
+    //= type=test
+    //# Wasm V1 MUST execute an `observe` else block when the observed relation is false at runtime.
     #[test]
-    fn executes_observe_runtime_else_block() {
+    fn requirement_llg_wasm_04_executes_observe_runtime_else_block() {
         assert_eq!(
             run_main(
                 r#"
@@ -1039,8 +1146,11 @@ fn main() -> u32 {
         );
     }
 
+    //= WASM.md#llg-wasm-05-host-builtins
+    //= type=test
+    //# Wasm V1 MUST emit imports for used host builtins.
     #[test]
-    fn emits_host_builtin_imports() {
+    fn requirement_llg_wasm_05_emits_host_builtin_imports() {
         let checked = checked(
             r#"
 fn main() -> u32 {
@@ -1057,8 +1167,11 @@ fn main() -> u32 {
             .contains("(import \"langlog_host\" \"print_u32\""));
     }
 
+    //= WASM.md#llg-wasm-05-host-builtins
+    //= type=test
+    //# Wasm V1 MUST execute host builtin imports through the `langlog_host` module.
     #[test]
-    fn executes_host_builtin_imports() {
+    fn requirement_llg_wasm_05_executes_host_builtin_imports() {
         let (result, output) = run_main_with_host(
             r#"
 fn main() -> u32 {
