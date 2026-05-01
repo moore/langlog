@@ -30,6 +30,34 @@ run_duvet() {
     duvet report --require-tests true
 }
 
+run_playground() {
+    echo "==> validate playground static files"
+    test -f playground/index.html
+    test -f playground/app.js
+    test -f playground/style.css
+    echo "==> cargo build -p langlog-playground-wasm --target wasm32-unknown-unknown"
+    cargo build -p langlog-playground-wasm --target wasm32-unknown-unknown
+    if ! command -v wasm-bindgen >/dev/null 2>&1; then
+        cat >&2 <<'EOF'
+wasm-bindgen CLI is required to generate playground/pkg
+install it with `cargo install wasm-bindgen-cli`
+EOF
+        return 1
+    fi
+    echo "==> wasm-bindgen --target web"
+    wasm-bindgen \
+        --target web \
+        --out-dir playground/pkg \
+        target/wasm32-unknown-unknown/debug/langlog_playground_wasm.wasm
+}
+
+run_playground_serve() {
+    run_playground
+    local port="${PORT:-8000}"
+    echo "==> serving playground at http://127.0.0.1:${port}"
+    python3 -m http.server "$port" --directory playground
+}
+
 refuse_cargo_mutants() {
     cat >&2 <<'EOF'
 mutation testing is intentionally disabled in ./tasks.sh
@@ -49,6 +77,8 @@ Tasks:
   clippy   Run cargo clippy
   md       Run markdown formatting
   duvet    Run duvet report with test coverage required
+  playground Build the browser playground Wasm package
+  playground-serve Build and serve the browser playground on PORT or 8000
   mutants  Refuse to run cargo-mutants; use `cargo mutants` manually instead
 EOF
 }
@@ -77,6 +107,12 @@ run_task() {
             ;;
         duvet)
             run_duvet
+            ;;
+        playground)
+            run_playground
+            ;;
+        playground-serve)
+            run_playground_serve
             ;;
         mutants)
             refuse_cargo_mutants

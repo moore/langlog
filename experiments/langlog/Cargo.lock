@@ -608,6 +608,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "langlog-playground-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "langlog-compiler",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "langlog-proof"
 version = "0.1.0"
 dependencies = [

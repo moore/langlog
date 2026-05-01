@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Langlog Playground</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="toolbar">
+        <h1>Langlog Playground</h1>
+        <div class="controls">
+          <select id="exampleSelect" aria-label="Examples"></select>
+          <button id="checkButton" type="button">Check</button>
+          <button id="buildButton" type="button">Build</button>
+          <button id="runButton" type="button">Run</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <label class="panel editor-panel">
+          <span>Source</span>
+          <textarea id="sourceEditor" spellcheck="false"></textarea>
+        </label>
+
+        <section class="panel output-panel">
+          <div class="tabs" role="tablist" aria-label="Output">
+            <button id="diagnosticsTab" class="tab active" type="button" role="tab" aria-selected="true">
+              Diagnostics
+            </button>
+            <button id="watTab" class="tab" type="button" role="tab" aria-selected="false">WAT</button>
+          </div>
+          <pre id="diagnosticsOutput" class="tab-content active" role="tabpanel"></pre>
+          <pre id="watOutput" class="tab-content" role="tabpanel"></pre>
+        </section>
+
+        <section class="panel terminal-panel">
+          <h2>Terminal</h2>
+          <label>
+            <span>stdin</span>
+            <input id="stdinInput" type="text" autocomplete="off" />
+          </label>
+          <pre id="terminalOutput"></pre>
+        </section>
+
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -13,6 +13,7 @@ pub use hir::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingKind {
     Item,
+    HostBuiltin,
     Param,
     Local,
 }
@@ -23,6 +24,39 @@ struct Binding {
     span: Span,
     loop_bound: bool,
     mutable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostBuiltin {
+    ReadU32,
+    PrintU32,
+    PrintBool,
+    PrintNewline,
+}
+
+impl HostBuiltin {
+    pub const ALL: [Self; 4] = [
+        Self::ReadU32,
+        Self::PrintU32,
+        Self::PrintBool,
+        Self::PrintNewline,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ReadU32 => "read_u32",
+            Self::PrintU32 => "print_u32",
+            Self::PrintBool => "print_bool",
+            Self::PrintNewline => "print_newline",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|builtin| builtin.name() == name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +276,10 @@ impl<'a> Analyzer<'a> {
     fn collect_items(&mut self) {
         for item in &self.parsed.module.items {
             let Item::Function(function) = item;
+            if HostBuiltin::from_name(function.name.value.as_str()).is_some() {
+                self.report_reserved_host_builtin_name(function);
+                continue;
+            }
             self.items
                 .entry(function.name.value.clone())
                 .or_insert(Binding {
@@ -469,6 +507,14 @@ impl<'a> Analyzer<'a> {
         if let Some(binding) = scopes
             .lookup(name)
             .or_else(|| self.items.get(name).copied())
+            .or_else(|| {
+                HostBuiltin::from_name(name).map(|_| Binding {
+                    kind: BindingKind::HostBuiltin,
+                    span: use_span,
+                    loop_bound: false,
+                    mutable: false,
+                })
+            })
         {
             self.resolutions.push(ResolvedName {
                 use_span,
@@ -485,6 +531,19 @@ impl<'a> Analyzer<'a> {
                 .with_label(Label::primary(use_span, "not found in this scope")),
         );
         None
+    }
+
+    fn report_reserved_host_builtin_name(&mut self, function: &Function) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "`{}` is reserved for a host builtin",
+                function.name.value
+            ))
+            .with_label(Label::primary(
+                function.name.span,
+                "host builtin names cannot be redefined",
+            )),
+        );
     }
 
     fn report_direct_recursion(&mut self, function: &Function, call_span: Span) {
@@ -590,6 +649,14 @@ impl<'a> Analyzer<'a> {
             ExprKind::Name(name) => scopes
                 .lookup(name.value.as_str())
                 .or_else(|| self.items.get(name.value.as_str()).copied())
+                .or_else(|| {
+                    HostBuiltin::from_name(name.value.as_str()).map(|_| Binding {
+                        kind: BindingKind::HostBuiltin,
+                        span: name.span,
+                        loop_bound: false,
+                        mutable: false,
+                    })
+                })
                 .map(|binding| binding.loop_bound),
             ExprKind::Int(_)
             | ExprKind::Bool(_)
@@ -696,15 +763,15 @@ struct TypeChecker<'a> {
 
 impl<'a> TypeChecker<'a> {
     fn new(parsed: &'a ParsedModule) -> Self {
-        let item_signatures = parsed
-            .module
-            .items
+        let mut item_signatures: HashMap<String, FunctionType> = HostBuiltin::ALL
             .iter()
-            .map(|item| {
-                let Item::Function(function) = item;
-                (function.name.value.clone(), function_signature(function))
-            })
+            .copied()
+            .map(|builtin| (builtin.name().to_owned(), host_builtin_signature(builtin)))
             .collect();
+        item_signatures.extend(parsed.module.items.iter().map(|item| {
+            let Item::Function(function) = item;
+            (function.name.value.clone(), function_signature(function))
+        }));
 
         Self {
             parsed,
@@ -1208,6 +1275,27 @@ fn function_signature(function: &Function) -> FunctionType {
                 .map(lower_type)
                 .unwrap_or(SemanticType::Unit),
         ),
+    }
+}
+
+fn host_builtin_signature(builtin: HostBuiltin) -> FunctionType {
+    match builtin {
+        HostBuiltin::ReadU32 => FunctionType {
+            params: Vec::new(),
+            return_type: Box::new(SemanticType::U32),
+        },
+        HostBuiltin::PrintU32 => FunctionType {
+            params: vec![SemanticType::U32],
+            return_type: Box::new(SemanticType::Unit),
+        },
+        HostBuiltin::PrintBool => FunctionType {
+            params: vec![SemanticType::Bool],
+            return_type: Box::new(SemanticType::Unit),
+        },
+        HostBuiltin::PrintNewline => FunctionType {
+            params: Vec::new(),
+            return_type: Box::new(SemanticType::Unit),
+        },
     }
 }
 

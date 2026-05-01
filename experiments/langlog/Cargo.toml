@@ -6,6 +6,7 @@ members = [
     "crates/langlog-proof",
     "crates/langlog-compiler",
     "crates/langlog-wasm",
+    "crates/langlog-playground-wasm",
     "crates/langlog-xtask",
 ]
 resolver = "2"

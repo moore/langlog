@@ -1,6 +1,6 @@
 use langlog_sema::{
     analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction, HirStmt,
-    HirType,
+    HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt};
 use langlog_syntax::{parse, LabelStyle, Span};
@@ -1326,5 +1326,85 @@ fn main() {
             .as_ref()
             .expect("expected empty array initializer")
             .span,
+    );
+}
+
+#[test]
+fn host_builtins_resolve_and_type_check_without_user_declarations() {
+    let checked = analyze_ok(
+        r#"
+fn main() -> u32 {
+    let value: u32 = read_u32();
+    print_u32(value);
+    print_bool(true);
+    print_newline();
+    value
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    assert!(checked.resolutions.iter().any(|resolution| {
+        resolution.name == "read_u32" && resolution.kind == BindingKind::HostBuiltin
+    }));
+    assert!(checked.resolutions.iter().any(|resolution| {
+        resolution.name == "print_u32" && resolution.kind == BindingKind::HostBuiltin
+    }));
+}
+
+#[test]
+fn host_builtin_calls_lower_to_explicit_hir_callees() {
+    let checked = analyze_ok(
+        r#"
+fn main() -> u32 {
+    print_u32(1);
+    0
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let hir_main = hir_function(&checked, "main");
+    let call_expr = hir_expr_stmt(&hir_main.body, 0);
+    let HirExprKind::Call { callee, args } = &call_expr.kind else {
+        panic!("expected HIR call expression, got {:?}", call_expr.kind);
+    };
+
+    assert!(matches!(
+        callee.kind,
+        HirExprKind::HostBuiltin(HostBuiltin::PrintU32)
+    ));
+    assert_eq!(args.len(), 1);
+}
+
+#[test]
+fn host_builtin_names_are_reserved_for_functions() {
+    let checked = analyze_ok("fn print_u32(value: u32) {}\n");
+
+    assert!(checked.has_errors());
+    assert!(checked
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("reserved for a host builtin")));
+}
+
+#[test]
+fn host_builtin_calls_do_not_create_recursion_edges() {
+    let checked = analyze_ok(
+        r#"
+fn main() -> u32 {
+    print_u32(1);
+    0
+}
+"#,
+    );
+
+    assert!(
+        !checked
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("recursion")),
+        "{:#?}",
+        checked.diagnostics
     );
 }

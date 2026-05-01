@@ -235,6 +235,7 @@ impl<'a> Checker<'a> {
         match &expr.kind {
             HirExprKind::Binding(_)
             | HirExprKind::Item(_)
+            | HirExprKind::HostBuiltin(_)
             | HirExprKind::Int(_)
             | HirExprKind::Bool(_) => {}
             HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
@@ -505,6 +506,7 @@ fn proven_u32_range(expr: &HirExpr, facts: &[KnownFact]) -> Option<(u64, u64)> {
         HirExprKind::Binary { op, left, right } => proven_binary_u32_range(*op, left, right, facts),
         HirExprKind::Unary { .. }
         | HirExprKind::Item(_)
+        | HirExprKind::HostBuiltin(_)
         | HirExprKind::Bool(_)
         | HirExprKind::Tuple(_)
         | HirExprKind::Array(_)
@@ -556,6 +558,7 @@ fn eval_const_u64(expr: &HirExpr) -> Option<u64> {
         HirExprKind::Unary { .. }
         | HirExprKind::Binding(_)
         | HirExprKind::Item(_)
+        | HirExprKind::HostBuiltin(_)
         | HirExprKind::Bool(_)
         | HirExprKind::Tuple(_)
         | HirExprKind::Array(_)
@@ -723,6 +726,7 @@ fn collect_expr_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>, expr
     match &expr.kind {
         HirExprKind::Binding(_)
         | HirExprKind::Item(_)
+        | HirExprKind::HostBuiltin(_)
         | HirExprKind::Int(_)
         | HirExprKind::Bool(_) => {}
         HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {

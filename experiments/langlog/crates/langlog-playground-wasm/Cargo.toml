@@ -1,0 +1,13 @@
+[package]
+name = "langlog-playground-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+js-sys = "0.3"
+langlog-compiler = { path = "../langlog-compiler" }
+wasm-bindgen = "0.2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"

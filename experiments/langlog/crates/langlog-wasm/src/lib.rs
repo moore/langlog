@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use langlog_sema::{
     CheckedProgram, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind, HirFunction,
-    HirItemId, HirProgram, HirStmt, HirType,
+    HirItemId, HirProgram, HirStmt, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, UnaryOp};
 use langlog_syntax::{Diagnostic, Label, Span};
@@ -72,6 +72,10 @@ impl<'a> Compiler<'a> {
                 Some(main.span),
                 "Wasm build requires `fn main() -> u32` for backend v1",
             );
+        }
+
+        for builtin in used_host_builtins(self.program) {
+            module.push_str(host_builtin_import(builtin));
         }
 
         for function in &self.program.functions {
@@ -265,6 +269,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 expr.span,
                 "function item values are not supported by Wasm v1",
             ),
+            HirExprKind::HostBuiltin(_) => self.unsupported(
+                expr.span,
+                "host builtin values are not supported by Wasm v1",
+            ),
             HirExprKind::Unary { op, expr } => match op {
                 UnaryOp::Neg => {
                     self.emit("i32.const 0");
@@ -299,6 +307,9 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                         } else {
                             self.unsupported(callee.span, "unknown callee");
                         }
+                    }
+                    HirExprKind::HostBuiltin(builtin) => {
+                        self.emit(format!("call ${}", host_builtin_symbol(*builtin)));
                     }
                     _ => self
                         .unsupported(callee.span, "only direct function calls compile to Wasm v1"),
@@ -344,6 +355,146 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     }
 }
 
+fn used_host_builtins(program: &HirProgram) -> Vec<HostBuiltin> {
+    let mut builtins = Vec::new();
+    for function in &program.functions {
+        collect_host_builtins_block(&function.body, &mut builtins);
+    }
+    builtins
+}
+
+fn collect_host_builtins_block(block: &HirBlock, builtins: &mut Vec<HostBuiltin>) {
+    for statement in &block.statements {
+        collect_host_builtins_stmt(statement, builtins);
+    }
+    if let Some(result) = &block.result {
+        collect_host_builtins_expr(result, builtins);
+    }
+}
+
+fn collect_host_builtins_stmt(statement: &HirStmt, builtins: &mut Vec<HostBuiltin>) {
+    match statement {
+        HirStmt::Let(stmt) => {
+            if let Some(value) = &stmt.value {
+                collect_host_builtins_expr(value, builtins);
+            }
+        }
+        HirStmt::Assign(stmt) => {
+            collect_host_builtins_expr(&stmt.target, builtins);
+            collect_host_builtins_expr(&stmt.value, builtins);
+        }
+        HirStmt::Expr(stmt) => collect_host_builtins_expr(&stmt.expr, builtins),
+        HirStmt::If(stmt) => {
+            collect_host_builtins_expr(&stmt.condition, builtins);
+            collect_host_builtins_block(&stmt.then_block, builtins);
+            if let Some(branch) = &stmt.else_branch {
+                collect_host_builtins_else(branch, builtins);
+            }
+        }
+        HirStmt::Match(stmt) => {
+            collect_host_builtins_expr(&stmt.expr, builtins);
+            for arm in &stmt.arms {
+                match &arm.body {
+                    langlog_sema::HirMatchBody::Block(block) => {
+                        collect_host_builtins_block(block, builtins);
+                    }
+                    langlog_sema::HirMatchBody::Expr(expr) => {
+                        collect_host_builtins_expr(expr, builtins);
+                    }
+                }
+            }
+        }
+        HirStmt::For(stmt) => {
+            collect_host_builtins_expr(&stmt.iterable, builtins);
+            collect_host_builtins_block(&stmt.body, builtins);
+        }
+        HirStmt::Return(stmt) => {
+            if let Some(value) = &stmt.value {
+                collect_host_builtins_expr(value, builtins);
+            }
+        }
+        HirStmt::Observe(stmt) => {
+            collect_host_builtins_expr(&stmt.left, builtins);
+            collect_host_builtins_expr(&stmt.right, builtins);
+            collect_host_builtins_block(&stmt.else_block, builtins);
+        }
+    }
+}
+
+fn collect_host_builtins_else(branch: &HirElseBranch, builtins: &mut Vec<HostBuiltin>) {
+    match branch {
+        HirElseBranch::Block(block) => collect_host_builtins_block(block, builtins),
+        HirElseBranch::If(stmt) => {
+            collect_host_builtins_expr(&stmt.condition, builtins);
+            collect_host_builtins_block(&stmt.then_block, builtins);
+            if let Some(branch) = &stmt.else_branch {
+                collect_host_builtins_else(branch, builtins);
+            }
+        }
+    }
+}
+
+fn collect_host_builtins_expr(expr: &HirExpr, builtins: &mut Vec<HostBuiltin>) {
+    match &expr.kind {
+        HirExprKind::HostBuiltin(builtin) => {
+            if !builtins.contains(builtin) {
+                builtins.push(*builtin);
+            }
+        }
+        HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
+            for element in elements {
+                collect_host_builtins_expr(element, builtins);
+            }
+        }
+        HirExprKind::Block(block) => collect_host_builtins_block(block, builtins),
+        HirExprKind::Unary { expr, .. } => collect_host_builtins_expr(expr, builtins),
+        HirExprKind::Binary { left, right, .. } => {
+            collect_host_builtins_expr(left, builtins);
+            collect_host_builtins_expr(right, builtins);
+        }
+        HirExprKind::Call { callee, args } => {
+            collect_host_builtins_expr(callee, builtins);
+            for arg in args {
+                collect_host_builtins_expr(arg, builtins);
+            }
+        }
+        HirExprKind::Index { target, index } => {
+            collect_host_builtins_expr(target, builtins);
+            collect_host_builtins_expr(index, builtins);
+        }
+        HirExprKind::Binding(_)
+        | HirExprKind::Item(_)
+        | HirExprKind::Int(_)
+        | HirExprKind::Bool(_) => {}
+    }
+}
+
+fn host_builtin_import(builtin: HostBuiltin) -> &'static str {
+    match builtin {
+        HostBuiltin::ReadU32 => {
+            "  (import \"langlog_host\" \"read_u32\" (func $host_read_u32 (result i32)))\n"
+        }
+        HostBuiltin::PrintU32 => {
+            "  (import \"langlog_host\" \"print_u32\" (func $host_print_u32 (param i32)))\n"
+        }
+        HostBuiltin::PrintBool => {
+            "  (import \"langlog_host\" \"print_bool\" (func $host_print_bool (param i32)))\n"
+        }
+        HostBuiltin::PrintNewline => {
+            "  (import \"langlog_host\" \"print_newline\" (func $host_print_newline))\n"
+        }
+    }
+}
+
+fn host_builtin_symbol(builtin: HostBuiltin) -> &'static str {
+    match builtin {
+        HostBuiltin::ReadU32 => "host_read_u32",
+        HostBuiltin::PrintU32 => "host_print_u32",
+        HostBuiltin::PrintBool => "host_print_bool",
+        HostBuiltin::PrintNewline => "host_print_newline",
+    }
+}
+
 fn binary_instruction(op: BinaryOp) -> Option<&'static str> {
     match op {
         BinaryOp::Add => Some("i32.add"),
@@ -366,7 +517,7 @@ fn binary_instruction(op: BinaryOp) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::compile;
-    use wasmtime::{Engine, Instance, Module, Store};
+    use wasmtime::{Caller, Engine, Instance, Linker, Module, Store};
 
     fn checked(source: &str) -> langlog_sema::CheckedProgram {
         let parsed = langlog_syntax::parse("wasm-test.llg", source);
@@ -388,6 +539,42 @@ mod tests {
             .expect("expected exported main");
 
         main.call(&mut store, ()).expect("expected main result")
+    }
+
+    fn run_main_with_host(source: &str, input: i32) -> (i32, Vec<i32>) {
+        let checked = checked(source);
+        let module = compile(&checked).expect("expected Wasm module");
+        let engine = Engine::default();
+        let module = Module::new(&engine, &module.wasm).expect("expected valid module");
+        let mut store = Store::new(&engine, Vec::<i32>::new());
+        let mut linker = Linker::new(&engine);
+        linker
+            .func_wrap("langlog_host", "read_u32", move || -> i32 { input })
+            .expect("expected read_u32 import");
+        linker
+            .func_wrap(
+                "langlog_host",
+                "print_u32",
+                |mut caller: Caller<'_, Vec<i32>>, value: i32| {
+                    caller.data_mut().push(value);
+                },
+            )
+            .expect("expected print_u32 import");
+        linker
+            .func_wrap("langlog_host", "print_bool", |_: i32| {})
+            .expect("expected print_bool import");
+        linker
+            .func_wrap("langlog_host", "print_newline", || {})
+            .expect("expected print_newline import");
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .expect("expected instance");
+        let main = instance
+            .get_typed_func::<(), i32>(&mut store, "main")
+            .expect("expected exported main");
+
+        let result = main.call(&mut store, ()).expect("expected main result");
+        (result, store.into_data())
     }
 
     #[test]
@@ -465,5 +652,40 @@ fn main() -> u32 {
             ),
             42
         );
+    }
+
+    #[test]
+    fn emits_host_builtin_imports() {
+        let checked = checked(
+            r#"
+fn main() -> u32 {
+    print_u32(read_u32());
+    0
+}
+"#,
+        );
+        let module = compile(&checked).expect("expected Wasm module");
+
+        assert!(module.wat.contains("(import \"langlog_host\" \"read_u32\""));
+        assert!(module
+            .wat
+            .contains("(import \"langlog_host\" \"print_u32\""));
+    }
+
+    #[test]
+    fn executes_host_builtin_imports() {
+        let (result, output) = run_main_with_host(
+            r#"
+fn main() -> u32 {
+    let value: u32 = read_u32();
+    print_u32(value);
+    value
+}
+"#,
+            41,
+        );
+
+        assert_eq!(result, 41);
+        assert_eq!(output, vec![41]);
     }
 }

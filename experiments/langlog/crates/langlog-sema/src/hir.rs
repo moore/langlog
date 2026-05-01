@@ -6,7 +6,9 @@ use langlog_syntax::ast::{
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
-use crate::{lower_type, BindingKind, FunctionType, ResolvedName, SemanticType, TypeFacts};
+use crate::{
+    lower_type, BindingKind, FunctionType, HostBuiltin, ResolvedName, SemanticType, TypeFacts,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HirItemId {
@@ -180,6 +182,7 @@ pub struct HirExpr {
 pub enum HirExprKind {
     Binding(HirBindingId),
     Item(HirItemId),
+    HostBuiltin(HostBuiltin),
     Int(u64),
     Bool(bool),
     Tuple(Vec<HirExpr>),
@@ -430,6 +433,10 @@ impl<'a> HirLowerer<'a> {
                     BindingKind::Item => HirExprKind::Item(HirItemId {
                         declaration_span: resolution.declaration_span,
                     }),
+                    BindingKind::HostBuiltin => HirExprKind::HostBuiltin(
+                        HostBuiltin::from_name(&resolution.name)
+                            .expect("host builtin resolution should name a host builtin"),
+                    ),
                     BindingKind::Param | BindingKind::Local => HirExprKind::Binding(HirBindingId {
                         declaration_span: resolution.declaration_span,
                     }),
