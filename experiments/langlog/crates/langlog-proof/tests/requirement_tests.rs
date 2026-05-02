@@ -791,6 +791,131 @@ fn main(values: [u32; 4]) {
         "mutable control-flow comparison cannot discharge this proof obligation",
         "index < 4",
     );
+    assert!(
+        proof.has_warnings(),
+        "expected mutable-control-flow warning: {:#?}",
+        proof.diagnostics
+    );
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# A mutable control-flow warning MUST be reported when mutable facts would discharge a proof obligation.
+#[test]
+fn requirement_llg_proof_02_reports_warning_when_mutable_facts_would_discharge_obligation() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(total: u32) {
+    let mut denom = 1;
+    if denom != 0 {
+        total / denom;
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible divide-by-zero is not proven safe",
+        "denom",
+    );
+    assert!(proof.has_warnings(), "{:#?}", proof.diagnostics);
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Redundant mutable control-flow hints MUST NOT produce extra warnings for an obligation that is already explained by another mutable hint.
+#[test]
+fn requirement_llg_proof_02_suppresses_redundant_mutable_control_flow_warnings() {
+    let (_, proof) = check_err(
+        r#"
+fn main(total: u32) {
+    let mut denom = 1;
+    let mut duplicate = 1;
+    if denom != 0 && duplicate != 0 {
+        total / denom;
+    }
+}
+"#,
+    );
+
+    let warning_count = proof
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .count();
+    assert_eq!(warning_count, 1, "{:#?}", proof.diagnostics);
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Proof checking MUST inspect obligations inside `else` branches.
+#[test]
+fn requirement_llg_proof_02_checks_obligations_inside_else_branches() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(total: u32, denom: u32) {
+    if denom == 0 {
+        return;
+    } else {
+        total / denom;
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible divide-by-zero is not proven safe",
+        "denom",
+    );
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
+//# Proof facts MUST be available for bindings introduced inside `else` branches, loop patterns, match patterns, and expression blocks.
+#[test]
+fn requirement_llg_proof_02_collects_bindings_from_nested_fact_sources() {
+    let proof = check_ok(
+        r#"
+fn main(values: [u32; 4], total: u32, flag: bool) {
+    if flag {
+        return;
+    } else {
+        let denom = 1;
+        if denom != 0 {
+            total / denom;
+        }
+    }
+
+    for index in [0, 1] {
+        if index < 4 {
+            values[index];
+        }
+    }
+
+    match 1 {
+        captured => {
+            if captured != 0 {
+                total / captured;
+            }
+        }
+    }
+
+    {
+        let block_denom = 1;
+        if block_denom != 0 {
+            total / block_denom;
+        }
+    };
+}
+"#,
+    )
+    .1;
+
+    assert!(!proof.has_errors(), "{:#?}", proof.diagnostics);
 }
 
 //= SPEC.md#llg-proof-02-observations

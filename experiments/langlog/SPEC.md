@@ -55,6 +55,8 @@ properties that should be enforced structurally rather than by convention:
 - When arithmetic proof analysis fails during `langlog check`, the CLI MUST
   print diagnostics to stderr.
 - When `.langlog-config` cannot be read, the CLI MUST print an error to stderr.
+- Malformed entries in a `.langlog-config` `[build]` section MUST make build
+  fail with a config error on stderr.
 - `langlog check --warnings-as-errors <path>` MUST succeed when no warnings are
   emitted.
 - The compiler interface MUST promote warnings to failing diagnostics when
@@ -175,11 +177,25 @@ properties that should be enforced structurally rather than by convention:
 
 - The front end MUST preserve byte spans for tokens and syntax nodes.
 - Syntax diagnostics MUST include a primary source span.
+- Source files MUST preserve configured file identifiers, line counts, line
+  text, and byte-offset to line/column locations.
+- Source files MUST extract source text and line spans from valid same-file
+  spans.
+- Span and source length helpers MUST report exact byte lengths and emptiness.
+- Source files MUST reject foreign spans, out-of-bounds locations, and
+  locations that do not land on UTF-8 character boundaries.
+- Source line helpers MUST trim CRLF line endings without trimming source
+  content before the line ending.
+- Empty source files MUST still expose one empty first line.
 
 ## LLG-DIAG-02 Rendered Syntax Diagnostics
 
 - The CLI MUST render syntax errors with file path, line, column, source line
   text, and an underline spanning the full primary source span.
+- Token descriptions used in diagnostics MUST name identifiers, integer
+  literals, and keywords.
+- Token descriptions used in diagnostics MUST name punctuation, operators, and
+  end of file.
 
 ## LLG-DIAG-03 Parser Recovery
 
@@ -284,8 +300,15 @@ properties that should be enforced structurally rather than by convention:
   but MUST NOT discharge proof obligations.
 - Warnings about mutable control-flow facts MUST appear only when such a fact
   would otherwise discharge a real obligation.
+- A mutable control-flow warning MUST be reported when mutable facts would
+  discharge a proof obligation.
+- Redundant mutable control-flow hints MUST NOT produce extra warnings for an
+  obligation that is already explained by another mutable hint.
 - Mutable control-flow facts MUST NOT survive reassignment as if they were
   stable proofs.
+- Proof checking MUST inspect obligations inside `else` branches.
+- Proof facts MUST be available for bindings introduced inside `else` branches,
+  loop patterns, match patterns, and expression blocks.
 - Binding-based proof facts MUST attach to binding identity rather than
   identifier text so shadowing does not inherit outer facts.
 

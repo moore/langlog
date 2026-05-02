@@ -220,8 +220,11 @@ impl TokenTag {
 mod tests {
     use super::{TokenKind, TokenTag};
 
+    //= SPEC.md#llg-diag-02-rendered-syntax-diagnostics
+    //= type=test
+    //# Token descriptions used in diagnostics MUST name identifiers, integer literals, and keywords.
     #[test]
-    fn token_kind_describe_handles_identifiers_and_literals() {
+    fn requirement_llg_diag_02_token_kind_describe_handles_identifiers_literals_and_keywords() {
         assert_eq!(
             TokenKind::Identifier("name".into()).describe(),
             "identifier"
@@ -230,8 +233,11 @@ mod tests {
         assert_eq!(TokenKind::Fn.describe(), "`fn`");
     }
 
+    //= SPEC.md#llg-diag-02-rendered-syntax-diagnostics
+    //= type=test
+    //# Token descriptions used in diagnostics MUST name punctuation, operators, and end of file.
     #[test]
-    fn token_tag_describe_covers_symbols_and_eof() {
+    fn requirement_llg_diag_02_token_tag_describe_covers_symbols_and_eof() {
         assert_eq!(TokenTag::Underscore.describe(), "`_`");
         assert_eq!(TokenTag::BangEq.describe(), "`!=`");
         assert_eq!(TokenTag::LtEq.describe(), "`<=`");

@@ -374,6 +374,30 @@ fn requirement_llg_cli_02_prints_unreadable_config_errors_to_stderr() {
 
 //= SPEC.md#llg-cli-02-cli-output-behavior
 //= type=test
+//# Malformed entries in a `.langlog-config` `[build]` section MUST make build fail with a config error on stderr.
+#[test]
+fn requirement_llg_cli_02_rejects_malformed_build_config_entries() {
+    let project = TempProject::new();
+    project.write(
+        ".langlog-config",
+        r#"
+[build]
+[broken
+"#,
+    );
+    let source = project.write("src/main.llg", "fn main() -> u32 { 42 }");
+
+    let failure = run_build(&source);
+
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(String::from_utf8(failure.stdout).unwrap().is_empty());
+    assert!(String::from_utf8(failure.stderr)
+        .unwrap()
+        .contains("expected `key = \"value\"`"));
+}
+
+//= SPEC.md#llg-cli-02-cli-output-behavior
+//= type=test
 //# `langlog check --warnings-as-errors <path>` MUST succeed when no warnings are emitted.
 #[test]
 fn requirement_llg_cli_02_accepts_warnings_as_errors_without_warnings() {

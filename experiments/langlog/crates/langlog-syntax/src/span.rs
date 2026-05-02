@@ -268,8 +268,11 @@ impl SourceFile {
 mod tests {
     use super::{ByteOffset, FileId, SourceFile, Span};
 
+    //= SPEC.md#llg-diag-01-source-span-preservation
+    //= type=test
+    //# Source files MUST preserve configured file identifiers, line counts, line text, and byte-offset to line/column locations.
     #[test]
-    fn source_file_tracks_lines_and_locations() {
+    fn requirement_llg_diag_01_source_file_tracks_lines_and_locations() {
         let source = SourceFile::with_id(FileId::new(7), "demo.llg", "fn main() {\n    1\n}\n");
 
         assert_eq!(source.file_id().index(), 7);
@@ -284,8 +287,11 @@ mod tests {
         assert_eq!(location.column, 5);
     }
 
+    //= SPEC.md#llg-diag-01-source-span-preservation
+    //= type=test
+    //# Source files MUST extract source text and line spans from valid same-file spans.
     #[test]
-    fn source_file_extracts_spans() {
+    fn requirement_llg_diag_01_source_file_extracts_spans() {
         let source = SourceFile::new("demo.llg", "observe count <= limit else { return; }\n");
         let span = source.span(8, 13);
 
@@ -293,8 +299,11 @@ mod tests {
         assert_eq!(source.line_span(1), Some(source.span(0, 39)));
     }
 
+    //= SPEC.md#llg-diag-01-source-span-preservation
+    //= type=test
+    //# Span and source length helpers MUST report exact byte lengths and emptiness.
     #[test]
-    fn span_and_source_lengths_match_the_underlying_text() {
+    fn requirement_llg_diag_01_span_and_source_lengths_match_the_underlying_text() {
         let source = SourceFile::new("demo.llg", "abc");
         let non_empty = source.span(0, 2);
         let empty = source.span(2, 2);
@@ -311,8 +320,11 @@ mod tests {
         assert!(empty_source.is_empty());
     }
 
+    //= SPEC.md#llg-diag-01-source-span-preservation
+    //= type=test
+    //# Source files MUST reject foreign spans, out-of-bounds locations, and locations that do not land on UTF-8 character boundaries.
     #[test]
-    fn source_file_rejects_foreign_spans_and_invalid_locations() {
+    fn requirement_llg_diag_01_source_file_rejects_foreign_spans_and_invalid_locations() {
         let source = SourceFile::with_id(FileId::new(7), "demo.llg", "hé\n");
         let foreign = Span::new(FileId::new(9), ByteOffset::new(0), ByteOffset::new(1));
 
@@ -324,8 +336,11 @@ mod tests {
         assert_eq!(source.location(ByteOffset::new(99)), None);
     }
 
+    //= SPEC.md#llg-diag-01-source-span-preservation
+    //= type=test
+    //# Source line helpers MUST trim CRLF line endings without trimming source content before the line ending.
     #[test]
-    fn source_file_line_helpers_trim_crlf_endings() {
+    fn requirement_llg_diag_01_source_file_line_helpers_trim_crlf_endings() {
         let source = SourceFile::new("demo.llg", "one\r\ntwo\r\n");
 
         assert_eq!(source.line_text(1), Some("one"));
@@ -345,8 +360,11 @@ mod tests {
         );
     }
 
+    //= SPEC.md#llg-diag-01-source-span-preservation
+    //= type=test
+    //# Empty source files MUST still expose one empty first line.
     #[test]
-    fn empty_source_still_has_an_empty_first_line() {
+    fn requirement_llg_diag_01_empty_source_still_has_an_empty_first_line() {
         let source = SourceFile::new("empty.llg", "");
 
         assert_eq!(source.line_count(), 1);
