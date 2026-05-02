@@ -198,6 +198,10 @@ properties that should be enforced structurally rather than by convention:
 
 - The semantic phase MUST resolve item, parameter, and local bindings according
   to lexical scope.
+- Bindings introduced by block, loop, and match scopes MUST NOT be visible
+  after those scopes end.
+- Type information for block-scoped bindings MUST NOT be visible after the
+  block scope ends.
 - The semantic phase MUST reject references to undefined bindings.
 
 ## LLG-SEMA-02 Totality Constraints
@@ -208,8 +212,13 @@ properties that should be enforced structurally rather than by convention:
   loop model; phase 1 bounded iterables are range expressions, array literals,
   and bindings whose declared types or initializers make them fixed arrays or
   explicit-capacity `Set`/`Map` values.
+- Binary expressions are bounded iterables only when they are range
+  expressions.
+- Scalar declared types MUST NOT be accepted as bounded iterables.
 - The semantic phase MUST require the `else` block of `observe` to be terminal
   so control cannot continue after a failed observation.
+- Terminal `observe` else-blocks MAY terminate through nested `if` and `match`
+  statements only when every branch terminates.
 
 ## LLG-SEMA-03 Mutability And Stable Facts
 
@@ -230,10 +239,18 @@ properties that should be enforced structurally rather than by convention:
   unknown after checking; this includes `let` bindings without either a type
   annotation or an initializer, and empty array literals without an explicit
   element type.
+- Unknown types inside compound expressions and compound types MUST prevent
+  successful HIR lowering.
+- Type compatibility checks MUST NOT emit mismatch diagnostics when either side
+  is already unknown.
 - The semantic phase MUST require array literals to have a homogeneous element
   type, and MUST require indexing to use an array target plus a `u32` index.
 - The semantic phase MUST recognize tuple, `Option`, `Result`, `Set`, and
   `Map` types in bindings, returns, call compatibility, and equality checks.
+- The semantic phase MUST reject calls to non-function values and calls with
+  the wrong number of arguments.
+- The semantic phase MUST require `observe` equality operands to have matching
+  types and ordering operands to use `u32`.
 
 ## LLG-PROOF-01 Proof-Required Operations
 
@@ -243,6 +260,15 @@ properties that should be enforced structurally rather than by convention:
   by zero unless safety is proven.
 - The proof phase MUST reject indexing that may go out of bounds unless safety
   is proven.
+- Constant proof expressions MUST evaluate `+`, `-`, `*`, `/`, and `%` only
+  when the operation is valid for unsigned integer constants.
+- Arithmetic proof ranges MUST preserve precise subtraction lower and upper
+  bounds for later obligations.
+- A proof of non-zero MUST be derived from constant non-zero expressions,
+  equality to a non-zero value, inequality from zero, positive lower bounds,
+  and greater-than comparisons.
+- Indexing MUST require the proven index upper bound to be strictly less than
+  the indexed array length.
 
 ## LLG-PROOF-02 Observations
 
@@ -252,6 +278,8 @@ properties that should be enforced structurally rather than by convention:
   model on the continuing path after a guarded `observe` succeeds.
 - In phase 1, an `observe` fact MUST relate a left-hand proof expression to a
   right-hand proof expression.
+- Control-flow equality and inequality comparisons MUST be available as proof
+  facts inside the guarded branch.
 - Control-flow comparisons over mutable bindings MUST be tracked for diagnostics
   but MUST NOT discharge proof obligations.
 - Warnings about mutable control-flow facts MUST appear only when such a fact

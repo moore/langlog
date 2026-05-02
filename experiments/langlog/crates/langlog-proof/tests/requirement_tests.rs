@@ -124,6 +124,27 @@ fn main(total: u32, limit: u32, baseline: u32) {
 
 //= SPEC.md#llg-proof-02-observations
 //= type=test
+//# Control-flow equality and inequality comparisons MUST be available as proof facts inside the guarded branch.
+#[test]
+fn requirement_llg_proof_02_derives_equality_facts_from_control_flow_tests() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(total: u32, denom: u32, other: u32) {
+    if denom == 1 {
+        total / denom;
+    }
+    if other != 0 {
+        total / other;
+    }
+}
+"#,
+    );
+
+    assert_eq!(proof.obligations, 2);
+}
+
+//= SPEC.md#llg-proof-02-observations
+//= type=test
 //# The proof phase MUST incorporate explicit `observe` statements into the fact model on the continuing path after a guarded `observe` succeeds.
 #[test]
 fn requirement_llg_proof_02_incorporates_observe_statements() {
@@ -411,6 +432,281 @@ fn main(values: [u32; 4], index: u32) {
 
     // A control-flow bound check should discharge the indexing obligation in the guarded block.
     assert_eq!(control_flow_safe.obligations, 1);
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# Constant proof expressions MUST evaluate `+`, `-`, `*`, `/`, and `%` only when the operation is valid for unsigned integer constants.
+#[test]
+fn requirement_llg_proof_01_evaluates_valid_constant_proof_expressions() {
+    let (_, valid_constants) = check_ok(
+        r#"
+fn main(values: [u32; 5], total: u32) {
+    values[1 + 1];
+    values[4 - 1];
+    values[2 * 2];
+    values[8 / 2];
+    values[7 % 5];
+    values[5 % 2];
+    [10, 20][5 % 2];
+    total / (6 / 3);
+    total % (7 % 3);
+    total / (4 - 3);
+    total / (1 * 2);
+}
+"#,
+    );
+
+    assert!(
+        !valid_constants.has_errors(),
+        "{:#?}",
+        valid_constants.diagnostics
+    );
+
+    let (checked, invalid_constants) = check_err(
+        r#"
+fn main(values: [u32; 5], total: u32) {
+    values[1 - 2];
+    values[5 + 1];
+    values[3 * 2];
+    total / (6 - 6);
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &invalid_constants,
+        "possible arithmetic overflow is not proven safe",
+        "1 - 2",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &invalid_constants,
+        "possible out-of-bounds indexing is not proven safe",
+        "5 + 1",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &invalid_constants,
+        "possible out-of-bounds indexing is not proven safe",
+        "3 * 2",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &invalid_constants,
+        "possible divide-by-zero is not proven safe",
+        "(6 - 6)",
+    );
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# Arithmetic proof ranges MUST preserve precise subtraction lower and upper bounds for later obligations.
+#[test]
+fn requirement_llg_proof_01_preserves_precise_subtraction_ranges() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(total: u32, step: u32) {
+    observe total >= 10 else {
+        return;
+    }
+    observe total <= 10 else {
+        return;
+    }
+    observe step >= 3 else {
+        return;
+    }
+    observe step <= 3 else {
+        return;
+    }
+
+    (total - step) + 4294967288;
+}
+"#,
+    );
+
+    assert!(!proof.has_errors(), "{:#?}", proof.diagnostics);
+
+    let (checked, failing_proof) = check_err(
+        r#"
+fn main(total: u32, step: u32) {
+    observe total >= 10 else {
+        return;
+    }
+    observe total <= 10 else {
+        return;
+    }
+    observe step >= 3 else {
+        return;
+    }
+    observe step <= 3 else {
+        return;
+    }
+
+    (total - step) + 4294967289;
+    (total - step) - 8;
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible arithmetic overflow is not proven safe",
+        "(total - step) + 4294967289",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &failing_proof,
+        "possible arithmetic overflow is not proven safe",
+        "(total - step) - 8",
+    );
+
+    let (_, lower_sensitive) = check_ok(
+        r#"
+fn main(total: u32, step: u32) {
+    observe total >= 10 else {
+        return;
+    }
+    observe total <= 10 else {
+        return;
+    }
+    observe step >= 3 else {
+        return;
+    }
+    observe step <= 3 else {
+        return;
+    }
+
+    (total - step) - 4;
+}
+"#,
+    );
+
+    assert!(
+        !lower_sensitive.has_errors(),
+        "{:#?}",
+        lower_sensitive.diagnostics
+    );
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# A proof of non-zero MUST be derived from constant non-zero expressions, equality to a non-zero value, inequality from zero, positive lower bounds, and greater-than comparisons.
+#[test]
+fn requirement_llg_proof_01_derives_non_zero_from_all_phase_1_sources() {
+    let (_, proven) = check_ok(
+        r#"
+fn main(total: u32, eq: u32, neq: u32, gt: u32, gte: u32) {
+    total / (1 + 1);
+
+    observe eq == 7 else {
+        return;
+    }
+    total / eq;
+
+    observe neq != 0 else {
+        return;
+    }
+    total / neq;
+
+    observe gt > 0 else {
+        return;
+    }
+    total / gt;
+
+    observe gte >= 1 else {
+        return;
+    }
+    total / gte;
+}
+"#,
+    );
+
+    assert!(!proven.has_errors(), "{:#?}", proven.diagnostics);
+
+    let (checked, unproven) = check_err(
+        r#"
+fn main(total: u32, eq: u32, gte: u32, lt: u32) {
+    observe eq == 0 else {
+        return;
+    }
+    total / eq;
+
+    observe gte >= 0 else {
+        return;
+    }
+    total / gte;
+
+    observe lt < 10 else {
+        return;
+    }
+    total / lt;
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &unproven,
+        "possible divide-by-zero is not proven safe",
+        "eq",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &unproven,
+        "possible divide-by-zero is not proven safe",
+        "gte",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &unproven,
+        "possible divide-by-zero is not proven safe",
+        "lt",
+    );
+}
+
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# Indexing MUST require the proven index upper bound to be strictly less than the indexed array length.
+#[test]
+fn requirement_llg_proof_01_requires_index_upper_bound_below_array_length() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], exact: u32, range: u32) {
+    values[4];
+
+    observe exact <= 4 else {
+        return;
+    }
+    values[exact];
+
+    observe range < 5 else {
+        return;
+    }
+    values[range];
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "4",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "exact",
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "range",
+    );
 }
 
 //= SPEC.md#llg-proof-02-observations

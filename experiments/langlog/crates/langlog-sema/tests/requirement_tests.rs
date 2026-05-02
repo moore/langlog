@@ -161,6 +161,17 @@ fn assert_primary_diagnostic(checked: &CheckedProgram, message: &str, span: Span
     }));
 }
 
+fn assert_no_diagnostic_message(checked: &CheckedProgram, message: &str) {
+    assert!(
+        checked
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.message != message),
+        "unexpected diagnostic {message:?}: {:#?}",
+        checked.diagnostics
+    );
+}
+
 fn assert_rejects_unbounded_iterable(source: &str, expected_iterable: &str) {
     let checked = analyze_ok(source);
     assert!(checked.has_errors());
@@ -269,6 +280,70 @@ fn main(param: u32) {
         outer_let.name.span,
         "outer local expression",
     );
+}
+
+//= SPEC.md#llg-sema-01-name-resolution-and-scopes
+//= type=test
+//# Bindings introduced by block, loop, and match scopes MUST NOT be visible after those scopes end.
+#[test]
+fn requirement_llg_sema_01_drops_bindings_after_nested_scopes_end() {
+    let checked = analyze_ok(
+        r#"
+fn main(flag: bool, values: [u32; 1]) {
+    {
+        let block_value = 1;
+        block_value;
+    };
+
+    for loop_value in values {
+        loop_value;
+    }
+
+    match flag {
+        true => { let match_value = 1; match_value; },
+        false => { return; }
+    }
+
+    block_value;
+    loop_value;
+    match_value;
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+    assert_undefined_name(&checked, expr_stmt(&main.body, 3), "block_value");
+    assert_undefined_name(&checked, expr_stmt(&main.body, 4), "loop_value");
+    assert_undefined_name(&checked, expr_stmt(&main.body, 5), "match_value");
+}
+
+//= SPEC.md#llg-sema-01-name-resolution-and-scopes
+//= type=test
+//# Type information for block-scoped bindings MUST NOT be visible after the block scope ends.
+#[test]
+fn requirement_llg_sema_01_drops_binding_types_after_block_scopes_end() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    {
+        let block_value = 1;
+        block_value;
+    };
+
+    let leaked: bool = block_value;
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+    let leaked_value = let_stmt(&main.body, 1)
+        .value
+        .as_ref()
+        .expect("expected leaked initializer");
+    assert_undefined_name(&checked, leaked_value, "block_value");
+    assert_no_diagnostic_message(&checked, "type mismatch: expected bool, found u32");
 }
 
 //= SPEC.md#llg-sema-01-name-resolution-and-scopes
@@ -487,6 +562,32 @@ fn main(values: Set<u32, 16>) {
         bounded_set_binding.diagnostics
     );
 
+    let bounded_map_binding = analyze_ok(
+        r#"
+fn main(entries: Map<u32, bool, 16>) {
+    for entry in entries {
+        entry == entry;
+    }
+}
+"#,
+    );
+    assert!(
+        !bounded_map_binding.has_errors(),
+        "{:#?}",
+        bounded_map_binding.diagnostics
+    );
+    let hir_main = hir_function(&bounded_map_binding, "main");
+    let HirStmt::For(hir_for) = &hir_main.body.statements[0] else {
+        panic!("expected HIR for statement");
+    };
+    let langlog_sema::HirPatternKind::Binding(binding) = &hir_for.binding.kind else {
+        panic!("expected HIR binding pattern");
+    };
+    assert_eq!(
+        binding.ty,
+        HirType::Tuple(vec![HirType::U32, HirType::Bool])
+    );
+
     let bounded_initializer_binding = analyze_ok(
         r#"
 fn main() {
@@ -521,6 +622,20 @@ fn main() {
         "count",
     );
 
+    // Reject a scalar parameter binding even when its declared type is known.
+    assert_rejects_unbounded_iterable(
+        r#"
+fn main(count: u32) {
+    for value in count {
+        observe value >= 0 else {
+            return;
+        }
+    }
+}
+"#,
+        "count",
+    );
+
     // Reject an arbitrary computed expression because it is outside the bounded loop model.
     assert_rejects_unbounded_iterable(
         r#"
@@ -535,6 +650,44 @@ fn main() {
 }
 "#,
         "helper()",
+    );
+}
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# Binary expressions are bounded iterables only when they are range expressions.
+#[test]
+fn requirement_llg_sema_02_rejects_non_range_binary_iterables() {
+    assert_rejects_unbounded_iterable(
+        r#"
+fn main() {
+    for value in 1 + 2 {
+        observe value >= 0 else {
+            return;
+        }
+    }
+}
+"#,
+        "1 + 2",
+    );
+}
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# Scalar declared types MUST NOT be accepted as bounded iterables.
+#[test]
+fn requirement_llg_sema_02_rejects_scalar_declared_iterables() {
+    assert_rejects_unbounded_iterable(
+        r#"
+fn main(value: u32) {
+    for item in value {
+        observe item >= 0 else {
+            return;
+        }
+    }
+}
+"#,
+        "value",
     );
 }
 
@@ -589,6 +742,89 @@ fn main(total: u32, limit: u32) {
         "`observe` `else` blocks must be terminal in phase 1",
         observe.else_block.span,
     );
+}
+
+//= SPEC.md#llg-sema-02-totality-constraints
+//= type=test
+//# Terminal `observe` else-blocks MAY terminate through nested `if` and `match` statements only when every branch terminates.
+#[test]
+fn requirement_llg_sema_02_accepts_only_fully_terminal_nested_observe_else_blocks() {
+    let terminal_match_else = analyze_ok(
+        r#"
+fn main(total: u32, flag: bool) {
+    observe total > 0 else {
+        match flag {
+            true => { return; },
+            false => { return; }
+        }
+    }
+}
+"#,
+    );
+    assert!(
+        !terminal_match_else.has_errors(),
+        "{:#?}",
+        terminal_match_else.diagnostics
+    );
+
+    let terminal_else_if = analyze_ok(
+        r#"
+fn main(total: u32, flag: bool) {
+    observe total > 0 else {
+        if flag {
+            return;
+        } else if false {
+            return;
+        } else {
+            return;
+        }
+    }
+}
+"#,
+    );
+    assert!(
+        !terminal_else_if.has_errors(),
+        "{:#?}",
+        terminal_else_if.diagnostics
+    );
+
+    let non_terminal_match_else = analyze_ok(
+        r#"
+fn main(total: u32, flag: bool) {
+    observe total > 0 else {
+        match flag {
+            true => { return; },
+            false => { total; }
+        }
+    }
+}
+"#,
+    );
+    assert!(non_terminal_match_else.has_errors());
+
+    let observe = observe_stmt(&function(&non_terminal_match_else, "main").body, 0);
+    assert_primary_diagnostic(
+        &non_terminal_match_else,
+        "`observe` `else` blocks must be terminal in phase 1",
+        observe.else_block.span,
+    );
+
+    let non_terminal_else_if = analyze_ok(
+        r#"
+fn main(total: u32, flag: bool) {
+    observe total > 0 else {
+        if flag {
+            return;
+        } else if false {
+            total;
+        } else {
+            return;
+        }
+    }
+}
+"#,
+    );
+    assert!(non_terminal_else_if.has_errors());
 }
 
 //= SPEC.md#llg-sema-03-mutability-and-stable-facts
@@ -765,6 +1001,46 @@ fn main(flag: bool) -> u32 {
 
 //= SPEC.md#llg-sema-04-initial-type-checking
 //= type=test
+//# The semantic phase MUST reject calls to non-function values and calls with the wrong number of arguments.
+#[test]
+fn requirement_llg_sema_04_rejects_non_function_and_wrong_arity_calls() {
+    let checked = analyze_ok(
+        r#"
+fn one(value: u32) -> u32 { value }
+
+fn main(value: u32) {
+    value();
+    one();
+    one(1, 2);
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+    let non_function_callee = call_callee(expr_stmt(&main.body, 0));
+    let missing_arg_callee = call_callee(expr_stmt(&main.body, 1));
+    let extra_arg_callee = call_callee(expr_stmt(&main.body, 2));
+
+    assert_primary_diagnostic(
+        &checked,
+        "calls require a function-valued callee",
+        non_function_callee.span,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        "call arity mismatch: expected 1 argument(s), found 0",
+        missing_arg_callee.span,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        "call arity mismatch: expected 1 argument(s), found 2",
+        extra_arg_callee.span,
+    );
+}
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
 //# The semantic phase MUST require `if` conditions and logical operators to use `bool`.
 #[test]
 fn requirement_llg_sema_04_requires_bool_conditions_and_logical_operators() {
@@ -870,6 +1146,85 @@ fn main(flag: bool, limit: u32) {
         "range expressions must have type u32",
         loop_stmt.iterable.span,
     );
+}
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# The semantic phase MUST require `observe` equality operands to have matching types and ordering operands to use `u32`.
+#[test]
+fn requirement_llg_sema_04_requires_typed_observe_operands() {
+    let valid = analyze_ok(
+        r#"
+fn main(value: u32, flag: bool) {
+    observe value == 1 else {
+        return;
+    }
+    observe flag != false else {
+        return;
+    }
+    observe value < 10 else {
+        return;
+    }
+}
+"#,
+    );
+    assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn main(value: u32, flag: bool) {
+    observe value == flag else {
+        return;
+    }
+    observe flag < true else {
+        return;
+    }
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+
+    let main = function(&invalid, "main");
+    assert_primary_diagnostic(
+        &invalid,
+        "type mismatch: expected u32, found bool",
+        observe_stmt(&main.body, 0).span,
+    );
+    assert_primary_diagnostic(
+        &invalid,
+        "observe ordering comparisons must have type u32",
+        observe_stmt(&main.body, 1).span,
+    );
+}
+
+//= SPEC.md#llg-sema-04-initial-type-checking
+//= type=test
+//# Type compatibility checks MUST NOT emit mismatch diagnostics when either side is already unknown.
+#[test]
+fn requirement_llg_sema_04_suppresses_type_mismatch_cascades_for_unknown_types() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let annotated: u32 = missing;
+    let assigned: bool = missing;
+}
+"#,
+    );
+    assert!(checked.has_errors());
+
+    let main = function(&checked, "main");
+    let annotated_value = let_stmt(&main.body, 0)
+        .value
+        .as_ref()
+        .expect("expected annotated initializer");
+    let assigned_value = let_stmt(&main.body, 1)
+        .value
+        .as_ref()
+        .expect("expected assigned initializer");
+    assert_undefined_name(&checked, annotated_value, "missing");
+    assert_undefined_name(&checked, assigned_value, "missing");
+    assert_no_diagnostic_message(&checked, "type mismatch: expected u32, found <unknown>");
+    assert_no_diagnostic_message(&checked, "type mismatch: expected bool, found <unknown>");
 }
 
 //= SPEC.md#llg-sema-04-initial-type-checking

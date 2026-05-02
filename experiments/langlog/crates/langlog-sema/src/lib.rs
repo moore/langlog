@@ -216,8 +216,14 @@ impl SemanticType {
             | Self::Bool
             | Self::U32
             | Self::Named(_)
-            | Self::Function(_)
             | Self::Unknown => matches!(self, Self::Unknown),
+            Self::Function(signature) => {
+                signature
+                    .params
+                    .iter()
+                    .any(SemanticType::contains_unknown)
+                    || signature.return_type.contains_unknown()
+            }
             Self::Tuple(elements) => elements.iter().any(SemanticType::contains_unknown),
             Self::Array { element, .. } | Self::Option(element) | Self::Range(element) => {
                 element.contains_unknown()

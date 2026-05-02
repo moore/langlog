@@ -47,6 +47,8 @@ This document complements, but does not replace, the main language spec:
 
 - Successfully checked HIR MUST NOT contain unresolved names or `Unknown`
   types.
+- HIR lowering MUST reject compound semantic types that contain unknown
+  components before constructing any HIR type.
 
 ## Non-Normative Notes
 

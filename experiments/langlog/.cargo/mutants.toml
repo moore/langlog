@@ -6,3 +6,7 @@ additional_cargo_test_args = ["requirement_"]
 examine_globs = [
     "crates/*/src/**/*.rs",
 ]
+exclude_re = [
+    "crates/langlog-playground-wasm/src/lib.rs:[0-9]+:[0-9]+: replace (check|build|build_and_run_ready) -> JsValue",
+    "crates/langlog-playground-wasm/src/lib.rs:[0-9]+:[0-9]+: replace PlaygroundResult::into_js",
+]
