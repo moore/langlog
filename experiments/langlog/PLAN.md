@@ -8,10 +8,11 @@ allocation.
 
 ## Current Status
 
-- Current phase: `M3 Proof IR plus checked arithmetic`
-- Last completed milestone: `M2 HIR plus semantic checks`
+- Current phase: `M4 Minimal relation enforcement on collections`
+- Last completed milestone: `M3 Proof engine for obligations and observations`
 - Next concrete task: Decide whether declared collection-relation syntax belongs
-  in M4 before broader relation work continues.
+  in M4 before broader relation work continues, then either add that syntax or
+  explicitly keep relation work implicit for one more iteration.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Implemented semantic baseline: name resolution, recursion rejection, bounded
@@ -22,10 +23,25 @@ allocation.
   overflow, divide-by-zero, and out-of-bounds indexing checks; stable facts are
   now keyed by binding identity, and mutable control-flow comparisons warn but
   do not discharge obligations.
+- Implemented relation baseline: one implicit relation is checked today;
+  iterating `Set<K, N>` can prove key presence in a related `Map<K, V, M>` for
+  the loop binding. Declared relation syntax and constrained update checking are
+  still open.
+- Implemented executable baseline: a Wasm V1 backend can build and run the
+  current non-collection executable subset, including checked arithmetic,
+  recovery, scalar/aggregate values, arrays, bounded loops, `if`, `match`,
+  `observe` runtime else blocks, direct calls, local assignment, and host
+  builtins. `Set` and `Map` remain check/proof-only in Wasm V1.
 - Project task runner: use `./tasks.sh` in `experiments/langlog/` to run the
   default fast checks in one place. Mutation testing is intentionally excluded
   from `./tasks.sh`; run `cargo mutants` manually when you explicitly want that
   slower check.
+- Current verification baseline: `cargo test`, `cargo clippy --all-targets
+  --all-features -- -D warnings`, `cargo fmt --all -- --check`, `rumdl check .
+  --respect-gitignore`, `cargo run -p langlog-xtask -- check-requirements`, and
+  `duvet report --require-tests true` are expected to pass. The requirement
+  validator currently reports implemented requirement tests only; no ignored
+  `todo_*` placeholders are present yet.
 - Documentation split:
   - `SPEC.md` remains the surface-language and user-visible behavior spec.
   - `HIR.md` defines AST-to-HIR elaboration plus HIR invariants.
@@ -33,6 +49,7 @@ allocation.
     invariants.
   - `SEMANTICS.md` defines the current checked-result semantics; future MIR
     work should extend it with dynamic semantics.
+  - `WASM.md` defines the current Wasm V1 backend and browser playground ABI.
 - Formatting defaults: `rustfmt` and `rumdl` are both pinned to a 100-column
   line length so requirement text stays stable across Rust and Markdown tooling.
 
@@ -100,6 +117,24 @@ inferred or explicit facts.
 - [ ] Report relation violations with source-linked diagnostics.
 
 Exit criteria: one declared relation is enforced and proven during checking.
+
+### Executable Wasm V1 side track
+
+This work was implemented before the full MIR/interpreter milestone. It is
+useful for demos, examples, and playground validation, but it does not replace
+M5 because there is still no backend-independent executable semantics layer.
+
+- [x] Add `langlog-wasm` as a backend for the current executable subset.
+- [x] Add `langlog build --target wasm <path>`.
+- [x] Build Wasm for `fn main() -> u32` programs after syntax, semantic, and
+  proof checks pass.
+- [x] Execute checked arithmetic, recovery expressions, direct calls, locals,
+  assignments, arrays, bounded loops, `if`, `match`, and `observe` runtime else
+  blocks in Wasm V1.
+- [x] Add host builtin imports for browser/playground interaction.
+- [x] Add `langlog-playground-wasm` and a static browser playground adapter.
+- [ ] Keep Wasm V1 behavior aligned with future MIR/interpreter semantics once
+  M5 exists.
 
 ### M5 MIR plus interpreter or VM
 
