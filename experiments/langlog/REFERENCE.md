@@ -378,19 +378,26 @@ The backend runs only after syntax, semantic, and proof checks succeed.
 Wasm V1 supports:
 
 - `fn main() -> u32`
-- `u32` and `bool` values, both lowered as Wasm `i32`
-- fixed-size arrays of `u32` or `bool` values
+- flattened non-collection values using `i32` slots:
+  - `()`
+  - `u32`, `bool`, and `ArithmeticError`
+  - tuples
+  - fixed-size arrays
+  - `Option<T>`
+  - `Result<T, E>`
+  - `range<u32>`
 - local `let`, mutable assignment, expression statements, and block results
-- arithmetic, comparisons, array indexing, `if`, `match`, `for`, direct calls,
-  `observe`, and `return`
+- arithmetic, structural equality, ordering comparisons over `u32`, array
+  indexing, `if`, `match`, `for` over arrays and ranges, direct calls,
+  `observe`, recovery expressions, and `return`
 - playground host builtins lowered as `langlog_host` imports
 
 Wasm V1 rejects:
 
-- aggregate return values
-- non-scalar array elements
-- general tuple operations beyond storing and passing fixed scalar tuples
-- generic collections
+- `Set` and `Map` runtime values, loops, and map indexing; these remain
+  check/proof-only until a runtime collection representation is designed
+- first-class function values and indirect calls
+- assignment targets other than local bindings
 - `main` forms other than `fn main() -> u32`
 
 ## Diagnostics

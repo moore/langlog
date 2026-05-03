@@ -59,7 +59,7 @@ fn requirement_llg_wasm_01_build_returns_wat_and_wasm_bytes() {
 fn requirement_llg_wasm_01_reports_backend_diagnostics_without_panicking() {
     let outcome = build_wasm(
         "memory.llg",
-        "fn helper() -> [u32; 1] { [1] }\nfn main() -> u32 { 1 }",
+        "fn helper(values: Set<u32, 16>) -> u32 { 0 }\nfn main() -> u32 { 1 }",
     );
 
     assert!(outcome.has_errors());
@@ -68,7 +68,7 @@ fn requirement_llg_wasm_01_reports_backend_diagnostics_without_panicking() {
         .check
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
+        .any(|diagnostic| diagnostic.message.contains("check/proof-only")));
 }
 
 //= SPEC.md#llg-diag-02-rendered-syntax-diagnostics

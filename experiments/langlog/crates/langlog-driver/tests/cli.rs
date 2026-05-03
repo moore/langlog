@@ -318,7 +318,7 @@ fn main(values: [u32; 4], index: u32) -> u32 {
 fn requirement_llg_wasm_01_build_reports_backend_failures_to_stderr() {
     let source = TempSource::new(
         r#"
-fn helper() -> [u32; 1] { [1] }
+fn helper(values: Set<u32, 16>) -> u32 { 0 }
 fn main() -> u32 { 1 }
 "#,
     );
@@ -328,7 +328,7 @@ fn main() -> u32 { 1 }
     let stdout = String::from_utf8(failure.stdout).unwrap();
     let stderr = String::from_utf8(failure.stderr).unwrap();
     assert!(stdout.is_empty());
-    assert!(stderr.contains("returns compile to Wasm v1"));
+    assert!(stderr.contains("check/proof-only"));
 }
 
 //= SPEC.md#llg-cli-02-cli-output-behavior

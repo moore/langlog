@@ -20,11 +20,13 @@ This document complements, but does not replace, the main language spec:
 - A successful Wasm build MUST produce WAT and non-empty Wasm bytes.
 - Wasm builds MUST export `fn main() -> u32` as `main`.
 - Wasm V1 MUST reject `main` forms other than `fn main() -> u32`.
-- Wasm V1 MUST reject aggregate return values.
-- Wasm V1 MUST reject `Result` values whose error type is not
-  `ArithmeticError`.
+- Wasm V1 MUST compile helper functions returning flattened aggregate values.
+- Wasm V1 MUST compile generic flattened `Result<T, E>` values.
 - Wasm V1 MUST compile helper functions returning `()` without Wasm result
   values.
+- Wasm V1 MUST reject Set and Map values as check/proof-only runtime values.
+- Wasm V1 MUST reject first-class function values and indirect calls.
+- Wasm V1 MUST reject assignment targets other than local bindings.
 - When backend lowering fails during `langlog build --target wasm`, the CLI
   MUST print diagnostics to stderr.
 - Wasm build diagnostics MUST be reported without panicking.
@@ -42,6 +44,7 @@ This document complements, but does not replace, the main language spec:
 - Wasm V1 MUST compile unit-valued block expressions without leaving stack
   values.
 - Wasm V1 MUST execute mutable local assignment.
+- Wasm V1 MUST execute structural equality and inequality for flattened values.
 
 ## LLG-WASM-03 Arrays And Loops
 
@@ -53,7 +56,10 @@ This document complements, but does not replace, the main language spec:
 - Wasm V1 MUST execute dynamic indexing into fixed-size scalar arrays.
 - Wasm V1 MUST execute `for` loops over fixed-size scalar arrays.
 - Wasm V1 MUST pass fixed-size scalar arrays to direct function calls.
-- Wasm V1 MUST reject non-scalar array elements.
+- Wasm V1 MUST execute `for` loops over u32 ranges and range bindings.
+- Wasm V1 MUST execute fixed-size arrays with flattened aggregate elements.
+- Wasm V1 MUST execute `for` loops over fixed-size arrays with aggregate
+  elements.
 
 ## LLG-WASM-04 Match And Observe
 

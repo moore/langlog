@@ -160,10 +160,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                             params.push_str(" (param i32)");
                         }
                     }
-                    None => self.unsupported(
-                        param.span,
-                        "only scalar and fixed-size scalar aggregate parameters compile to Wasm v1",
-                    ),
+                    None => self.unsupported(param.span, wasm_type_diagnostic(&param.ty)),
                 }
                 params
             });
@@ -172,7 +169,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             None => {
                 self.unsupported(
                     function.span,
-                    "only `u32`, `bool`, `ArithmeticError`, scalar `Option`, scalar `Result`, and `()` returns compile to Wasm v1",
+                    "only flattened non-collection returns compile to Wasm v1",
                 );
                 String::new()
             }
@@ -321,6 +318,15 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     self.compile_checked_arithmetic(*op, left, right);
                     return;
                 }
+                if *op == BinaryOp::Range {
+                    self.compile_expr(left);
+                    self.compile_expr(right);
+                    return;
+                }
+                if matches!(op, BinaryOp::EqEq | BinaryOp::NotEq) {
+                    self.compile_structural_equality(*op, left, right, expr.span);
+                    return;
+                }
                 let Some(instruction) = binary_instruction(*op) else {
                     self.unsupported(
                         expr.span,
@@ -398,7 +404,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             | HostBuiltin::PrintNewline => {
                 self.emit(format!("call ${}", host_builtin_symbol(builtin)));
             }
-            HostBuiltin::Some | HostBuiltin::Ok => {
+            HostBuiltin::Some => {
                 if args.len() != 1 {
                     self.unsupported(
                         args.first().map_or(self.function.span, |arg| arg.span),
@@ -406,6 +412,21 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     );
                     return;
                 }
+                self.emit("i32.const 0");
+            }
+            HostBuiltin::Ok => {
+                if args.len() != 1 {
+                    self.unsupported(
+                        args.first().map_or(self.function.span, |arg| arg.span),
+                        "invalid builtin arity",
+                    );
+                    return;
+                }
+                let HirType::Result { err, .. } = ty else {
+                    self.unsupported(self.function.span, "`ok` must have a Result type");
+                    return;
+                };
+                self.emit_default_value(err);
                 self.emit("i32.const 0");
             }
             HostBuiltin::None => {
@@ -417,14 +438,22 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit(format!("i32.const {OPTION_NONE}"));
             }
             HostBuiltin::Err => {
-                let err_local = self.allocate_scratch_local();
-                self.emit(format!("local.set {err_local}"));
                 let HirType::Result { ok, .. } = ty else {
                     self.unsupported(self.function.span, "`err` must have a Result type");
                     return;
                 };
+                let Some(err_width) = args.first().and_then(|arg| supported_value_width(&arg.ty))
+                else {
+                    self.unsupported(
+                        self.function.span,
+                        "`err` payload is not supported by Wasm v1",
+                    );
+                    return;
+                };
+                let err_locals = self.store_to_scratch_locals(err_width);
                 self.emit_default_value(ok);
-                self.emit(format!("local.get {err_local}"));
+                self.emit_get_slots(&err_locals);
+                self.emit("i32.const 1");
             }
             HostBuiltin::ArithmeticOverflow => {
                 self.emit(format!("i32.const {ARITHMETIC_OVERFLOW}"))
@@ -445,83 +474,125 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         fallback: &HirExpr,
         ty: &HirType,
     ) {
-        if supported_value_width(ty) != Some(1) {
-            self.unsupported(
-                span,
-                "recovery expressions currently require scalar fallback values",
-            );
-            return;
-        }
-        let Some(target_width) = supported_value_width(&target.ty) else {
-            self.unsupported(target.span, "unsupported recovery target type");
+        let Some(result_width) = supported_value_width(ty) else {
+            self.unsupported(span, "unsupported recovery result type");
             return;
         };
-        if target_width != 2 {
-            self.unsupported(
+
+        match &target.ty {
+            HirType::Option(inner) => {
+                if error_binding.is_some() {
+                    self.unsupported(span, "`Option` recovery cannot bind an error value");
+                    return;
+                }
+                let Some(payload_width) = supported_value_width(inner) else {
+                    self.unsupported(target.span, "unsupported Option payload type");
+                    return;
+                };
+                let tag_local = self.allocate_scratch_local();
+                let payload_locals = self.allocate_scratch_locals(payload_width);
+                self.compile_expr(target);
+                self.emit(format!("local.set {tag_local}"));
+                self.store_slots(&payload_locals);
+
+                self.emit(format!("local.get {tag_local}"));
+                self.emit("i32.eqz");
+                self.emit(format!("if{}", wasm_result_signature(result_width)));
+                self.emit_get_slots(&payload_locals);
+                self.emit("else");
+                self.compile_expr(fallback);
+                self.emit("end");
+            }
+            HirType::Result { ok, err } => {
+                let Some(ok_width) = supported_value_width(ok) else {
+                    self.unsupported(target.span, "unsupported Result ok type");
+                    return;
+                };
+                let Some(err_width) = supported_value_width(err) else {
+                    self.unsupported(target.span, "unsupported Result error type");
+                    return;
+                };
+                let status_local = self.allocate_scratch_local();
+                let err_locals = self.allocate_scratch_locals(err_width);
+                let ok_locals = self.allocate_scratch_locals(ok_width);
+                self.compile_expr(target);
+                self.emit(format!("local.set {status_local}"));
+                self.store_slots(&err_locals);
+                self.store_slots(&ok_locals);
+
+                if let Some(binding) = error_binding {
+                    let local = self.allocate_local(binding.id, &binding.ty);
+                    self.emit_get_slots(&err_locals);
+                    self.store_slots(&local.slots);
+                }
+
+                self.emit(format!("local.get {status_local}"));
+                self.emit("i32.eqz");
+                self.emit(format!("if{}", wasm_result_signature(result_width)));
+                self.emit_get_slots(&ok_locals);
+                self.emit("else");
+                self.compile_expr(fallback);
+                self.emit("end");
+            }
+            _ => self.unsupported(
                 target.span,
-                "recovery targets must lower to value and tag slots",
-            );
-            return;
+                "recovery targets must be Option or Result values",
+            ),
         }
-
-        let value_local = self.allocate_scratch_local();
-        let tag_local = self.allocate_scratch_local();
-        self.compile_expr(target);
-        self.emit(format!("local.set {tag_local}"));
-        self.emit(format!("local.set {value_local}"));
-
-        if let Some(binding) = error_binding {
-            let local = self.allocate_local(binding.id, &binding.ty);
-            self.emit(format!("local.get {tag_local}"));
-            self.store_slots(&local.slots);
-        }
-
-        self.emit(format!("local.get {tag_local}"));
-        self.emit("i32.eqz");
-        self.emit("if (result i32)");
-        self.emit(format!("local.get {value_local}"));
-        self.emit("else");
-        self.compile_expr(fallback);
-        self.emit("end");
     }
 
     fn compile_checked_arithmetic(&mut self, op: BinaryOp, left: &HirExpr, right: &HirExpr) {
         let left_value = self.allocate_scratch_local();
-        let left_tag = self.allocate_scratch_local();
-        self.compile_operand_value_tag(left, left_value, left_tag);
+        let left_error = self.allocate_scratch_local();
+        let left_status = self.allocate_scratch_local();
+        self.compile_operand_value_error_status(left, left_value, left_error, left_status);
 
-        self.emit(format!("local.get {left_tag}"));
+        self.emit(format!("local.get {left_status}"));
         self.emit("i32.eqz");
-        self.emit("if (result i32 i32)");
+        self.emit("if (result i32 i32 i32)");
         let right_value = self.allocate_scratch_local();
-        let right_tag = self.allocate_scratch_local();
-        self.compile_operand_value_tag(right, right_value, right_tag);
-        self.emit(format!("local.get {right_tag}"));
+        let right_error = self.allocate_scratch_local();
+        let right_status = self.allocate_scratch_local();
+        self.compile_operand_value_error_status(right, right_value, right_error, right_status);
+        self.emit(format!("local.get {right_status}"));
         self.emit("i32.eqz");
-        self.emit("if (result i32 i32)");
+        self.emit("if (result i32 i32 i32)");
         self.compile_checked_scalar_operation(op, left_value, right_value);
         self.emit("else");
         self.emit("i32.const 0");
-        self.emit(format!("local.get {right_tag}"));
+        self.emit(format!("local.get {right_error}"));
+        self.emit("i32.const 1");
         self.emit("end");
         self.emit("else");
         self.emit("i32.const 0");
-        self.emit(format!("local.get {left_tag}"));
+        self.emit(format!("local.get {left_error}"));
+        self.emit("i32.const 1");
         self.emit("end");
     }
 
-    fn compile_operand_value_tag(&mut self, expr: &HirExpr, value_local: u32, tag_local: u32) {
+    fn compile_operand_value_error_status(
+        &mut self,
+        expr: &HirExpr,
+        value_local: u32,
+        error_local: u32,
+        status_local: u32,
+    ) {
         match &expr.ty {
-            HirType::Result { .. } => {
+            HirType::Result { ok, err }
+                if **ok == HirType::U32 && **err == HirType::ArithmeticError =>
+            {
                 self.compile_expr(expr);
-                self.emit(format!("local.set {tag_local}"));
+                self.emit(format!("local.set {status_local}"));
+                self.emit(format!("local.set {error_local}"));
                 self.emit(format!("local.set {value_local}"));
             }
             _ => {
                 self.compile_expr(expr);
                 self.emit(format!("local.set {value_local}"));
                 self.emit("i32.const 0");
-                self.emit(format!("local.set {tag_local}"));
+                self.emit(format!("local.set {error_local}"));
+                self.emit("i32.const 0");
+                self.emit(format!("local.set {status_local}"));
             }
         }
     }
@@ -539,13 +610,15 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.sub");
                 self.emit("i32.gt_u");
-                self.emit("if (result i32 i32)");
+                self.emit("if (result i32 i32 i32)");
                 self.emit("i32.const 0");
                 self.emit(format!("i32.const {ARITHMETIC_OVERFLOW}"));
+                self.emit("i32.const 1");
                 self.emit("else");
                 self.emit(format!("local.get {left_local}"));
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.add");
+                self.emit("i32.const 0");
                 self.emit("i32.const 0");
                 self.emit("end");
             }
@@ -553,13 +626,15 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit(format!("local.get {left_local}"));
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.lt_u");
-                self.emit("if (result i32 i32)");
+                self.emit("if (result i32 i32 i32)");
                 self.emit("i32.const 0");
                 self.emit(format!("i32.const {ARITHMETIC_UNDERFLOW}"));
+                self.emit("i32.const 1");
                 self.emit("else");
                 self.emit(format!("local.get {left_local}"));
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.sub");
+                self.emit("i32.const 0");
                 self.emit("i32.const 0");
                 self.emit("end");
             }
@@ -575,39 +650,45 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit("i32.div_u");
                 self.emit("i32.gt_u");
                 self.emit("end");
-                self.emit("if (result i32 i32)");
+                self.emit("if (result i32 i32 i32)");
                 self.emit("i32.const 0");
                 self.emit(format!("i32.const {ARITHMETIC_OVERFLOW}"));
+                self.emit("i32.const 1");
                 self.emit("else");
                 self.emit(format!("local.get {left_local}"));
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.mul");
+                self.emit("i32.const 0");
                 self.emit("i32.const 0");
                 self.emit("end");
             }
             BinaryOp::Div => {
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.eqz");
-                self.emit("if (result i32 i32)");
+                self.emit("if (result i32 i32 i32)");
                 self.emit("i32.const 0");
                 self.emit(format!("i32.const {DIVIDE_BY_ZERO}"));
+                self.emit("i32.const 1");
                 self.emit("else");
                 self.emit(format!("local.get {left_local}"));
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.div_u");
+                self.emit("i32.const 0");
                 self.emit("i32.const 0");
                 self.emit("end");
             }
             BinaryOp::Rem => {
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.eqz");
-                self.emit("if (result i32 i32)");
+                self.emit("if (result i32 i32 i32)");
                 self.emit("i32.const 0");
                 self.emit(format!("i32.const {REMAINDER_BY_ZERO}"));
+                self.emit("i32.const 1");
                 self.emit("else");
                 self.emit(format!("local.get {left_local}"));
                 self.emit(format!("local.get {right_local}"));
                 self.emit("i32.rem_u");
+                self.emit("i32.const 0");
                 self.emit("i32.const 0");
                 self.emit("end");
             }
@@ -618,43 +699,126 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         }
     }
 
-    fn compile_for_stmt(&mut self, stmt: &HirForStmt, return_type: &HirType) {
-        let HirType::Array { element, length } = &stmt.iterable.ty else {
-            self.unsupported(stmt.span, "`for` currently requires an array iterable");
+    fn compile_structural_equality(
+        &mut self,
+        op: BinaryOp,
+        left: &HirExpr,
+        right: &HirExpr,
+        span: Span,
+    ) {
+        let Some(width) = supported_value_width(&left.ty) else {
+            self.unsupported(span, "equality over this type is not supported by Wasm v1");
             return;
         };
-        if !is_scalar_wasm_type(element) {
-            self.unsupported(
-                stmt.iterable.span,
-                "`for` currently supports arrays of `u32` or `bool`",
-            );
+        if supported_value_width(&right.ty) != Some(width) {
+            self.unsupported(span, "equality operands have incompatible Wasm layouts");
             return;
         }
 
-        let binding = match &stmt.binding.kind {
-            HirPatternKind::Binding(binding) => binding,
-            HirPatternKind::Wildcard => {
+        let left_locals = self.compile_expr_to_scratch_locals(left);
+        let right_locals = self.compile_expr_to_scratch_locals(right);
+        self.emit("i32.const 1");
+        for (left_slot, right_slot) in left_locals.iter().zip(right_locals.iter()) {
+            self.emit(format!("local.get {left_slot}"));
+            self.emit(format!("local.get {right_slot}"));
+            self.emit("i32.eq");
+            self.emit("i32.and");
+        }
+        if op == BinaryOp::NotEq {
+            self.emit("i32.eqz");
+        }
+    }
+
+    fn compile_for_stmt(&mut self, stmt: &HirForStmt, return_type: &HirType) {
+        match &stmt.iterable.ty {
+            HirType::Array { element, length } => {
+                let Some(element_width) = supported_value_width(element) else {
+                    self.unsupported(
+                        stmt.iterable.span,
+                        "array element type is not executable in Wasm v1",
+                    );
+                    return;
+                };
+                let binding = match &stmt.binding.kind {
+                    HirPatternKind::Binding(binding) => Some(binding),
+                    HirPatternKind::Wildcard => None,
+                    HirPatternKind::Int(_) | HirPatternKind::Bool(_) => {
+                        self.unsupported(
+                            stmt.binding.span,
+                            "`for` currently requires a binding or wildcard pattern",
+                        );
+                        return;
+                    }
+                };
+                let local = binding.map(|binding| self.allocate_local(binding.id, element));
+                let iterable_locals = match &stmt.iterable.kind {
+                    HirExprKind::Binding(_) | HirExprKind::Array(_) => None,
+                    _ => Some(self.compile_expr_to_scratch_locals(&stmt.iterable)),
+                };
                 for index in 0..*length {
-                    self.compile_array_element(&stmt.iterable, index);
-                    self.emit("drop");
+                    if let Some(iterable_locals) = &iterable_locals {
+                        self.emit_array_element_from_slots(iterable_locals, element_width, index);
+                    } else {
+                        self.compile_array_element(&stmt.iterable, index);
+                    }
+                    if let Some(local) = &local {
+                        self.store_slots(&local.slots);
+                    } else {
+                        self.drop_slots(element_width);
+                    }
                     self.compile_block(&stmt.body, return_type);
                 }
-                return;
             }
-            HirPatternKind::Int(_) | HirPatternKind::Bool(_) => {
+            HirType::Range(inner) if **inner == HirType::U32 => {
+                let current = self.allocate_scratch_local();
+                let end = self.allocate_scratch_local();
+                self.compile_expr(&stmt.iterable);
+                self.emit(format!("local.set {end}"));
+                self.emit(format!("local.set {current}"));
+                let local = match &stmt.binding.kind {
+                    HirPatternKind::Binding(binding) => {
+                        Some(self.allocate_local(binding.id, inner))
+                    }
+                    HirPatternKind::Wildcard => None,
+                    HirPatternKind::Int(_) | HirPatternKind::Bool(_) => {
+                        self.unsupported(
+                            stmt.binding.span,
+                            "`for` over a range requires a binding or wildcard pattern",
+                        );
+                        return;
+                    }
+                };
+                self.emit("block");
+                self.emit("loop");
+                self.emit(format!("local.get {current}"));
+                self.emit(format!("local.get {end}"));
+                self.emit("i32.ge_u");
+                self.emit("br_if 1");
+                if let Some(local) = &local {
+                    self.emit(format!("local.get {current}"));
+                    self.store_slots(&local.slots);
+                }
+                self.compile_block(&stmt.body, return_type);
+                self.emit(format!("local.get {current}"));
+                self.emit("i32.const 1");
+                self.emit("i32.add");
+                self.emit(format!("local.set {current}"));
+                self.emit("br 0");
+                self.emit("end");
+                self.emit("end");
+            }
+            HirType::Set { .. } | HirType::Map { .. } => {
                 self.unsupported(
-                    stmt.binding.span,
-                    "`for` currently requires a binding pattern",
+                    stmt.iterable.span,
+                    "Set and Map values are check/proof-only in Wasm v1",
                 );
-                return;
             }
-        };
-
-        let local = self.allocate_local(binding.id, element);
-        for index in 0..*length {
-            self.compile_array_element(&stmt.iterable, index);
-            self.store_slots(&local.slots);
-            self.compile_block(&stmt.body, return_type);
+            _ => {
+                self.unsupported(
+                    stmt.span,
+                    "`for` currently requires an array or u32 range iterable",
+                );
+            }
         }
     }
 
@@ -717,13 +881,17 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
     fn compile_index_expr(&mut self, span: Span, target: &HirExpr, index: &HirExpr) {
         let HirType::Array { element, length } = &target.ty else {
-            self.unsupported(span, "only array indexing compiles to Wasm v1");
+            if matches!(target.ty, HirType::Set { .. } | HirType::Map { .. }) {
+                self.unsupported(span, "Set and Map indexing is check/proof-only in Wasm v1");
+            } else {
+                self.unsupported(span, "only array indexing compiles to Wasm v1");
+            }
             return;
         };
-        if !is_scalar_wasm_type(element) {
-            self.unsupported(span, "only scalar array elements compile to Wasm v1");
+        let Some(element_width) = supported_value_width(element) else {
+            self.unsupported(span, "array element type is not executable in Wasm v1");
             return;
-        }
+        };
 
         if let Some(index) = constant_index(index) {
             if index >= *length {
@@ -735,7 +903,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         }
 
         if *length == 0 {
-            self.emit("i32.const 0");
+            self.emit_default_value(element);
             return;
         }
 
@@ -743,33 +911,62 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         self.compile_expr(index);
         self.emit(format!("local.set {index_local}"));
 
-        let result_local = self.allocate_scratch_local();
-        self.compile_array_element(target, 0);
-        self.emit(format!("local.set {result_local}"));
+        let result_locals = self.allocate_scratch_locals(element_width);
+        let target_locals = match &target.kind {
+            HirExprKind::Binding(_) | HirExprKind::Array(_) => None,
+            _ => Some(self.compile_expr_to_scratch_locals(target)),
+        };
+        if let Some(target_locals) = &target_locals {
+            self.emit_array_element_from_slots(target_locals, element_width, 0);
+        } else {
+            self.compile_array_element(target, 0);
+        }
+        self.store_slots(&result_locals);
         for candidate in 1..*length {
             self.emit(format!("local.get {index_local}"));
             self.emit(format!("i32.const {candidate}"));
             self.emit("i32.eq");
             self.emit("if");
-            self.compile_array_element(target, candidate);
-            self.emit(format!("local.set {result_local}"));
+            if let Some(target_locals) = &target_locals {
+                self.emit_array_element_from_slots(target_locals, element_width, candidate);
+            } else {
+                self.compile_array_element(target, candidate);
+            }
+            self.store_slots(&result_locals);
             self.emit("end");
         }
-        self.emit(format!("local.get {result_local}"));
+        self.emit_get_slots(&result_locals);
     }
 
     fn compile_array_element(&mut self, target: &HirExpr, index: u64) {
+        let HirType::Array { element, length } = &target.ty else {
+            self.unsupported(target.span, "array element access requires an array target");
+            return;
+        };
+        let Some(element_width) = supported_value_width(element) else {
+            self.unsupported(
+                target.span,
+                "array element type is not executable in Wasm v1",
+            );
+            return;
+        };
+        if index >= *length {
+            self.unsupported(target.span, "array index is out of bounds");
+            return;
+        }
         match &target.kind {
             HirExprKind::Binding(id) => {
                 let Some(local) = self.locals.get(id).cloned() else {
                     self.unsupported(target.span, "unmapped array binding");
                     return;
                 };
-                let Some(slot) = local.slots.get(index as usize) else {
+                let start = index as usize * element_width as usize;
+                let end = start + element_width as usize;
+                let Some(slots) = local.slots.get(start..end) else {
                     self.unsupported(target.span, "array index is out of bounds");
                     return;
                 };
-                self.emit(format!("local.get {slot}"));
+                self.emit_get_slots(slots);
             }
             HirExprKind::Array(elements) => {
                 let Some(element) = elements.get(index as usize) else {
@@ -779,12 +976,18 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.compile_expr(element);
             }
             _ => {
-                self.unsupported(
-                    target.span,
-                    "array indexing currently requires an array binding or literal",
-                );
+                let array_locals = self.compile_expr_to_scratch_locals(target);
+                let start = index as usize * element_width as usize;
+                let end = start + element_width as usize;
+                self.emit_get_slots(&array_locals[start..end]);
             }
         }
+    }
+
+    fn emit_array_element_from_slots(&mut self, slots: &[u32], element_width: u32, index: u64) {
+        let start = index as usize * element_width as usize;
+        let end = start + element_width as usize;
+        self.emit_get_slots(&slots[start..end]);
     }
 
     fn allocate_local(&mut self, id: HirBindingId, ty: &HirType) -> LocalValue {
@@ -802,12 +1005,27 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         local
     }
 
+    fn allocate_scratch_locals(&mut self, width: u32) -> Vec<u32> {
+        (0..width).map(|_| self.allocate_scratch_local()).collect()
+    }
+
+    fn compile_expr_to_scratch_locals(&mut self, expr: &HirExpr) -> Vec<u32> {
+        let width = supported_value_width(&expr.ty).unwrap_or(0);
+        let locals = self.allocate_scratch_locals(width);
+        self.compile_expr(expr);
+        self.store_slots(&locals);
+        locals
+    }
+
+    fn store_to_scratch_locals(&mut self, width: u32) -> Vec<u32> {
+        let locals = self.allocate_scratch_locals(width);
+        self.store_slots(&locals);
+        locals
+    }
+
     fn ensure_wasm_type(&mut self, ty: &HirType, span: Span) {
         if supported_value_width(ty).is_none() {
-            self.unsupported(
-                span,
-                "only `u32`, `bool`, `ArithmeticError`, `()`, scalar `Option`, scalar `Result`, and fixed-size scalar aggregates compile to Wasm v1",
-            );
+            self.unsupported(span, wasm_type_diagnostic(ty));
         }
     }
 
@@ -820,6 +1038,10 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
     fn drop_value(&mut self, ty: &HirType) {
         let width = supported_value_width(ty).unwrap_or(0);
+        self.drop_slots(width);
+    }
+
+    fn drop_slots(&mut self, width: u32) {
         for _ in 0..width {
             self.emit("drop");
         }
@@ -828,6 +1050,12 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     fn store_slots(&mut self, slots: &[u32]) {
         for slot in slots.iter().rev() {
             self.emit(format!("local.set {slot}"));
+        }
+    }
+
+    fn emit_get_slots(&mut self, slots: &[u32]) {
+        for slot in slots {
+            self.emit(format!("local.get {slot}"));
         }
     }
 
@@ -1055,31 +1283,23 @@ fn value_width(ty: &HirType) -> Option<u32> {
             let length = u32::try_from(*length).ok()?;
             element_width.checked_mul(length)
         }
-        HirType::Option(inner) if is_scalar_wasm_type(inner) => Some(2),
-        HirType::Result { ok, err }
-            if is_scalar_wasm_type(ok) && matches!(**err, HirType::ArithmeticError) =>
-        {
-            Some(2)
-        }
-        HirType::Option(_)
-        | HirType::Result { .. }
+        HirType::Option(inner) => Some(value_width(inner)?.checked_add(1)?),
+        HirType::Result { ok, err } => Some(
+            value_width(ok)?
+                .checked_add(value_width(err)?)?
+                .checked_add(1)?,
+        ),
+        HirType::Range(inner) if **inner == HirType::U32 => Some(2),
+        HirType::Range(_)
         | HirType::Set { .. }
         | HirType::Map { .. }
-        | HirType::Range(_)
         | HirType::Named(_)
         | HirType::Function(_) => None,
     }
 }
 
 fn supported_value_width(ty: &HirType) -> Option<u32> {
-    match ty {
-        HirType::Array { element, length } if is_scalar_wasm_type(element) => {
-            let length = u32::try_from(*length).ok()?;
-            length.checked_mul(1)
-        }
-        HirType::Array { .. } => None,
-        _ => value_width(ty),
-    }
+    value_width(ty)
 }
 
 fn is_scalar_wasm_type(ty: &HirType) -> bool {
@@ -1087,9 +1307,16 @@ fn is_scalar_wasm_type(ty: &HirType) -> bool {
 }
 
 fn wasm_return_width(ty: &HirType) -> Option<u32> {
+    supported_value_width(ty)
+}
+
+fn wasm_type_diagnostic(ty: &HirType) -> &'static str {
     match ty {
-        HirType::Tuple(_) | HirType::Array { .. } => None,
-        _ => supported_value_width(ty),
+        HirType::Set { .. } | HirType::Map { .. } => {
+            "Set and Map values are check/proof-only in Wasm v1"
+        }
+        HirType::Function(_) => "first-class function values are not supported by Wasm v1",
+        _ => "only flattened non-collection values compile to Wasm v1",
     }
 }
 

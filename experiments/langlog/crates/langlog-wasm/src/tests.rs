@@ -105,44 +105,56 @@ fn requirement_llg_wasm_01_rejects_unsupported_main_shapes() {
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
 //= type=test
-//# Wasm V1 MUST reject aggregate return values.
+//# Wasm V1 MUST compile helper functions returning flattened aggregate values.
 #[test]
-fn requirement_llg_wasm_01_rejects_aggregate_return_values() {
-    let array_return = checked("fn helper() -> [u32; 1] { [1] }\nfn main() -> u32 { 1 }");
-    let diagnostics = compile(&array_return).expect_err("expected backend error");
-
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
-
-    let option_tuple = checked(
-        r#"
-fn helper() -> Option<(u32, u32)> { some((1, 2)) }
-fn main() -> u32 { 1 }
-"#,
+fn requirement_llg_wasm_01_compiles_flattened_aggregate_returns() {
+    assert_eq!(
+        run_main(
+            r#"
+fn helper() -> [u32; 3] { [10, 20, 30] }
+fn main() -> u32 { helper()[2] }
+"#
+        ),
+        30
     );
-    let diagnostics = compile(&option_tuple).expect_err("expected backend error");
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
+    assert_eq!(
+        run_main(
+            r#"
+fn helper() -> Option<(u32, u32)> { some((1, 2)) }
+fn main() -> u32 {
+    if helper() == some((1, 2)) {
+        return 7;
+    }
+    9
+}
+"#,
+        ),
+        7
+    );
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
 //= type=test
-//# Wasm V1 MUST reject `Result` values whose error type is not `ArithmeticError`.
+//# Wasm V1 MUST compile generic flattened `Result<T, E>` values.
 #[test]
-fn requirement_llg_wasm_01_rejects_result_values_with_non_arithmetic_error_type() {
-    let checked = checked(
-        r#"
+fn requirement_llg_wasm_01_compiles_generic_result_values() {
+    assert_eq!(
+        run_main(
+            r#"
 fn helper(value: Result<u32, bool>) -> Result<u32, bool> { value }
-fn main() -> u32 { 1 }
+fn main() -> u32 {
+    let value: Result<u32, bool> = err(true);
+    helper(value) or(err) {
+        if err {
+            return 7;
+        }
+        9
+    }
+}
 "#,
+        ),
+        7
     );
-    let diagnostics = compile(&checked).expect_err("expected backend error");
-
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
@@ -166,6 +178,70 @@ fn main() -> u32 {
 
     assert!(module.wat.contains("(func $f0\n"));
     assert!(!module.wat.contains("(func $f0 (result i32)"));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST reject Set and Map values as check/proof-only runtime values.
+#[test]
+fn requirement_llg_wasm_01_rejects_set_and_map_values() {
+    let set_param = checked("fn helper(values: Set<u32, 16>) -> u32 { 0 }\nfn main() -> u32 { 1 }");
+    let diagnostics = compile(&set_param).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("check/proof-only")));
+
+    let map_index = checked(
+        r#"
+fn helper(table: Map<u32, bool, 16>) -> bool { table[1] }
+fn main() -> u32 { 1 }
+"#,
+    );
+    let diagnostics = compile(&map_index).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("Map indexing")));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST reject first-class function values and indirect calls.
+#[test]
+fn requirement_llg_wasm_01_rejects_first_class_function_values() {
+    let checked = checked(
+        r#"
+fn helper() -> u32 { 7 }
+fn main() -> u32 {
+    let f = helper;
+    f()
+}
+"#,
+    );
+    let diagnostics = compile(&checked).expect_err("expected backend error");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("first-class function values")
+            || diagnostic.message.contains("only direct function calls")
+    }));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST reject assignment targets other than local bindings.
+#[test]
+fn requirement_llg_wasm_01_rejects_non_local_assignment_targets() {
+    let checked = checked(
+        r#"
+fn main() -> u32 {
+    let mut values: [u32; 2] = [1, 2];
+    values[0] = 3;
+    values[0]
+}
+"#,
+    );
+    let diagnostics = compile(&checked).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("only local assignments")));
 }
 
 //= WASM.md#llg-wasm-02-scalar-execution
@@ -457,6 +533,28 @@ fn main() -> u32 {
     );
 }
 
+//= WASM.md#llg-wasm-02-scalar-execution
+//= type=test
+//# Wasm V1 MUST execute structural equality and inequality for flattened values.
+#[test]
+fn requirement_llg_wasm_02_executes_structural_equality() {
+    assert_eq!(
+        run_main(
+            r#"
+fn main() -> u32 {
+    let left: Result<Option<u32>, bool> = ok(some(7));
+    let right: Result<Option<u32>, bool> = ok(some(7));
+    if left == right && [1, 2] != [1, 3] {
+        return 42;
+    }
+    0
+}
+"#
+        ),
+        42
+    );
+}
+
 //= WASM.md#llg-wasm-03-arrays-and-loops
 //= type=test
 //# Wasm V1 MUST execute fixed-size scalar array literals and constant indexing.
@@ -569,15 +667,85 @@ fn main() -> u32 {
 
 //= WASM.md#llg-wasm-03-arrays-and-loops
 //= type=test
-//# Wasm V1 MUST reject non-scalar array elements.
+//# Wasm V1 MUST execute `for` loops over u32 ranges and range bindings.
 #[test]
-fn requirement_llg_wasm_03_rejects_non_scalar_array_elements() {
-    let checked = checked("fn main() -> u32 { let values: [(u32, u32); 1] = [(1, 2)]; 0 }");
-    let diagnostics = compile(&checked).expect_err("expected backend error");
+fn requirement_llg_wasm_03_executes_for_over_ranges() {
+    assert_eq!(
+        run_main(
+            r#"
+fn main() -> u32 {
+    let range = 0..4;
+    let mut total: u32 = 0;
+    for value in range {
+        total = total + value or(err) 0;
+    }
+    total
+}
+"#
+        ),
+        6
+    );
+}
 
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("scalar aggregates")));
+//= WASM.md#llg-wasm-03-arrays-and-loops
+//= type=test
+//# Wasm V1 MUST execute fixed-size arrays with flattened aggregate elements.
+#[test]
+fn requirement_llg_wasm_03_executes_arrays_with_aggregate_elements() {
+    assert_eq!(
+        run_main(
+            r#"
+fn main() -> u32 {
+    let values: [(u32, bool); 2] = [(1, false), (2, true)];
+    let index: u32 = 1;
+    if values[index] == (2, true) {
+        return 7;
+    }
+    9
+}
+"#
+        ),
+        7
+    );
+    assert_eq!(
+        run_main(
+            r#"
+fn helper() -> [(u32, bool); 2] { [(1, false), (2, true)] }
+fn main() -> u32 {
+    let index: u32 = 1;
+    if helper()[index] == (2, true) {
+        return 7;
+    }
+    9
+}
+"#
+        ),
+        7
+    );
+}
+
+//= WASM.md#llg-wasm-03-arrays-and-loops
+//= type=test
+//# Wasm V1 MUST execute `for` loops over fixed-size arrays with aggregate elements.
+#[test]
+fn requirement_llg_wasm_03_executes_for_over_aggregate_array() {
+    assert_eq!(
+        run_main(
+            r#"
+fn main() -> u32 {
+    let values: [(u32, u32); 2] = [(1, 2), (3, 4)];
+    let mut found: u32 = 0;
+    for value in values {
+        if value == (3, 4) {
+            found = 7;
+        }
+    }
+    found
+}
+"#
+        ),
+        7
+    );
 }
 
 //= WASM.md#llg-wasm-04-match-and-observe
