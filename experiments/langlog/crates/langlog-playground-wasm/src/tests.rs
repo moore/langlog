@@ -1,5 +1,7 @@
 use super::{build, build_and_run_ready, build_result, check, check_result};
 
+const PLAYGROUND_EXAMPLES_JSON: &str = include_str!("../../../playground/examples.json");
+
 //= WASM.md#llg-wasm-06-playground-adapter
 //= type=test
 //# The playground `check` API MUST report success and frontend counts without producing Wasm bytes.
@@ -71,4 +73,40 @@ fn requirement_llg_wasm_06_native_exports_return_inspectable_summaries() {
     assert!(checked.contains("wasmByteLength=0"));
     assert!(built.contains("canRun=false"));
     assert!(runnable.contains("canRun=true"));
+}
+
+//= WASM.md#llg-wasm-06-playground-adapter
+//= type=test
+//# The playground example programs MUST build successfully and be marked runnable by the playground adapter.
+#[test]
+fn requirement_llg_wasm_06_playground_examples_build_and_run_ready() {
+    let examples: serde_json::Value =
+        serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
+    let examples = examples.as_array().expect("examples should be an array");
+
+    assert_eq!(examples.len(), 15);
+
+    for example in examples {
+        let name = example
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .expect("example should have a string name");
+        let source = example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .expect("example should have a string source");
+        let result = build_result(source, true);
+
+        assert!(
+            result.success,
+            "{name} should build: {}",
+            result.diagnostics
+        );
+        assert!(result.can_run, "{name} should be runnable");
+        assert!(result.wasm_byte_length > 0, "{name} should produce Wasm");
+        assert!(
+            result.wat.contains("(export \"main\""),
+            "{name} should export main"
+        );
+    }
 }

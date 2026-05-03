@@ -1,0 +1,62 @@
+[
+  {
+    "name": "01 - Main and Return",
+    "source": "// A Langlog program is a list of functions.\n// The playground runs the exported fn main() -> u32.\nfn main() -> u32 {\n    42\n}\n"
+  },
+  {
+    "name": "02 - Functions",
+    "source": "// Functions have typed parameters and typed returns.\n// Calls are direct: scale_then_add(6, 7) returns 42.\nfn scale_then_add(left: u32, right: u32) -> u32 {\n    left * right or(err) 0\n}\n\nfn main() -> u32 {\n    scale_then_add(6, 7)\n}\n"
+  },
+  {
+    "name": "03 - Let, Mut, Blocks",
+    "source": "// let introduces bindings. mut allows assignment.\n// Blocks can produce values with a trailing expression.\nfn main() -> u32 {\n    let start: u32 = 10;\n    let mut total: u32 = start;\n\n    total = {\n        let bonus: u32 = 32;\n        total + bonus or(err) 0\n    };\n\n    total\n}\n"
+  },
+  {
+    "name": "04 - Input and Output",
+    "source": "// read_u32 consumes one token from stdin.\n// print_u32, print_bool, and print_newline write to the terminal.\nfn main() -> u32 {\n    let value: u32 = read_u32();\n    let doubled: u32 = value * 2 or(err) 0;\n\n    print_u32(doubled);\n    print_newline();\n    print_bool(doubled > value);\n    print_newline();\n\n    doubled\n}\n"
+  },
+  {
+    "name": "05 - If and Logic",
+    "source": "// if is a statement. Conditions are bool values.\n// Comparisons, &&, ||, and early return are supported.\nfn main() -> u32 {\n    let value: u32 = 42;\n\n    if (value > 10 && value < 100) || value == 7 {\n        return value;\n    }\n\n    0\n}\n"
+  },
+  {
+    "name": "06 - Match Patterns",
+    "source": "// match supports literal, wildcard, and binding patterns.\nfn choose(flag: bool, code: u32) -> u32 {\n    let mut value: u32 = 0;\n\n    match flag {\n        true => { value = 10; },\n        false => { value = 20; }\n    }\n\n    match code {\n        0 => { value = value + 1 or(err) 0; },\n        7 => { value = value + 32 or(err) 0; },\n        _ => { value = value + code or(err) 0; }\n    }\n\n    value\n}\n\nfn main() -> u32 {\n    choose(true, 7)\n}\n"
+  },
+  {
+    "name": "07 - Checked Arithmetic",
+    "source": "// Ordinary u32 arithmetic returns Result<u32, ArithmeticError>.\n// Use or(err) to recover and inspect failures explicitly.\nfn main() -> u32 {\n    let added: u32 = 40 + 2 or(err) 0;\n    let subtracted: u32 = 50 - 8 or(err) 0;\n    let multiplied: u32 = 6 * 7 or(err) 0;\n    let divided: u32 = 84 / 2 or(err) 0;\n    let remainder: u32 = 85 % 43 or(err) 0;\n\n    let mut failures: u32 = 0;\n\n    4294967295 + 1 or(err) {\n        if err == arithmetic_overflow() {\n            failures = failures + 1 or(err) 0;\n        }\n        0\n    };\n\n    0 - 1 or(err) {\n        if err == arithmetic_underflow() {\n            failures = failures + 1 or(err) 0;\n        }\n        0\n    };\n\n    1 / 0 or(err) {\n        if err == divide_by_zero() {\n            failures = failures + 1 or(err) 0;\n        }\n        0\n    };\n\n    1 % 0 or(err) {\n        if err == remainder_by_zero() {\n            failures = failures + 1 or(err) 0;\n        }\n        0\n    };\n\n    if added == 42 && subtracted == 42 && multiplied == 42 && divided == 42 && remainder == 42 && failures == 4 {\n        return 42;\n    }\n\n    0\n}\n"
+  },
+  {
+    "name": "08 - Option Recovery",
+    "source": "// Option<T> is either some(value) or none().\n// Recovery uses the fallback only for none().\nfn main() -> u32 {\n    let present: Option<u32> = some(40);\n    let missing: Option<u32> = none();\n\n    let left: u32 = present or 0;\n    let right: u32 = missing or 2;\n\n    left + right or(err) 0\n}\n"
+  },
+  {
+    "name": "09 - Result Recovery",
+    "source": "// Result<T, E> is ok(value) or err(error).\n// Result recovery can bind the error payload.\nfn parse_like(flag: bool) -> Result<u32, bool> {\n    if flag {\n        return ok(40);\n    }\n\n    err(true)\n}\n\nfn main() -> u32 {\n    let recovered: u32 = parse_like(false) or(failed) {\n        if failed {\n            return 42;\n        }\n        0\n    };\n\n    recovered\n}\n"
+  },
+  {
+    "name": "10 - Tuples and Equality",
+    "source": "// Tuples can be passed, returned, and compared structurally.\nfn pair(value: u32, flag: bool) -> (u32, bool) {\n    (value, flag)\n}\n\nfn main() -> u32 {\n    let actual: (u32, bool) = pair(42, true);\n    let expected: (u32, bool) = (42, true);\n\n    if actual == expected && actual != (0, false) {\n        return 42;\n    }\n\n    0\n}\n"
+  },
+  {
+    "name": "11 - Arrays and Indexing",
+    "source": "// Fixed arrays support constant and dynamic indexing.\n// observe proves that a dynamic index is in bounds.\nfn main() -> u32 {\n    let values: [u32; 4] = [10, 20, 30, 40];\n    let index: u32 = 2;\n\n    observe index < 4 else {\n        return 0;\n    }\n\n    values[0] + values[index] or(err) 0\n}\n"
+  },
+  {
+    "name": "12 - Aggregate Arrays",
+    "source": "// Arrays can contain flattened aggregate values like tuples.\n// Structural equality works on indexed aggregate elements.\nfn main() -> u32 {\n    let pairs: [(u32, bool); 2] = [(10, false), (42, true)];\n    let index: u32 = 1;\n\n    observe index < 2 else {\n        return 0;\n    }\n\n    if pairs[index] == (42, true) {\n        return 42;\n    }\n\n    0\n}\n"
+  },
+  {
+    "name": "13 - For Over Arrays",
+    "source": "// for loops over fixed arrays are bounded.\n// Checked arithmetic still needs recovery inside the loop.\nfn main() -> u32 {\n    let values: [u32; 4] = [9, 10, 11, 12];\n    let mut total: u32 = 0;\n\n    for value in values {\n        total = total + value or(err) 0;\n    }\n\n    total\n}\n"
+  },
+  {
+    "name": "14 - For Over Ranges",
+    "source": "// Ranges are start-inclusive and end-exclusive.\n// A range can be bound and reused as the loop iterable.\nfn main() -> u32 {\n    let range = 0..7;\n    let mut total: u32 = 0;\n\n    for value in range {\n        total = total + value or(err) 0;\n    }\n\n    total * 2 or(err) 0\n}\n"
+  },
+  {
+    "name": "15 - Observe Facts",
+    "source": "// observe records a fact and runs else only if the fact is false.\n// The proof checker can use the fact to accept the dynamic index.\nfn main() -> u32 {\n    let values: [u32; 4] = [10, 20, 30, 42];\n    let index: u32 = 3;\n\n    observe index < 4 else {\n        return 0;\n    }\n\n    values[index]\n}\n"
+  }
+]

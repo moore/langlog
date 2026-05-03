@@ -93,3 +93,5 @@ This document complements, but does not replace, the main language spec:
   messages for invalid source.
 - Native playground adapter tests MUST expose the wasm-bindgen APIs as
   inspectable string summaries.
+- The playground example programs MUST build successfully and be marked
+  runnable by the playground adapter.

@@ -1,86 +1,5 @@
 import init, { build, buildAndRunReady, check } from "./pkg/langlog_playground_wasm.js";
 
-const examples = [
-  {
-    name: "Return 42",
-    source: `fn main() -> u32 {
-    42
-}
-`,
-  },
-  {
-    name: "Print input",
-    source: `fn main() -> u32 {
-    let value: u32 = read_u32();
-    print_u32(value);
-    print_newline();
-    value
-}
-`,
-  },
-  {
-    name: "Branch",
-    source: `fn main() -> u32 {
-    let value: u32 = read_u32();
-    if value > 10 {
-        print_bool(true);
-        print_newline();
-        return value;
-    }
-    print_bool(false);
-    print_newline();
-    10
-}
-`,
-  },
-  {
-    name: "Array sum",
-    source: `fn sum(values: [u32; 4]) -> u32 {
-    let mut total: u32 = 0;
-
-    for value in values {
-        total = total + value;
-    }
-
-    total
-}
-
-fn main() -> u32 {
-    sum([1, 2, 3, 4])
-}
-`,
-  },
-  {
-    name: "Match",
-    source: `fn choose(flag: bool) -> u32 {
-    let mut value: u32 = 0;
-
-    match flag {
-        true => { value = 1; },
-        false => { value = 2; }
-    }
-
-    value
-}
-
-fn main() -> u32 {
-    choose(true)
-}
-`,
-  },
-  {
-    name: "Observe",
-    source: `fn main() -> u32 {
-    observe 1 < 2 else {
-        return 0;
-    }
-
-    42
-}
-`,
-  },
-];
-
 const editor = document.querySelector("#sourceEditor");
 const diagnostics = document.querySelector("#diagnosticsOutput");
 const terminal = document.querySelector("#terminalOutput");
@@ -95,6 +14,7 @@ const docsContent = document.querySelector("#docsContent");
 const docsCloseButton = document.querySelector("#docsCloseButton");
 
 let initialized = false;
+let examples = [];
 const docsCache = new Map();
 
 async function ensureInitialized() {
@@ -104,7 +24,15 @@ async function ensureInitialized() {
   }
 }
 
-function loadExamples() {
+async function loadExamples() {
+  const response = await fetch("examples.json");
+  if (!response.ok) {
+    throw new Error("failed to load playground examples");
+  }
+  examples = await response.json();
+  if (!Array.isArray(examples) || examples.length === 0) {
+    throw new Error("playground examples are empty or invalid");
+  }
   examples.forEach((example, index) => {
     const option = document.createElement("option");
     option.value = String(index);
@@ -372,7 +300,6 @@ examplesSelect.addEventListener("change", () => {
   selectOutputTab("diagnostics");
 });
 
-loadExamples();
-ensureInitialized().catch((error) => {
+Promise.all([loadExamples(), ensureInitialized()]).catch((error) => {
   diagnostics.textContent = `failed to initialize playground compiler: ${error.message}`;
 });
