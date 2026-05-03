@@ -32,9 +32,9 @@ This document complements, but does not replace, the main language spec:
 
 ## LLG-PIR-03 Obligations And Fact Sources
 
-- Potentially failing arithmetic, division or remainder, and indexing
-  operations MUST lower to explicit proof obligations that preserve the
-  originating operation span.
+- Proof-required operations, including indexing and map-presence checks, MUST
+  lower to explicit proof obligations that preserve the originating operation
+  span.
 - Successful `observe` statements and comparison-based control-flow tests MUST
   lower to explicit fact-producing nodes that preserve the originating relation
   spans.
@@ -171,9 +171,8 @@ ProofRelation {
     span: Span,
 }
 
-ObligationKind::Overflow { op: BinaryOp, left: ProofExpr, right: ProofExpr }
-ObligationKind::NonZero { expr: ProofExpr }
 ObligationKind::InBounds { target: ProofExpr, index: ProofExpr, length: u64 }
+ObligationKind::MapPresence { target: ProofExpr, key: ProofExpr }
 ```
 
 This is intentionally not final. The first objective is to make proof
@@ -187,8 +186,8 @@ The first HIR-to-Proof-IR lowering is expected to follow these rules:
   `else` block that defines the failing path.
 - A proof-relevant `if` lowers to a branch entry that records comparison facts
   for the guarded success path.
-- Arithmetic, division or remainder, and indexing operations lower to explicit
-  obligation entries whenever phase 1 requires proof.
+- Indexing, map-presence checks, and future raw arithmetic operations lower to
+  explicit obligation entries whenever the language phase requires proof.
 - Non-proof statements may lower only through their proof-relevant expressions
   rather than preserving the full statement shell.
 - Fact subjects lower to binding identities, while fact displays still preserve
@@ -203,5 +202,5 @@ model, and stable enough to express:
 - fact-introduction judgments;
 - branch-scoped assumption rules;
 - obligation-generation judgments;
-- discharge rules for arithmetic, non-zero, indexing, and future relation
+- discharge rules for indexing, relation obligations, and future raw arithmetic
   obligations.

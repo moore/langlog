@@ -30,6 +30,7 @@ pub struct CheckedProof {
     pub observations: usize,
     pub diagnostics: Vec<Diagnostic>,
     pub facts: Vec<ProofFact>,
+    pub proof_ir: Option<ProofProgram>,
 }
 
 impl CheckedProof {
@@ -53,9 +54,11 @@ pub fn check(program: &CheckedProgram) -> CheckedProof {
             observations: 0,
             diagnostics: Vec::new(),
             facts: Vec::new(),
+            proof_ir: None,
         };
     };
 
+    let proof_ir = lower_to_proof_ir(hir);
     let (obligations, diagnostics, facts) = {
         let mut checker = Checker::new(hir);
         checker.check_module();
@@ -67,7 +70,466 @@ pub fn check(program: &CheckedProgram) -> CheckedProof {
         observations: facts.len(),
         diagnostics,
         facts,
+        proof_ir: Some(proof_ir),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofProgram {
+    pub functions: Vec<ProofFunction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofFunction {
+    pub body: ProofBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofBlock {
+    pub entries: Vec<ProofEntry>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofEntry {
+    Branch {
+        condition: ProofExpr,
+        facts: Vec<ProofRelation>,
+        mutable_hints: Vec<ProofRelation>,
+        then_block: ProofBlock,
+        else_block: Option<ProofBlock>,
+        span: Span,
+    },
+    Observe {
+        left: ProofExpr,
+        op: ObserveOp,
+        right: ProofExpr,
+        fact: ProofRelation,
+        else_block: ProofBlock,
+        span: Span,
+    },
+    For {
+        iterable: ProofExpr,
+        membership: Option<ProofSetMembership>,
+        body: ProofBlock,
+        span: Span,
+    },
+    Obligation {
+        kind: ProofObligationKind,
+        span: Span,
+    },
+    Eval {
+        expr: ProofExpr,
+        span: Span,
+    },
+    Scope {
+        block: ProofBlock,
+        span: Span,
+    },
+}
+
+impl ProofEntry {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Branch { span, .. }
+            | Self::Observe { span, .. }
+            | Self::For { span, .. }
+            | Self::Obligation { span, .. }
+            | Self::Eval { span, .. }
+            | Self::Scope { span, .. } => *span,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofObligationKind {
+    InBounds {
+        target: ProofExpr,
+        index: ProofExpr,
+        length: u64,
+    },
+    MapPresence {
+        target: ProofExpr,
+        key: ProofExpr,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofRelation {
+    pub source: FactSource,
+    pub origin_span: Span,
+    pub left_span: Span,
+    pub subject: Option<HirBindingId>,
+    pub op: ObserveOp,
+    pub right: ProofExpr,
+    pub right_span: Span,
+    pub stable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofSetMembership {
+    pub member: HirBindingId,
+    pub element_type: HirType,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofExpr {
+    pub kind: ProofExprKind,
+    pub ty: HirType,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofExprKind {
+    Binding(HirBindingId),
+    Item,
+    HostBuiltin,
+    Int(u64),
+    Bool(bool),
+    Tuple(Vec<ProofExpr>),
+    Array(Vec<ProofExpr>),
+    Unary {
+        expr: Box<ProofExpr>,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<ProofExpr>,
+        right: Box<ProofExpr>,
+    },
+    Call {
+        callee: Box<ProofExpr>,
+        args: Vec<ProofExpr>,
+    },
+    Index {
+        target: Box<ProofExpr>,
+        index: Box<ProofExpr>,
+    },
+}
+
+pub fn lower_to_proof_ir(hir: &HirProgram) -> ProofProgram {
+    ProofLowerer::new(collect_bindings(hir)).lower_program(hir)
+}
+
+struct ProofLowerer {
+    bindings: HashMap<HirBindingId, BindingInfo>,
+}
+
+impl ProofLowerer {
+    fn new(bindings: HashMap<HirBindingId, BindingInfo>) -> Self {
+        Self { bindings }
+    }
+
+    fn lower_program(&self, hir: &HirProgram) -> ProofProgram {
+        ProofProgram {
+            functions: hir
+                .functions
+                .iter()
+                .map(|function| ProofFunction {
+                    body: self.lower_block(&function.body),
+                    span: function.span,
+                })
+                .collect(),
+        }
+    }
+
+    fn lower_block(&self, block: &HirBlock) -> ProofBlock {
+        let mut entries = Vec::new();
+        for statement in &block.statements {
+            self.lower_statement(statement, &mut entries);
+        }
+        if let Some(result) = &block.result {
+            if let Some(expr) = self.lower_expr(result, &mut entries) {
+                entries.push(ProofEntry::Eval {
+                    span: expr.span,
+                    expr,
+                });
+            }
+        }
+        ProofBlock {
+            entries,
+            span: block.span,
+        }
+    }
+
+    fn lower_statement(&self, statement: &HirStmt, entries: &mut Vec<ProofEntry>) {
+        match statement {
+            HirStmt::Let(stmt) => {
+                if let Some(value) = &stmt.value {
+                    self.lower_expr(value, entries);
+                }
+            }
+            HirStmt::Assign(stmt) => {
+                self.lower_expr(&stmt.target, entries);
+                self.lower_expr(&stmt.value, entries);
+            }
+            HirStmt::Expr(stmt) => {
+                if let Some(expr) = self.lower_expr(&stmt.expr, entries) {
+                    entries.push(ProofEntry::Eval {
+                        span: stmt.span,
+                        expr,
+                    });
+                }
+            }
+            HirStmt::If(stmt) => {
+                let Some(condition) = self.lower_expr(&stmt.condition, entries) else {
+                    return;
+                };
+                let (facts, mutable_hints) = self.control_flow_relations(&stmt.condition);
+                entries.push(ProofEntry::Branch {
+                    condition,
+                    facts,
+                    mutable_hints,
+                    then_block: self.lower_block(&stmt.then_block),
+                    else_block: stmt
+                        .else_branch
+                        .as_ref()
+                        .map(|branch| self.lower_else_branch(branch)),
+                    span: stmt.span,
+                });
+            }
+            HirStmt::Match(stmt) => {
+                self.lower_expr(&stmt.expr, entries);
+                for arm in &stmt.arms {
+                    match &arm.body {
+                        HirMatchBody::Block(block) => entries.push(ProofEntry::Scope {
+                            block: self.lower_block(block),
+                            span: arm.span,
+                        }),
+                        HirMatchBody::Expr(expr) => {
+                            if let Some(expr) = self.lower_expr(expr, entries) {
+                                entries.push(ProofEntry::Eval {
+                                    span: arm.span,
+                                    expr,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            HirStmt::For(stmt) => {
+                let Some(iterable) = self.lower_expr(&stmt.iterable, entries) else {
+                    return;
+                };
+                entries.push(ProofEntry::For {
+                    membership: proof_set_membership_for_loop(stmt),
+                    body: self.lower_block(&stmt.body),
+                    span: stmt.span,
+                    iterable,
+                });
+            }
+            HirStmt::Return(stmt) => {
+                if let Some(value) = &stmt.value {
+                    self.lower_expr(value, entries);
+                }
+            }
+            HirStmt::Observe(stmt) => {
+                let (Some(left), Some(right)) = (
+                    self.lower_expr(&stmt.left, entries),
+                    self.lower_expr(&stmt.right, entries),
+                ) else {
+                    return;
+                };
+                let fact = self.relation(
+                    FactSource::Observe,
+                    stmt.span,
+                    &stmt.left,
+                    stmt.op,
+                    &stmt.right,
+                );
+                entries.push(ProofEntry::Observe {
+                    left,
+                    op: stmt.op,
+                    right,
+                    fact,
+                    else_block: self.lower_block(&stmt.else_block),
+                    span: stmt.span,
+                });
+            }
+        }
+    }
+
+    fn lower_else_branch(&self, branch: &HirElseBranch) -> ProofBlock {
+        match branch {
+            HirElseBranch::Block(block) => self.lower_block(block),
+            HirElseBranch::If(stmt) => {
+                let mut entries = Vec::new();
+                self.lower_statement(&HirStmt::If(*stmt.clone()), &mut entries);
+                ProofBlock {
+                    entries,
+                    span: stmt.span,
+                }
+            }
+        }
+    }
+
+    fn lower_expr(&self, expr: &HirExpr, entries: &mut Vec<ProofEntry>) -> Option<ProofExpr> {
+        let kind = match &expr.kind {
+            HirExprKind::Binding(id) => ProofExprKind::Binding(*id),
+            HirExprKind::Item(_) => ProofExprKind::Item,
+            HirExprKind::HostBuiltin(_) => ProofExprKind::HostBuiltin,
+            HirExprKind::Int(value) => ProofExprKind::Int(*value),
+            HirExprKind::Bool(value) => ProofExprKind::Bool(*value),
+            HirExprKind::Tuple(elements) => ProofExprKind::Tuple(
+                elements
+                    .iter()
+                    .filter_map(|element| self.lower_expr(element, entries))
+                    .collect(),
+            ),
+            HirExprKind::Array(elements) => ProofExprKind::Array(
+                elements
+                    .iter()
+                    .filter_map(|element| self.lower_expr(element, entries))
+                    .collect(),
+            ),
+            HirExprKind::Block(block) => {
+                entries.push(ProofEntry::Scope {
+                    block: self.lower_block(block),
+                    span: block.span,
+                });
+                return None;
+            }
+            HirExprKind::Unary { expr, .. } => ProofExprKind::Unary {
+                expr: Box::new(self.lower_expr(expr, entries)?),
+            },
+            HirExprKind::Binary { op, left, right } => ProofExprKind::Binary {
+                op: *op,
+                left: Box::new(self.lower_expr(left, entries)?),
+                right: Box::new(self.lower_expr(right, entries)?),
+            },
+            HirExprKind::Recover { expr, fallback, .. } => {
+                self.lower_expr(expr, entries);
+                self.lower_expr(fallback, entries);
+                return None;
+            }
+            HirExprKind::Call { callee, args } => ProofExprKind::Call {
+                callee: Box::new(self.lower_expr(callee, entries)?),
+                args: args
+                    .iter()
+                    .filter_map(|arg| self.lower_expr(arg, entries))
+                    .collect(),
+            },
+            HirExprKind::Index { target, index } => {
+                let target = self.lower_expr(target, entries)?;
+                let index = self.lower_expr(index, entries)?;
+                if let Some(kind) = proof_obligation_for_index(&target, &index) {
+                    entries.push(ProofEntry::Obligation {
+                        span: index.span,
+                        kind,
+                    });
+                }
+                ProofExprKind::Index {
+                    target: Box::new(target),
+                    index: Box::new(index),
+                }
+            }
+        };
+
+        Some(ProofExpr {
+            kind,
+            ty: expr.ty.clone(),
+            span: expr.span,
+        })
+    }
+
+    fn control_flow_relations(
+        &self,
+        condition: &HirExpr,
+    ) -> (Vec<ProofRelation>, Vec<ProofRelation>) {
+        match &condition.kind {
+            HirExprKind::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } => {
+                let (mut facts, mut hints) = self.control_flow_relations(left);
+                let (right_facts, right_hints) = self.control_flow_relations(right);
+                facts.extend(right_facts);
+                hints.extend(right_hints);
+                (facts, hints)
+            }
+            HirExprKind::Binary { op, left, right } => {
+                let Some(op) = comparison_to_observe_op(*op) else {
+                    return (Vec::new(), Vec::new());
+                };
+                let relation =
+                    self.relation(FactSource::ControlFlow, condition.span, left, op, right);
+                if relation.stable {
+                    (vec![relation], Vec::new())
+                } else {
+                    (Vec::new(), vec![relation])
+                }
+            }
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
+
+    fn relation(
+        &self,
+        source: FactSource,
+        origin_span: Span,
+        left: &HirExpr,
+        op: ObserveOp,
+        right: &HirExpr,
+    ) -> ProofRelation {
+        let subject = binding_id(left);
+        let stable = subject
+            .and_then(|subject| self.bindings.get(&subject))
+            .map(|binding| !binding.mutable)
+            .unwrap_or(true);
+        let mut nested_entries = Vec::new();
+        let right = self
+            .lower_expr(right, &mut nested_entries)
+            .unwrap_or_else(|| ProofExpr {
+                kind: ProofExprKind::Tuple(Vec::new()),
+                ty: right.ty.clone(),
+                span: right.span,
+            });
+        ProofRelation {
+            source,
+            origin_span,
+            left_span: left.span,
+            subject,
+            op,
+            right_span: right.span,
+            right,
+            stable,
+        }
+    }
+}
+
+fn proof_obligation_for_index(
+    target: &ProofExpr,
+    index: &ProofExpr,
+) -> Option<ProofObligationKind> {
+    match &target.ty {
+        HirType::Array { length, .. } => Some(ProofObligationKind::InBounds {
+            target: target.clone(),
+            index: index.clone(),
+            length: *length,
+        }),
+        HirType::Map { .. } => Some(ProofObligationKind::MapPresence {
+            target: target.clone(),
+            key: index.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn proof_set_membership_for_loop(stmt: &langlog_sema::HirForStmt) -> Option<ProofSetMembership> {
+    let HirType::Set { element, .. } = &stmt.iterable.ty else {
+        return None;
+    };
+    let HirPatternKind::Binding(binding) = &stmt.binding.kind else {
+        return None;
+    };
+
+    Some(ProofSetMembership {
+        member: binding.id,
+        element_type: (**element).clone(),
+        span: stmt.iterable.span,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +558,12 @@ struct MutableControlFlowHint {
     binding_span: Span,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KnownSetMembership {
+    member: HirBindingId,
+    element_type: HirType,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RecordedControlFlow {
     stable_facts: Vec<KnownFact>,
@@ -106,6 +574,7 @@ struct RecordedControlFlow {
 struct FlowState {
     stable_facts: Vec<KnownFact>,
     mutable_hints: Vec<MutableControlFlowHint>,
+    set_memberships: Vec<KnownSetMembership>,
 }
 
 struct Checker<'a> {
@@ -195,7 +664,12 @@ impl<'a> Checker<'a> {
             }
             HirStmt::For(stmt) => {
                 self.check_expr(&stmt.iterable, state);
+                let membership_snapshot = state.set_memberships.len();
+                if let Some(membership) = set_membership_for_loop(stmt) {
+                    state.set_memberships.push(membership);
+                }
                 self.check_block(&stmt.body, state);
+                state.set_memberships.truncate(membership_snapshot);
             }
             HirStmt::Return(stmt) => {
                 if let Some(value) = &stmt.value {
@@ -268,11 +742,23 @@ impl<'a> Checker<'a> {
                 self.check_expr(index, state);
 
                 self.obligations += 1;
-                if !index_is_proven_in_bounds(target, index, &state.stable_facts) {
-                    self.report_mutable_hint_warning_if_needed(index.span, state, |facts| {
-                        index_is_proven_in_bounds(target, index, facts)
-                    });
-                    self.report_out_of_bounds_index(index.span);
+                match &target.ty {
+                    HirType::Array { .. } => {
+                        if !index_is_proven_in_bounds(target, index, &state.stable_facts) {
+                            self.report_mutable_hint_warning_if_needed(
+                                index.span,
+                                state,
+                                |facts| index_is_proven_in_bounds(target, index, facts),
+                            );
+                            self.report_out_of_bounds_index(index.span);
+                        }
+                    }
+                    HirType::Map { .. } => {
+                        if !map_key_is_proven_present(target, index, &state.set_memberships) {
+                            self.report_missing_map_key(index.span);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -373,6 +859,13 @@ impl<'a> Checker<'a> {
         self.diagnostics.push(
             Diagnostic::error("possible out-of-bounds indexing is not proven safe")
                 .with_label(Label::primary(span, "prove this index stays within bounds")),
+        );
+    }
+
+    fn report_missing_map_key(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("possible missing map key is not proven present")
+                .with_label(Label::primary(span, "prove this key is present in the map")),
         );
     }
 
@@ -548,6 +1041,37 @@ fn index_is_proven_in_bounds(target: &HirExpr, index: &HirExpr, facts: &[KnownFa
     proven_u32_range(index, facts)
         .map(|(_, upper)| upper < length)
         .unwrap_or(false)
+}
+
+fn map_key_is_proven_present(
+    target: &HirExpr,
+    index: &HirExpr,
+    memberships: &[KnownSetMembership],
+) -> bool {
+    let HirType::Map { key, .. } = &target.ty else {
+        return false;
+    };
+    let Some(member) = binding_id(index) else {
+        return false;
+    };
+
+    memberships
+        .iter()
+        .any(|membership| membership.member == member && membership.element_type == **key)
+}
+
+fn set_membership_for_loop(stmt: &langlog_sema::HirForStmt) -> Option<KnownSetMembership> {
+    let HirType::Set { element, .. } = &stmt.iterable.ty else {
+        return None;
+    };
+    let HirPatternKind::Binding(binding) = &stmt.binding.kind else {
+        return None;
+    };
+
+    Some(KnownSetMembership {
+        member: binding.id,
+        element_type: (**element).clone(),
+    })
 }
 
 fn array_length(expr: &HirExpr) -> Option<u64> {

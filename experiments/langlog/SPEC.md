@@ -262,7 +262,8 @@ properties that should be enforced structurally rather than by convention:
 - Type compatibility checks MUST NOT emit mismatch diagnostics when either side
   is already unknown.
 - The semantic phase MUST require array literals to have a homogeneous element
-  type, and MUST require indexing to use an array target plus a `u32` index.
+  type, and MUST require indexing to use either an array target plus a `u32`
+  index or a `Map<K, V, N>` target plus a `K` key.
 - The semantic phase MUST recognize tuple, `Option`, `Result`, `Set`, and
   `Map` types in bindings, returns, call compatibility, and equality checks.
 - The semantic phase MUST reject calls to non-function values and calls with
@@ -305,8 +306,8 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-REL-01 Collections And Relations
 
-- The first enforced relation MUST allow membership in a `Set<K, N>` to imply
-  presence in a `Map<K, V, M>`.
+- The first enforced relation MUST allow a key introduced by iterating a
+  `Set<K, N>` to imply presence in a `Map<K, V, M>`.
 
 ## Non-Goals
 

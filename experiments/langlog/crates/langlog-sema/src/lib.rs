@@ -1434,15 +1434,21 @@ impl<'a> TypeChecker<'a> {
         index_span: Span,
         index_type: &SemanticType,
     ) -> SemanticType {
-        let SemanticType::Array { element, .. } = target_type else {
-            if !matches!(target_type, SemanticType::Unknown) {
-                self.report_non_array_index_target(expr_span);
+        match target_type {
+            SemanticType::Array { element, .. } => {
+                self.require_u32(index_span, index_type, "array indices");
+                (**element).clone()
             }
-            return SemanticType::Unknown;
-        };
-
-        self.require_u32(index_span, index_type, "array indices");
-        (**element).clone()
+            SemanticType::Map { key, value, .. } => {
+                self.require_same_type(index_span, key, index_type);
+                (**value).clone()
+            }
+            SemanticType::Unknown => SemanticType::Unknown,
+            _ => {
+                self.report_non_indexable_target(expr_span);
+                SemanticType::Unknown
+            }
+        }
     }
 
     fn require_same_type(&mut self, span: Span, expected: &SemanticType, found: &SemanticType) {
@@ -1523,10 +1529,11 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
-    fn report_non_array_index_target(&mut self, span: Span) {
+    fn report_non_indexable_target(&mut self, span: Span) {
         self.diagnostics.push(
-            Diagnostic::error("indexing requires an array target")
-                .with_label(Label::primary(span, "this expression is not an array")),
+            Diagnostic::error("indexing requires an array or map target").with_label(
+                Label::primary(span, "this expression is not an array or map"),
+            ),
         );
     }
 

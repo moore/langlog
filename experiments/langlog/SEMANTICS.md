@@ -72,5 +72,5 @@ This document complements, but does not replace, the other traceable specs:
 
 - Future raw or proof-backed arithmetic MUST be explicit at the operation site
   and MUST NOT be inferred from ordinary arithmetic operators.
-- This semantics draft MUST NOT assign exact surface names for raw or
-  proof-backed arithmetic operations.
+- This checked-arithmetic phase MUST NOT reserve or recognize exact surface
+  names for raw or proof-backed arithmetic operations.

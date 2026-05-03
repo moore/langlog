@@ -1229,18 +1229,19 @@ fn main() {
 
 //= SPEC.md#llg-sema-04-initial-type-checking
 //= type=test
-//# The semantic phase MUST require array literals to have a homogeneous element type, and MUST require indexing to use an array target plus a `u32` index.
+//# The semantic phase MUST require array literals to have a homogeneous element type, and MUST require indexing to use either an array target plus a `u32` index or a `Map<K, V, N>` target plus a `K` key.
 #[test]
 fn requirement_llg_sema_04_requires_homogeneous_arrays_and_typed_indexing() {
     let valid = analyze_ok(
         r#"
-fn main(index: u32) -> u32 {
+fn main(index: u32, entries: Map<u32, bool, 16>) -> bool {
     let values = [1, 2, 3];
-    values[index]
+    values[index];
+    entries[index]
 }
 "#,
     );
-    // Accept homogeneous arrays and `u32` indexing into arrays.
+    // Accept homogeneous arrays, `u32` indexing into arrays, and key indexing into maps.
     assert!(!valid.has_errors(), "{:#?}", valid.diagnostics);
 
     let invalid = analyze_ok(
@@ -1278,10 +1279,10 @@ fn main(flag: bool) {
     // Reject non-`u32` array indices.
     assert_primary_diagnostic(&invalid, "array indices must have type u32", bad_index.span);
 
-    // Reject indexing on a non-array target.
+    // Reject indexing on a non-array, non-map target.
     assert_primary_diagnostic(
         &invalid,
-        "indexing requires an array target",
+        "indexing requires an array or map target",
         expr_stmt(&main.body, 2).span,
     );
 }
@@ -1671,6 +1672,36 @@ fn main() {
         "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
         expr_stmt(&main.body, 1).span,
     );
+}
+
+//= SEMANTICS.md#llg-sem-06-raw-arithmetic-reservation
+//= type=test
+//# This checked-arithmetic phase MUST NOT reserve or recognize exact surface names for raw or proof-backed arithmetic operations.
+#[test]
+fn requirement_llg_sem_06_does_not_recognize_raw_arithmetic_surface_names() {
+    let checked = analyze_ok(
+        r#"
+fn main(left: u32, right: u32) {
+    raw_add(left, right);
+    let raw_sub = left;
+    raw_sub;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    let main = function(&checked, "main");
+    let raw_call = expr_stmt(&main.body, 0);
+    let ExprKind::Call { callee, .. } = &raw_call.kind else {
+        panic!("expected raw_add call");
+    };
+    assert_undefined_name(&checked, callee, "raw_add");
+
+    assert_no_diagnostic_message(&checked, "reserved host builtin name `raw_sub`");
+    let raw_sub_use = expr_stmt(&main.body, 2);
+    assert!(checked
+        .resolution(name_span(raw_sub_use))
+        .is_some_and(|resolution| resolution.kind == BindingKind::Local));
 }
 
 //= HIR.md#llg-hir-01-pipeline-and-lowering
