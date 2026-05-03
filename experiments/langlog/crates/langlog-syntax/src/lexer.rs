@@ -36,9 +36,10 @@ impl Lexer {
 
     fn lex(mut self) -> LexedSource {
         while let Some(ch) = self.peek_char() {
+            let start_offset = self.offset;
             match ch {
                 ch if ch.is_whitespace() => {
-                    self.bump_char();
+                    self.advance_char();
                 }
                 '/' => {
                     if self.peek_next('/') {
@@ -105,7 +106,7 @@ impl Lexer {
                         self.push_compound(TokenKind::AndAnd, 2);
                     } else {
                         self.report_unexpected_char('&', "expected `&&` for logical and");
-                        self.bump_char();
+                        self.advance_char();
                     }
                 }
                 '|' => {
@@ -113,7 +114,7 @@ impl Lexer {
                         self.push_compound(TokenKind::OrOr, 2);
                     } else {
                         self.report_unexpected_char('|', "expected `||` for logical or");
-                        self.bump_char();
+                        self.advance_char();
                     }
                 }
                 '.' => {
@@ -121,13 +122,18 @@ impl Lexer {
                         self.push_compound(TokenKind::DotDot, 2);
                     } else {
                         self.report_unexpected_char('.', "unexpected `.`");
-                        self.bump_char();
+                        self.advance_char();
                     }
                 }
                 other => {
                     self.report_unexpected_char(other, "unrecognized character");
-                    self.bump_char();
+                    self.advance_char();
                 }
+            }
+
+            if self.offset == start_offset {
+                self.report_unexpected_char(ch, "lexer made no progress");
+                self.offset += ch.len_utf8();
             }
         }
 
@@ -145,7 +151,7 @@ impl Lexer {
         self.source.contents()[self.offset..].chars().next()
     }
 
-    fn bump_char(&mut self) -> Option<char> {
+    fn advance_char(&mut self) -> Option<char> {
         let ch = self.peek_char()?;
         self.offset += ch.len_utf8();
         Some(ch)
@@ -168,34 +174,34 @@ impl Lexer {
     }
 
     fn skip_line_comment(&mut self) {
-        self.bump_char();
-        self.bump_char();
+        self.advance_char();
+        self.advance_char();
 
         while let Some(ch) = self.peek_char() {
             if ch == '\n' {
                 break;
             }
-            self.bump_char();
+            self.advance_char();
         }
     }
 
     fn skip_block_comment(&mut self) {
         let start = self.offset;
-        self.bump_char();
-        self.bump_char();
+        self.advance_char();
+        self.advance_char();
         let mut depth = 1usize;
 
         while let Some(ch) = self.peek_char() {
             if ch == '/' && self.peek_next('*') {
-                self.bump_char();
-                self.bump_char();
+                self.advance_char();
+                self.advance_char();
                 depth += 1;
                 continue;
             }
 
             if ch == '*' && self.peek_next('/') {
-                self.bump_char();
-                self.bump_char();
+                self.advance_char();
+                self.advance_char();
                 depth -= 1;
                 if depth == 0 {
                     return;
@@ -203,7 +209,7 @@ impl Lexer {
                 continue;
             }
 
-            self.bump_char();
+            self.advance_char();
         }
 
         let span = self.source.span(start, self.source.len());
@@ -215,11 +221,11 @@ impl Lexer {
 
     fn lex_identifier_or_keyword(&mut self) {
         let start = self.offset;
-        self.bump_char();
+        self.advance_char();
 
         while let Some(ch) = self.peek_char() {
             if ch.is_ascii_alphanumeric() || ch == '_' {
-                self.bump_char();
+                self.advance_char();
             } else {
                 break;
             }
@@ -250,10 +256,10 @@ impl Lexer {
 
     fn lex_integer(&mut self) {
         let start = self.offset;
-        self.bump_char();
+        self.advance_char();
 
         while matches!(self.peek_char(), Some(ch) if ch.is_ascii_digit()) {
-            self.bump_char();
+            self.advance_char();
         }
 
         let span = self.source.span(start, self.offset);

@@ -69,9 +69,15 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
 
         while !self.at(TokenTag::Eof) {
+            let start_cursor = self.cursor;
             match self.parse_item() {
                 Some(item) => items.push(item),
                 None => self.synchronize_item(),
+            }
+            if self.ensure_progress(start_cursor, "parser made no progress while parsing items")
+                == false
+            {
+                break;
             }
         }
 
@@ -267,10 +273,18 @@ impl<'a> Parser<'a> {
         let mut trailing_expr = None;
 
         while !self.at(TokenTag::RBrace) && !self.at(TokenTag::Eof) {
+            let start_cursor = self.cursor;
             if self.starts_statement() {
                 match self.parse_statement() {
                     Some(stmt) => statements.push(stmt),
                     None => self.synchronize_statement(),
+                }
+                if self.ensure_progress(
+                    start_cursor,
+                    "parser made no progress while parsing a statement",
+                ) == false
+                {
+                    break;
                 }
                 continue;
             }
@@ -279,6 +293,13 @@ impl<'a> Parser<'a> {
                 Some(expr) => expr,
                 None => {
                     self.synchronize_statement();
+                    if self.ensure_progress(
+                        start_cursor,
+                        "parser made no progress while recovering from an expression",
+                    ) == false
+                    {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -288,6 +309,13 @@ impl<'a> Parser<'a> {
                     Some(value) => value,
                     None => {
                         self.synchronize_statement();
+                        if self.ensure_progress(
+                            start_cursor,
+                            "parser made no progress while recovering from an assignment",
+                        ) == false
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -317,6 +345,13 @@ impl<'a> Parser<'a> {
                 "expression ends here",
             );
             self.synchronize_statement();
+            if self.ensure_progress(
+                start_cursor,
+                "parser made no progress while synchronizing a block",
+            ) == false
+            {
+                break;
+            }
         }
 
         let end = self.expect_tag(TokenTag::RBrace, "expected `}` to close block")?;
@@ -982,6 +1017,19 @@ impl<'a> Parser<'a> {
         while !self.at(TokenTag::Eof) && !self.at(TokenTag::Comma) && !self.at(TokenTag::RBrace) {
             self.bump();
         }
+    }
+
+    fn ensure_progress(&mut self, start_cursor: usize, message: &str) -> bool {
+        if self.cursor != start_cursor {
+            return true;
+        }
+
+        self.error_current(message, "parser recovery advanced here");
+        if self.at(TokenTag::Eof) {
+            return false;
+        }
+        self.cursor += 1;
+        true
     }
 
     fn current(&self) -> &Token {

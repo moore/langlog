@@ -1417,6 +1417,22 @@ fn main() {
 }
 "#,
     );
+    let broken_bare_expression = parse_err(
+        r#"
+fn main() {
+    *;
+    let value = 1;
+}
+"#,
+    );
+    let broken_assignment_value = parse_err(
+        r#"
+fn main() {
+    value = ;
+    let next = 1;
+}
+"#,
+    );
 
     let statements = &first_function(&broken_before_keyword).body.statements;
     assert_eq!(statements.len(), 1);
@@ -1429,6 +1445,14 @@ fn main() {
     let statements = &first_function(&broken_before_expression).body.statements;
     assert_eq!(statements.len(), 1);
     assert!(matches!(statements[0], Stmt::Expr(_)));
+
+    let statements = &first_function(&broken_bare_expression).body.statements;
+    assert_eq!(statements.len(), 1);
+    assert!(matches!(statements[0], Stmt::Let(_)));
+
+    let statements = &first_function(&broken_assignment_value).body.statements;
+    assert_eq!(statements.len(), 1);
+    assert!(matches!(statements[0], Stmt::Let(_)));
 }
 
 //= SPEC.md#llg-diag-03-parser-recovery
