@@ -96,7 +96,7 @@ Rules:
 ### Assignment
 
 ```langlog
-total = total + value;
+total = total + value or(err) 0;
 ```
 
 Rules:
@@ -120,11 +120,11 @@ Rules:
 
 ```langlog
 if total > 10 {
-    observe total + 1 < 1001 else {
+    observe total < 1001 else {
         return total;
     }
 } else {
-    observe total >= 0 else {
+    observe total <= 10 else {
         return total;
     }
 }
@@ -156,7 +156,7 @@ Rules:
 
 ```langlog
 for value in values {
-    total = total + value;
+    total = total + value or(err) 0;
 }
 ```
 
@@ -179,7 +179,7 @@ return;
 ### `observe`
 
 ```langlog
-observe total + 1 <= 1001 else {
+observe total <= 1000 else {
     return total;
 }
 ```

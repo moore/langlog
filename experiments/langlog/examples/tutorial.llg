@@ -2,24 +2,24 @@ fn sum(values: [u32; 4]) -> u32 {
     let mut total: u32 = 0;
 
     for value in values {
-        total = total + value;
+        total = total + value or(err) 0;
     }
 
     total
 }
 
-fn bounded(total: u32, limit: u32, one: u32) -> u32 {
-    observe total + one <= limit + one else {
+fn bounded(total: u32, limit: u32) -> u32 {
+    observe total <= limit else {
         return total;
     }
 
-    if total > 100 {
-        observe total + 1 < 1001 else {
-            return total;
-        }
+    let next: u32 = total + 1 or(err) total;
+
+    if next > limit {
+        return total;
     }
 
-    total
+    next
 }
 
 fn choose(flag: bool) -> u32 {
@@ -31,4 +31,14 @@ fn choose(flag: bool) -> u32 {
     }
 
     value
+}
+
+fn main() -> u32 {
+    let values: [u32; 4] = [1, 2, 3, 4];
+    let left: u32 = sum(values);
+    let right: u32 = bounded(10, 20);
+    let selected: u32 = choose(true);
+    let subtotal: u32 = left + right or(err) 0;
+
+    subtotal + selected or(err) 0
 }

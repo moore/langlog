@@ -65,11 +65,13 @@ From the command line, build the current Wasm V1 subset with:
 cargo run -p langlog-driver --bin langlog -- build --target wasm path/to/main.llg
 ```
 
-Wasm V1 currently supports `fn main() -> u32`, scalar `u32` and `bool` values,
-fixed-size scalar arrays, locals, assignment, arithmetic, comparisons,
-indexing, `if`, `match`, `for`, direct calls, `observe`, `return`, and the
-playground host builtins. It still rejects aggregate return values, non-scalar
-array elements, generic collections, and non-`u32` `main`.
+Wasm V1 currently supports `fn main() -> u32`, flattened non-collection values
+such as tuples, arrays, `Option<T>`, `Result<T, E>`, and `range<u32>`, plus
+locals, assignment, checked arithmetic, comparisons, structural equality,
+indexing, `if`, `match`, `for` over arrays and ranges, direct calls, recovery
+expressions, `observe`, `return`, and the playground host builtins. It still
+rejects Set/Map runtime values, first-class function values, indirect calls,
+non-local assignment targets, and non-`u32` `main`.
 
 ## 4. Write Your First Function
 
@@ -77,7 +79,7 @@ Every current Langlog file is a list of functions:
 
 ```langlog
 fn add_one(value: u32) -> u32 {
-    value + 1
+    value + 1 or(err) value
 }
 ```
 
@@ -127,7 +129,9 @@ The current semantic checker also enforces these initial type rules:
 - tuple, `Option`, `Result`, `Set`, and `Map` types participate in those same
   compatibility checks
 - `if` conditions and logical operators must use `bool`
-- arithmetic operators, ordering comparisons, and range bounds must use `u32`
+- arithmetic operators must use `u32` or `Result<u32, ArithmeticError>` and
+  produce checked `Result` values; ordering comparisons and range bounds must
+  use `u32`
 - phase 1 rejects bindings and literals whose types would remain unknown after
   checking, including `let` bindings with neither annotation nor initializer
   and empty array literals
@@ -149,7 +153,7 @@ fn sum(values: [u32; 4]) -> u32 {
     let mut total: u32 = 0;
 
     for value in values {
-        total = total + value;
+        total = total + value or(err) 0;
     }
 
     total
@@ -167,11 +171,12 @@ One of Langlog’s core ideas is that programs should be able to state facts the
 proof engine can use later. The syntax for that is `observe`:
 
 ```langlog
-fn bounded(total: u32, limit: u32, one: u32) -> u32 {
-    observe total + one <= limit + one else {
+fn bounded(total: u32, limit: u32) -> u32 {
+    observe total <= limit else {
         return total;
     }
-    total
+
+    total + 1 or(err) total
 }
 ```
 
@@ -209,11 +214,11 @@ obligations in phase 1.
 ```langlog
 fn clamp_flag(total: u32) -> u32 {
     if total > 100 {
-        observe total + 1 < 1001 else {
+        observe total < 1001 else {
             return total;
         }
     } else {
-        observe total >= 0 else {
+        observe total <= 100 else {
             return total;
         }
     }
@@ -285,24 +290,24 @@ fn sum(values: [u32; 4]) -> u32 {
     let mut total: u32 = 0;
 
     for value in values {
-        total = total + value;
+        total = total + value or(err) 0;
     }
 
     total
 }
 
-fn bounded(total: u32, limit: u32, one: u32) -> u32 {
-    observe total + one <= limit + one else {
+fn bounded(total: u32, limit: u32) -> u32 {
+    observe total <= limit else {
         return total;
     }
 
-    if total > 100 {
-        observe total + 1 < 1001 else {
-            return total;
-        }
+    let next: u32 = total + 1 or(err) total;
+
+    if next > limit {
+        return total;
     }
 
-    total
+    next
 }
 
 fn choose(flag: bool) -> u32 {
@@ -315,17 +320,27 @@ fn choose(flag: bool) -> u32 {
 
     value
 }
+
+fn main() -> u32 {
+    let values: [u32; 4] = [1, 2, 3, 4];
+    let left: u32 = sum(values);
+    let right: u32 = bounded(10, 20);
+    let selected: u32 = choose(true);
+    let subtotal: u32 = left + right or(err) 0;
+
+    subtotal + selected or(err) 0
+}
 ```
 
-Use it as the main parser smoke test while the compiler grows.
+Use it as a small end-to-end smoke test while the compiler grows.
 
 ## 12. What Comes Next
 
 The parser is no longer the only stage. Current next compiler milestones are:
 
-- enforce the first collection relation
 - define richer runtime semantics
-- broaden Wasm lowering beyond the V1 subset
+- design executable Set/Map runtime representations
+- define richer collection relation syntax and update obligations
 - improve playground and documentation polish
 
 So the right way to think about Langlog today is:

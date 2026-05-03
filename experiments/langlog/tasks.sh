@@ -34,6 +34,7 @@ run_playground() {
     echo "==> validate playground static files"
     test -f playground/index.html
     test -f playground/app.js
+    test -f playground/examples.json
     test -f playground/style.css
     test -f REFERENCE.md
     test -f TUTORIAL.md
@@ -50,7 +51,7 @@ EOF
     echo "==> assemble target/playground-site"
     rm -rf target/playground-site
     mkdir -p target/playground-site/pkg
-    cp playground/index.html playground/app.js playground/style.css target/playground-site/
+    cp playground/index.html playground/app.js playground/examples.json playground/style.css target/playground-site/
     cp REFERENCE.md TUTORIAL.md SPEC.md target/playground-site/
     cp -R examples target/playground-site/
     echo "==> wasm-bindgen --target web"
