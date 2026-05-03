@@ -75,17 +75,6 @@ impl HostBuiltin {
         }
     }
 
-    pub const fn is_host_import(self) -> bool {
-        matches!(
-            self,
-            Self::ReadU32 | Self::PrintU32 | Self::PrintBool | Self::PrintNewline
-        )
-    }
-
-    const fn has_generic_signature(self) -> bool {
-        matches!(self, Self::Some | Self::None | Self::Ok | Self::Err)
-    }
-
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL
             .iter()
@@ -1214,7 +1203,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 let value = self.check_expr_with_expected(&args[0], scopes, expected_inner);
                 let return_type = SemanticType::Option(Box::new(value.clone()));
-                self.record_builtin_callee_type(callee.span, vec![value], return_type.clone());
+                self.record_builtin_callee_type(callee, vec![value], return_type.clone());
                 return_type
             }
             HostBuiltin::None => {
@@ -1230,7 +1219,7 @@ impl<'a> TypeChecker<'a> {
                         SemanticType::Option(Box::new(SemanticType::Unknown))
                     }
                 };
-                self.record_builtin_callee_type(callee.span, Vec::new(), return_type.clone());
+                self.record_builtin_callee_type(callee, Vec::new(), return_type.clone());
                 return_type
             }
             HostBuiltin::Ok => {
@@ -1247,7 +1236,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 let value = self.check_expr_with_expected(&args[0], scopes, expected_ok);
                 let return_type = arithmetic_result(value.clone());
-                self.record_builtin_callee_type(callee.span, vec![value], return_type.clone());
+                self.record_builtin_callee_type(callee, vec![value], return_type.clone());
                 return_type
             }
             HostBuiltin::Err => {
@@ -1275,7 +1264,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 };
                 self.record_builtin_callee_type(
-                    callee.span,
+                    callee,
                     vec![SemanticType::ArithmeticError],
                     return_type.clone(),
                 );
@@ -1289,7 +1278,7 @@ impl<'a> TypeChecker<'a> {
                     return SemanticType::ArithmeticError;
                 }
                 let return_type = SemanticType::ArithmeticError;
-                self.record_builtin_callee_type(callee.span, Vec::new(), return_type.clone());
+                self.record_builtin_callee_type(callee, Vec::new(), return_type.clone());
                 return_type
             }
             HostBuiltin::ReadU32
@@ -1298,7 +1287,7 @@ impl<'a> TypeChecker<'a> {
             | HostBuiltin::PrintNewline => {
                 let signature = host_builtin_signature(builtin);
                 self.record_builtin_callee_type(
-                    callee.span,
+                    callee,
                     signature.params.clone(),
                     (*signature.return_type).clone(),
                 );
@@ -1314,23 +1303,25 @@ impl<'a> TypeChecker<'a> {
 
     fn record_builtin_callee_type(
         &mut self,
-        span: Span,
+        callee: &Expr,
         params: Vec<SemanticType>,
         return_type: SemanticType,
     ) {
-        self.facts.record_expr(
-            span,
-            SemanticType::Function(FunctionType {
-                params,
-                return_type: Box::new(return_type),
-            }),
-        );
+        let ty = SemanticType::Function(FunctionType {
+            params,
+            return_type: Box::new(return_type),
+        });
+        self.facts.record_expr(callee.span, ty.clone());
+        let resolved_name_span = name_span(callee);
+        if resolved_name_span != callee.span {
+            self.facts.record_expr(resolved_name_span, ty);
+        }
     }
 
     fn require_builtin_arity(
         &mut self,
         callee_span: Span,
-        builtin: HostBuiltin,
+        _builtin: HostBuiltin,
         expected: usize,
         found: usize,
     ) -> bool {
@@ -1338,9 +1329,6 @@ impl<'a> TypeChecker<'a> {
             return true;
         }
         self.report_call_arity_mismatch(callee_span, expected, found);
-        if builtin.has_generic_signature() {
-            return false;
-        }
         false
     }
 

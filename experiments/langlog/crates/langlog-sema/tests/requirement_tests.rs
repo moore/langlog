@@ -1207,6 +1207,8 @@ fn requirement_llg_sema_04_suppresses_type_mismatch_cascades_for_unknown_types()
 fn main() {
     let annotated: u32 = missing;
     let assigned: bool = missing;
+    missing + 1;
+    missing[0];
 }
 "#,
     );
@@ -1225,6 +1227,11 @@ fn main() {
     assert_undefined_name(&checked, assigned_value, "missing");
     assert_no_diagnostic_message(&checked, "type mismatch: expected u32, found <unknown>");
     assert_no_diagnostic_message(&checked, "type mismatch: expected bool, found <unknown>");
+    assert_no_diagnostic_message(
+        &checked,
+        "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
+    );
+    assert_no_diagnostic_message(&checked, "indexing requires an array or map target");
 }
 
 //= SPEC.md#llg-sema-04-initial-type-checking
@@ -1462,16 +1469,64 @@ fn requirement_llg_sem_01_provides_option_and_result_constructors() {
         r#"
 fn main() {
     let present: Option<u32> = some(1);
+    let grouped: Option<u32> = (some)(2);
     let absent: Option<u32> = none();
+    let nested_option: Option<Option<u32>> = some(none());
     let success: Result<u32, ArithmeticError> = ok(2);
+    let nested_result: Result<Option<u32>, ArithmeticError> = ok(none());
     let failure: Result<u32, ArithmeticError> = err(arithmetic_overflow());
+    let recovered: Option<u32> = nested_result or(err) some(0);
     present == absent;
+    present == grouped;
+    nested_option == some(recovered);
     success == failure;
 }
 "#,
     );
 
     assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let invalid = analyze_ok(
+        r#"
+fn main() {
+    let unknown_option = none();
+    let unknown_result = err(arithmetic_overflow());
+    let wrong_error: Result<u32, bool> = err(arithmetic_overflow());
+    let wrong_ok: Result<Option<u32>, bool> = ok(none());
+    some();
+    none(1);
+    ok();
+    err();
+}
+"#,
+    );
+    assert!(invalid.has_errors());
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message == "cannot infer type for builtin `none`")
+            .count()
+            >= 2
+    );
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message == "cannot infer type for builtin `err`")
+            .count()
+            >= 2
+    );
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message
+            == "call arity mismatch: expected 1 argument(s), found 0"));
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message
+            == "call arity mismatch: expected 0 argument(s), found 1"));
 }
 
 //= SEMANTICS.md#llg-sem-01-builtin-result-types

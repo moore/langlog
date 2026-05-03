@@ -108,7 +108,36 @@ fn requirement_llg_wasm_01_rejects_unsupported_main_shapes() {
 //# Wasm V1 MUST reject aggregate return values.
 #[test]
 fn requirement_llg_wasm_01_rejects_aggregate_return_values() {
-    let checked = checked("fn helper() -> [u32; 1] { [1] }\nfn main() -> u32 { 1 }");
+    let array_return = checked("fn helper() -> [u32; 1] { [1] }\nfn main() -> u32 { 1 }");
+    let diagnostics = compile(&array_return).expect_err("expected backend error");
+
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
+
+    let option_tuple = checked(
+        r#"
+fn helper() -> Option<(u32, u32)> { some((1, 2)) }
+fn main() -> u32 { 1 }
+"#,
+    );
+    let diagnostics = compile(&option_tuple).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("returns compile to Wasm v1")));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST reject `Result` values whose error type is not `ArithmeticError`.
+#[test]
+fn requirement_llg_wasm_01_rejects_result_values_with_non_arithmetic_error_type() {
+    let checked = checked(
+        r#"
+fn helper(value: Result<u32, bool>) -> Result<u32, bool> { value }
+fn main() -> u32 { 1 }
+"#,
+    );
     let diagnostics = compile(&checked).expect_err("expected backend error");
 
     assert!(diagnostics
@@ -397,17 +426,16 @@ fn main() -> u32 {
 //# Wasm V1 MUST compile unit-valued block expressions without leaving stack values.
 #[test]
 fn requirement_llg_wasm_02_compiles_unit_block_expressions_without_stack_values() {
-    assert_eq!(
-        run_main(
-            r#"
+    let source = r#"
 fn main() -> u32 {
     {};
     42
 }
-"#
-        ),
-        42
-    );
+"#;
+
+    assert_eq!(run_main(source), 42);
+    let module = compile(&checked(source)).expect("expected Wasm module");
+    assert!(!module.wat.contains("i32.const 0"));
 }
 
 //= WASM.md#llg-wasm-02-scalar-execution
@@ -644,8 +672,9 @@ fn requirement_llg_wasm_05_emits_host_builtin_imports() {
     let checked = checked(
         r#"
 fn main() -> u32 {
+    let maybe: Option<u32> = some(1);
     print_u32(read_u32());
-    0
+    maybe or 0
 }
 "#,
     );
@@ -655,6 +684,7 @@ fn main() -> u32 {
     assert!(module
         .wat
         .contains("(import \"langlog_host\" \"print_u32\""));
+    assert!(!module.wat.contains("(import \"langlog_host\" \"some\""));
 }
 
 //= WASM.md#llg-wasm-05-host-builtins

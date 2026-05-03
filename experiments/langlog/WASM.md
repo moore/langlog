@@ -21,6 +21,8 @@ This document complements, but does not replace, the main language spec:
 - Wasm builds MUST export `fn main() -> u32` as `main`.
 - Wasm V1 MUST reject `main` forms other than `fn main() -> u32`.
 - Wasm V1 MUST reject aggregate return values.
+- Wasm V1 MUST reject `Result` values whose error type is not
+  `ArithmeticError`.
 - Wasm V1 MUST compile helper functions returning `()` without Wasm result
   values.
 - When backend lowering fails during `langlog build --target wasm`, the CLI

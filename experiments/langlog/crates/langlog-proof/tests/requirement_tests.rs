@@ -422,7 +422,7 @@ fn main(value: u32) {
     observe value < 4 else {
         return;
     }
-    if value != 0 {
+    if value != 0 && value <= 4 {
         value;
     }
 }
@@ -442,7 +442,7 @@ fn main(value: u32) {
         ProofEntry::Branch {
             facts,
             ..
-        } if facts.iter().any(|fact| fact.source == FactSource::ControlFlow
+        } if facts.len() == 2 && facts.iter().all(|fact| fact.source == FactSource::ControlFlow
             && !fact.left_span.is_empty()
             && !fact.right_span.is_empty())
     )));
@@ -615,6 +615,30 @@ fn main(keys: Set<u32, 16>, table: Map<u32, bool, 32>) {
 "#,
     );
     assert_eq!(proven.obligations, 1);
+    assert!(proof_entries(&proven).iter().any(|entry| matches!(
+        entry,
+        ProofEntry::For {
+            membership: Some(_),
+            ..
+        }
+    )));
+
+    let (checked, copied_key) = check_err(
+        r#"
+fn main(keys: Set<u32, 16>, table: Map<u32, bool, 32>) {
+    for key in keys {
+        let copied = key;
+        table[copied];
+    }
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &copied_key,
+        "possible missing map key is not proven present",
+        "copied",
+    );
 
     let (checked, unproven) = check_err(
         r#"
@@ -641,6 +665,9 @@ fn requirement_llg_proof_02_derives_facts_from_control_flow_tests() {
 fn main(total: u32, limit: u32, baseline: u32) {
     if total < limit && total >= baseline {
         total;
+    }
+    if limit <= total && baseline > 0 {
+        limit;
     }
 }
 "#,
@@ -672,8 +699,25 @@ fn main(total: u32, limit: u32, baseline: u32) {
         "baseline",
     );
 
-    // Only the two comparison tests should be recorded for this example.
-    assert_eq!(control_flow_facts, 2);
+    assert_fact(
+        &checked,
+        &proof,
+        FactSource::ControlFlow,
+        "limit",
+        ObserveOp::LtEq,
+        "total",
+    );
+    assert_fact(
+        &checked,
+        &proof,
+        FactSource::ControlFlow,
+        "baseline",
+        ObserveOp::Gt,
+        "0",
+    );
+
+    // Only the four comparison tests should be recorded for this example.
+    assert_eq!(control_flow_facts, 4);
 }
 
 //= SPEC.md#llg-proof-02-observations

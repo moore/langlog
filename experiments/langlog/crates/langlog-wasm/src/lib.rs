@@ -179,11 +179,14 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         };
 
         self.compile_block(&function.body, &function.return_type);
-        if wasm_return_width(&function.return_type).unwrap_or(0) > 0 {
-            if let Some(result) = &function.body.result {
-                self.compile_expr(result);
-            } else {
-                self.emit_default_value(&function.return_type);
+        match wasm_return_width(&function.return_type) {
+            Some(0) | None => {}
+            Some(_) => {
+                if let Some(result) = &function.body.result {
+                    self.compile_expr(result);
+                } else {
+                    self.emit_default_value(&function.return_type);
+                }
             }
         }
 
@@ -248,8 +251,6 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             HirStmt::Return(stmt) => {
                 if let Some(value) = &stmt.value {
                     self.compile_expr(value);
-                } else if wasm_return_width(return_type).unwrap_or(0) > 0 {
-                    self.emit_default_value(return_type);
                 }
                 self.emit("return");
             }
@@ -361,7 +362,6 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.compile_block(block, &expr.ty);
                 if let Some(result) = &block.result {
                     self.compile_expr(result);
-                } else if expr.ty == HirType::Unit {
                 } else {
                     self.emit_default_value(&expr.ty);
                 }
@@ -921,11 +921,17 @@ fn collect_host_builtins_else(branch: &HirElseBranch, builtins: &mut Vec<HostBui
 
 fn collect_host_builtins_expr(expr: &HirExpr, builtins: &mut Vec<HostBuiltin>) {
     match &expr.kind {
-        HirExprKind::HostBuiltin(builtin) => {
-            if builtin.is_host_import() && !builtins.contains(builtin) {
+        HirExprKind::HostBuiltin(
+            builtin @ (HostBuiltin::ReadU32
+            | HostBuiltin::PrintU32
+            | HostBuiltin::PrintBool
+            | HostBuiltin::PrintNewline),
+        ) => {
+            if !builtins.contains(builtin) {
                 builtins.push(*builtin);
             }
         }
+        HirExprKind::HostBuiltin(_) => {}
         HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
             for element in elements {
                 collect_host_builtins_expr(element, builtins);

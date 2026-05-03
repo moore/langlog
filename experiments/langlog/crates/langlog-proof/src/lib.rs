@@ -810,7 +810,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            HirExprKind::Recover { .. } => RecordedControlFlow::default(),
             _ => RecordedControlFlow::default(),
         }
     }
@@ -916,42 +915,12 @@ fn stable_and_mutable_facts(state: &FlowState, skip_hint: Option<usize>) -> Vec<
     facts
 }
 
-fn proven_binary_u32_range(
-    op: BinaryOp,
-    left: &HirExpr,
-    right: &HirExpr,
-    facts: &[KnownFact],
-) -> Option<(u64, u64)> {
-    let (left_low, left_high) = proven_u32_range(left, facts)?;
-    let (right_low, right_high) = proven_u32_range(right, facts)?;
-
-    match op {
-        BinaryOp::Add => {
-            let low = left_low.checked_add(right_low)?;
-            let high = left_high.checked_add(right_high)?;
-            (high <= U32_MAX_U64).then_some((low, high))
-        }
-        BinaryOp::Sub => {
-            if left_low < right_high {
-                return None;
-            }
-            Some((left_low - right_high, left_high - right_low))
-        }
-        BinaryOp::Mul => {
-            let low = left_low.checked_mul(right_low)?;
-            let high = left_high.checked_mul(right_high)?;
-            (high <= U32_MAX_U64).then_some((low, high))
-        }
-        _ => None,
-    }
-}
-
 fn proven_u32_range(expr: &HirExpr, facts: &[KnownFact]) -> Option<(u64, u64)> {
     match &expr.kind {
-        HirExprKind::Int(value) => (*value <= U32_MAX_U64).then_some((*value, *value)),
         HirExprKind::Binding(subject) => bounds_for_binding(*subject, facts),
-        HirExprKind::Binary { op, left, right } => proven_binary_u32_range(*op, left, right, facts),
-        HirExprKind::Unary { .. }
+        HirExprKind::Int(_)
+        | HirExprKind::Binary { .. }
+        | HirExprKind::Unary { .. }
         | HirExprKind::Item(_)
         | HirExprKind::HostBuiltin(_)
         | HirExprKind::Bool(_)
@@ -1013,19 +982,8 @@ fn eval_const_u64(expr: &HirExpr) -> Option<u64> {
         | HirExprKind::Block(_)
         | HirExprKind::Recover { .. }
         | HirExprKind::Call { .. }
-        | HirExprKind::Index { .. } => None,
-        HirExprKind::Binary { op, left, right } => {
-            let left = eval_const_u64(left)?;
-            let right = eval_const_u64(right)?;
-            match op {
-                BinaryOp::Add => left.checked_add(right),
-                BinaryOp::Sub => left.checked_sub(right),
-                BinaryOp::Mul => left.checked_mul(right),
-                BinaryOp::Div => (right != 0).then(|| left / right),
-                BinaryOp::Rem => (right != 0).then(|| left % right),
-                _ => None,
-            }
-        }
+        | HirExprKind::Index { .. }
+        | HirExprKind::Binary { .. } => None,
     }
 }
 
