@@ -30,7 +30,8 @@ This document complements, but does not replace, the main language spec:
 ## LLG-WASM-02 Scalar Execution
 
 - Wasm V1 MUST lower `u32` and `bool` values as Wasm `i32` values.
-- Wasm V1 MUST execute arithmetic expressions over `u32` values.
+- Wasm V1 MUST execute checked arithmetic expressions over `u32` values when
+  their `Result` is recovered.
 - Wasm V1 MUST execute direct function calls.
 - Wasm V1 MUST pass fixed-size scalar tuple parameters to direct function
   calls.

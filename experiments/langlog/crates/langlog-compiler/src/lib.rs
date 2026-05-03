@@ -281,10 +281,10 @@ mod tests {
         let outcome = check_source(
             "memory.llg",
             r#"
-fn main(total: u32) {
-    let mut denom = 1;
-    if denom > 0 {
-        total / denom;
+fn main(values: [u32; 4]) {
+    let mut index = 0;
+    if index < 4 {
+        values[index];
     }
 }
 "#,

@@ -605,6 +605,33 @@ impl<'a> Parser<'a> {
         lhs = self.parse_postfix(lhs)?;
 
         loop {
+            if self.at(TokenTag::Or) {
+                let left_bp = 0;
+                if left_bp < min_binding_power {
+                    break;
+                }
+
+                self.bump();
+                let error_binding = if self.bump_if(TokenTag::LParen) {
+                    let binding = self.expect_identifier("expected error binding after `or(`")?;
+                    self.expect_tag(TokenTag::RParen, "expected `)` after error binding")?;
+                    Some(binding)
+                } else {
+                    None
+                };
+                let fallback = self.parse_expression(left_bp)?;
+                let span = lhs.span.cover(fallback.span).unwrap_or(lhs.span);
+                lhs = Expr::new(
+                    span,
+                    ExprKind::Recover {
+                        expr: Box::new(lhs),
+                        error_binding,
+                        fallback: Box::new(fallback),
+                    },
+                );
+                continue;
+            }
+
             let (op, left_bp, right_bp) = match self.current_tag() {
                 TokenTag::DotDot => (BinaryOp::Range, 1, 2),
                 TokenTag::OrOr => (BinaryOp::Or, 3, 4),
@@ -1005,6 +1032,7 @@ fn observe_expr_is_phase1_proof_expr(expr: &Expr) -> bool {
             ) && observe_expr_is_phase1_proof_expr(left)
                 && observe_expr_is_phase1_proof_expr(right)
         }
+        ExprKind::Recover { .. } => false,
         ExprKind::Call { callee, args } => {
             observe_expr_is_phase1_proof_expr(callee)
                 && args.iter().all(observe_expr_is_phase1_proof_expr)

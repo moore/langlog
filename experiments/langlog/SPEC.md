@@ -53,8 +53,6 @@ properties that should be enforced structurally rather than by convention:
 - When semantic analysis fails, the CLI MUST print diagnostics to stderr.
 - When proof analysis fails during `langlog check`, the CLI MUST print
   diagnostics to stderr.
-- When arithmetic proof analysis fails during `langlog check`, the CLI MUST
-  print diagnostics to stderr.
 - When `.langlog-config` cannot be read, the CLI MUST print an error to stderr.
 - Malformed entries in a `.langlog-config` `[build]` section MUST make build
   fail with a config error on stderr.
@@ -83,7 +81,7 @@ properties that should be enforced structurally rather than by convention:
 ## LLG-LEX-03 Reserved Keywords
 
 - The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`,
-  `match`, `for`, `in`, `return`, `observe`, `true`, and `false`.
+  `match`, `for`, `in`, `return`, `observe`, `or`, `true`, and `false`.
 
 ## LLG-LEX-04 Lexical Error Diagnostics
 
@@ -125,6 +123,8 @@ properties that should be enforced structurally rather than by convention:
 - Equality operators MUST bind tighter than logical and.
 - Logical and MUST bind tighter than logical or.
 - Logical or MUST bind tighter than range construction.
+- Recovery expressions MUST parse `expr or fallback` and `expr or(err)
+  fallback`, and recovery MUST bind looser than range construction.
 
 ## LLG-SYN-04 Grouped And Tuple Expressions
 
@@ -250,8 +250,9 @@ properties that should be enforced structurally rather than by convention:
   signatures.
 - The semantic phase MUST require `if` conditions and logical operators to use
   `bool`.
-- The semantic phase MUST require arithmetic operators, ordering comparisons,
-  and range bounds to use `u32`.
+- The semantic phase MUST require arithmetic operands to use `u32` or
+  `Result<u32, ArithmeticError>`, and ordering comparisons and range bounds to
+  use `u32`.
 - The semantic phase MUST reject phase 1 programs whose types would remain
   unknown after checking; this includes `let` bindings without either a type
   annotation or an initializer, and empty array literals without an explicit
@@ -271,19 +272,8 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-PROOF-01 Proof-Required Operations
 
-- The proof phase MUST reject arithmetic that may overflow unless safety is
-  proven.
-- The proof phase MUST reject division or remainder operations that may divide
-  by zero unless safety is proven.
 - The proof phase MUST reject indexing that may go out of bounds unless safety
   is proven.
-- Constant proof expressions MUST evaluate `+`, `-`, `*`, `/`, and `%` only
-  when the operation is valid for unsigned integer constants.
-- Arithmetic proof ranges MUST preserve precise subtraction lower and upper
-  bounds for later obligations.
-- A proof of non-zero MUST be derived from constant non-zero expressions,
-  equality to a non-zero value, inequality from zero, positive lower bounds,
-  and greater-than comparisons.
 - Indexing MUST require the proven index upper bound to be strictly less than
   the indexed array length.
 

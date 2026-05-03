@@ -1091,7 +1091,7 @@ fn main(flag: bool, count: u32) {
 
 //= SPEC.md#llg-sema-04-initial-type-checking
 //= type=test
-//# The semantic phase MUST require arithmetic operators, ordering comparisons, and range bounds to use `u32`.
+//# The semantic phase MUST require arithmetic operands to use `u32` or `Result<u32, ArithmeticError>`, and ordering comparisons and range bounds to use `u32`.
 #[test]
 fn requirement_llg_sema_04_requires_u32_for_arithmetic_ordering_and_ranges() {
     let valid = analyze_ok(
@@ -1126,10 +1126,10 @@ fn main(flag: bool, limit: u32) {
     let main = function(&invalid, "main");
     let loop_stmt = first_for_stmt(&main.body);
 
-    // Reject arithmetic operands that are not `u32`.
+    // Reject arithmetic operands that are neither `u32` nor `Result<u32, ArithmeticError>`.
     assert_primary_diagnostic(
         &invalid,
-        "arithmetic operators must have type u32",
+        "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
         expr_stmt(&main.body, 0).span,
     );
 
@@ -1388,6 +1388,291 @@ fn main(
     );
 }
 
+//= SEMANTICS.md#llg-sem-01-builtin-result-types
+//= type=test
+//# `Option<T>`, `Result<T, E>`, and `ArithmeticError` MUST be builtin semantic types in the first checked-arithmetic phase.
+#[test]
+fn requirement_llg_sem_01_adds_builtin_option_result_and_arithmetic_error_types() {
+    let checked = analyze_ok(
+        r#"
+fn main(error: ArithmeticError, maybe: Option<u32>, result: Result<u32, ArithmeticError>) {
+    error;
+    maybe;
+    result;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = hir_function(&checked, "main");
+    assert_eq!(hir.params[0].ty, HirType::ArithmeticError);
+    assert_eq!(hir.params[1].ty, HirType::Option(Box::new(HirType::U32)));
+    assert_eq!(
+        hir.params[2].ty,
+        HirType::Result {
+            ok: Box::new(HirType::U32),
+            err: Box::new(HirType::ArithmeticError),
+        }
+    );
+}
+
+//= SEMANTICS.md#llg-sem-01-builtin-result-types
+//= type=test
+//# `ArithmeticError` MUST represent arithmetic overflow, arithmetic underflow, divide-by-zero, and remainder-by-zero failures.
+#[test]
+fn requirement_llg_sem_01_represents_arithmetic_error_kinds() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let overflow: ArithmeticError = arithmetic_overflow();
+    let underflow: ArithmeticError = arithmetic_underflow();
+    let divide: ArithmeticError = divide_by_zero();
+    let remainder: ArithmeticError = remainder_by_zero();
+    overflow == underflow;
+    divide != remainder;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SEMANTICS.md#llg-sem-01-builtin-result-types
+//= type=test
+//# Builtin `Option` and `Result` types MUST use explicit type arguments without requiring user-defined enum or generic declarations.
+#[test]
+fn requirement_llg_sem_01_accepts_builtin_option_and_result_type_arguments() {
+    let checked = analyze_ok(
+        r#"
+fn choose(value: Option<u32>) -> Option<u32> { value }
+fn compute(value: Result<u32, ArithmeticError>) -> Result<u32, ArithmeticError> { value }
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SEMANTICS.md#llg-sem-01-builtin-result-types
+//= type=test
+//# Builtin constructors `some`, `none`, `ok`, and `err` MUST construct builtin `Option` and `Result` values without requiring user-defined enum variants.
+#[test]
+fn requirement_llg_sem_01_provides_option_and_result_constructors() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let present: Option<u32> = some(1);
+    let absent: Option<u32> = none();
+    let success: Result<u32, ArithmeticError> = ok(2);
+    let failure: Result<u32, ArithmeticError> = err(arithmetic_overflow());
+    present == absent;
+    success == failure;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SEMANTICS.md#llg-sem-01-builtin-result-types
+//= type=test
+//# Builtin constructors `arithmetic_overflow`, `arithmetic_underflow`, `divide_by_zero`, and `remainder_by_zero` MUST construct the corresponding `ArithmeticError` values.
+#[test]
+fn requirement_llg_sem_01_provides_arithmetic_error_constructors() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let overflow: ArithmeticError = arithmetic_overflow();
+    let underflow: ArithmeticError = arithmetic_underflow();
+    let divide: ArithmeticError = divide_by_zero();
+    let remainder: ArithmeticError = remainder_by_zero();
+    overflow != underflow;
+    divide != remainder;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SEMANTICS.md#llg-sem-02-recovery-expressions
+//= type=test
+//# Recovery expressions MUST support `option_expr or fallback_expr`, producing `T` from `Option<T>` when `fallback_expr` has type `T`.
+#[test]
+fn requirement_llg_sem_02_supports_option_recovery_expressions() {
+    let checked = analyze_ok(
+        r#"
+fn main() -> u32 {
+    let maybe: Option<u32> = none();
+    maybe or 7
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = hir_function(&checked, "main");
+    assert_eq!(
+        hir.body.result.as_ref().expect("expected result").ty,
+        HirType::U32
+    );
+}
+
+//= SEMANTICS.md#llg-sem-02-recovery-expressions
+//= type=test
+//# Recovery expressions MUST support `result_expr or(err) fallback_expr`, producing `T` from `Result<T, E>` when `fallback_expr` has type `T`.
+#[test]
+fn requirement_llg_sem_02_supports_result_recovery_expressions() {
+    let checked = analyze_ok(
+        r#"
+fn main() -> u32 {
+    1 + 2 or(err) 0
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = hir_function(&checked, "main");
+    assert_eq!(
+        hir.body.result.as_ref().expect("expected result").ty,
+        HirType::U32
+    );
+}
+
+//= SEMANTICS.md#llg-sem-02-recovery-expressions
+//= type=test
+//# In a result recovery expression, the error binding MUST be scoped only inside the fallback expression and MUST have the result error type.
+#[test]
+fn requirement_llg_sem_02_scopes_result_recovery_error_binding() {
+    let checked = analyze_ok(
+        r#"
+fn main() -> u32 {
+    let recovered = 1 / 0 or(err) {
+        let captured: ArithmeticError = err;
+        0
+    };
+    let wrapped: Result<u32, ArithmeticError> = err(arithmetic_overflow());
+    recovered
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let main = function(&checked, "main");
+    let wrapped = let_stmt(&main.body, 1);
+    let callee = call_callee(wrapped.value.as_ref().expect("expected constructor call"));
+    assert_resolves_to(
+        &checked,
+        callee,
+        BindingKind::HostBuiltin,
+        name_span(callee),
+        "outer err constructor",
+    );
+}
+
+//= SEMANTICS.md#llg-sem-03-checked-arithmetic
+//= type=test
+//# Ordinary `+`, `-`, `*`, `/`, and `%` operations on `u32` operands MUST return `Result<u32, ArithmeticError>`.
+#[test]
+fn requirement_llg_sem_03_makes_u32_arithmetic_return_result() {
+    let checked = analyze_ok(
+        r#"
+fn main(left: u32, right: u32) {
+    let sum = left + right;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = hir_function(&checked, "main");
+    assert_eq!(
+        hir_let_stmt(&hir.body, 0).binding.ty,
+        HirType::Result {
+            ok: Box::new(HirType::U32),
+            err: Box::new(HirType::ArithmeticError),
+        }
+    );
+}
+
+//= SEMANTICS.md#llg-sem-04-result-lifting
+//= type=test
+//# Arithmetic operators MUST lift over operands of the same numeric type when either operand is `Result<T, ArithmeticError>`.
+#[test]
+fn requirement_llg_sem_04_lifts_arithmetic_over_result_operands() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let left: Result<u32, ArithmeticError> = ok(40);
+    let lifted = left + 2;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SEMANTICS.md#llg-sem-04-result-lifting
+//= type=test
+//# Result-lifted arithmetic MUST produce `Result<T, ArithmeticError>` for the shared numeric type `T`.
+#[test]
+fn requirement_llg_sem_04_returns_result_for_lifted_arithmetic() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let left: Result<u32, ArithmeticError> = ok(40);
+    let lifted = left + 2;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = hir_function(&checked, "main");
+    assert_eq!(
+        hir_let_stmt(&hir.body, 1).binding.ty,
+        HirType::Result {
+            ok: Box::new(HirType::U32),
+            err: Box::new(HirType::ArithmeticError),
+        }
+    );
+}
+
+//= SEMANTICS.md#llg-sem-05-numeric-type-discipline
+//= type=test
+//# Numeric operators MUST NOT perform implicit numeric promotion.
+#[test]
+fn requirement_llg_sem_05_rejects_implicit_numeric_promotion() {
+    let checked = analyze_ok("fn main(flag: bool, value: u32) { flag + value; }");
+
+    assert!(checked.has_errors());
+    let main = function(&checked, "main");
+    assert_primary_diagnostic(
+        &checked,
+        "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
+        expr_stmt(&main.body, 0).span,
+    );
+}
+
+//= SEMANTICS.md#llg-sem-05-numeric-type-discipline
+//= type=test
+//# Numeric operators MUST require the same underlying numeric type after stripping any compatible `Result<T, ArithmeticError>` layer.
+#[test]
+fn requirement_llg_sem_05_requires_matching_underlying_numeric_types() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let left: Result<bool, ArithmeticError> = ok(true);
+    left + 1;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    let main = function(&checked, "main");
+    assert_primary_diagnostic(
+        &checked,
+        "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
+        expr_stmt(&main.body, 1).span,
+    );
+}
+
 //= HIR.md#llg-hir-01-pipeline-and-lowering
 //= type=test
 //# The front end MUST lower successfully checked programs from AST into typed HIR before generating proof IR or MIR.
@@ -1519,7 +1804,7 @@ fn main(param: u32) {
 fn requirement_llg_hir_03_records_mutability_and_types_directly_on_hir_nodes() {
     let checked = analyze_ok(
         r#"
-fn add_one(value: u32) -> u32 { value + 1 }
+fn add_one(value: u32) -> u32 { value + 1 or(err) 0 }
 
 fn main(flag: bool, input: u32) {
     let mut total = add_one(input);

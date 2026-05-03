@@ -274,8 +274,8 @@ fn main() {
 fn requirement_llg_cli_02_prints_check_proof_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
-fn main(total: u32, denom: u32) {
-    total / denom;
+fn main(values: [u32; 4], index: u32) {
+    values[index];
 }
 "#,
     );
@@ -285,32 +285,9 @@ fn main(total: u32, denom: u32) {
     let failure_stdout = String::from_utf8(failure.stdout).unwrap();
     let failure_stderr = String::from_utf8(failure.stderr).unwrap();
     assert!(failure_stdout.is_empty());
-    assert!(failure_stderr.contains("error: possible divide-by-zero is not proven safe"));
+    assert!(failure_stderr.contains("error: possible out-of-bounds indexing is not proven safe"));
     assert!(failure_stderr.contains(&broken.path.display().to_string()));
-    assert!(failure_stderr.contains("total / denom;"));
-}
-
-//= SPEC.md#llg-cli-02-cli-output-behavior
-//= type=test
-//# When arithmetic proof analysis fails during `langlog check`, the CLI MUST print diagnostics to stderr.
-#[test]
-fn requirement_llg_cli_02_prints_check_arithmetic_proof_failures_to_stderr() {
-    let broken = TempSource::new(
-        r#"
-fn main(total: u32, step: u32) {
-    total + step;
-}
-"#,
-    );
-    let failure = run_check(&broken.path);
-
-    assert!(!failure.status.success());
-    let failure_stdout = String::from_utf8(failure.stdout).unwrap();
-    let failure_stderr = String::from_utf8(failure.stderr).unwrap();
-    assert!(failure_stdout.is_empty());
-    assert!(failure_stderr.contains("error: possible arithmetic overflow is not proven safe"));
-    assert!(failure_stderr.contains(&broken.path.display().to_string()));
-    assert!(failure_stderr.contains("total + step;"));
+    assert!(failure_stderr.contains("values[index];"));
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
@@ -320,8 +297,8 @@ fn main(total: u32, step: u32) {
 fn requirement_llg_wasm_01_build_reports_proof_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
-fn main(total: u32, denom: u32) -> u32 {
-    total / denom
+fn main(values: [u32; 4], index: u32) -> u32 {
+    values[index]
 }
 "#,
     );
@@ -331,7 +308,7 @@ fn main(total: u32, denom: u32) -> u32 {
     assert!(String::from_utf8(failure.stdout).unwrap().is_empty());
     assert!(String::from_utf8(failure.stderr)
         .unwrap()
-        .contains("error: possible divide-by-zero is not proven safe"));
+        .contains("error: possible out-of-bounds indexing is not proven safe"));
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point

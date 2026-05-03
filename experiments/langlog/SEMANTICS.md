@@ -24,6 +24,11 @@ This document complements, but does not replace, the other traceable specs:
   divide-by-zero, and remainder-by-zero failures.
 - Builtin `Option` and `Result` types MUST use explicit type arguments without
   requiring user-defined enum or generic declarations.
+- Builtin constructors `some`, `none`, `ok`, and `err` MUST construct builtin
+  `Option` and `Result` values without requiring user-defined enum variants.
+- Builtin constructors `arithmetic_overflow`, `arithmetic_underflow`,
+  `divide_by_zero`, and `remainder_by_zero` MUST construct the corresponding
+  `ArithmeticError` values.
 
 ## LLG-SEM-02 Recovery Expressions
 

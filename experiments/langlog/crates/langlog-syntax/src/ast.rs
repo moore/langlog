@@ -206,6 +206,11 @@ pub enum ExprKind {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Recover {
+        expr: Box<Expr>,
+        error_binding: Option<Spanned<String>>,
+        fallback: Box<Expr>,
+    },
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,

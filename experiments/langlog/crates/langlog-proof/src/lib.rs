@@ -249,31 +249,13 @@ impl<'a> Checker<'a> {
             HirExprKind::Unary { expr, .. } => {
                 self.check_expr(expr, state);
             }
-            HirExprKind::Binary { op, left, right } => {
+            HirExprKind::Binary { left, right, .. } => {
                 self.check_expr(left, state);
                 self.check_expr(right, state);
-
-                match op {
-                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
-                        self.obligations += 1;
-                        if !arithmetic_is_proven_safe(*op, left, right, &state.stable_facts) {
-                            self.report_mutable_hint_warning_if_needed(expr.span, state, |facts| {
-                                arithmetic_is_proven_safe(*op, left, right, facts)
-                            });
-                            self.report_arithmetic_overflow(expr.span);
-                        }
-                    }
-                    BinaryOp::Div | BinaryOp::Rem => {
-                        self.obligations += 1;
-                        if !non_zero_is_proven(right, &state.stable_facts) {
-                            self.report_mutable_hint_warning_if_needed(expr.span, state, |facts| {
-                                non_zero_is_proven(right, facts)
-                            });
-                            self.report_divide_by_zero(right.span);
-                        }
-                    }
-                    _ => {}
-                }
+            }
+            HirExprKind::Recover { expr, fallback, .. } => {
+                self.check_expr(expr, state);
+                self.check_expr(fallback, state);
             }
             HirExprKind::Call { callee, args } => {
                 self.check_expr(callee, state);
@@ -342,6 +324,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            HirExprKind::Recover { .. } => RecordedControlFlow::default(),
             _ => RecordedControlFlow::default(),
         }
     }
@@ -384,21 +367,6 @@ impl<'a> Checker<'a> {
                 self.report_mutable_control_flow_hint(hint, obligation_span);
             }
         }
-    }
-
-    fn report_divide_by_zero(&mut self, span: Span) {
-        self.diagnostics.push(
-            Diagnostic::error("possible divide-by-zero is not proven safe")
-                .with_label(Label::primary(span, "prove this value is non-zero")),
-        );
-    }
-
-    fn report_arithmetic_overflow(&mut self, span: Span) {
-        self.diagnostics.push(
-            Diagnostic::error("possible arithmetic overflow is not proven safe").with_label(
-                Label::primary(span, "prove this operation stays within u32 bounds"),
-            ),
-        );
     }
 
     fn report_out_of_bounds_index(&mut self, span: Span) {
@@ -455,20 +423,6 @@ fn stable_and_mutable_facts(state: &FlowState, skip_hint: Option<usize>) -> Vec<
     facts
 }
 
-fn arithmetic_is_proven_safe(
-    op: BinaryOp,
-    left: &HirExpr,
-    right: &HirExpr,
-    facts: &[KnownFact],
-) -> bool {
-    match op {
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
-            proven_binary_u32_range(op, left, right, facts).is_some()
-        }
-        _ => true,
-    }
-}
-
 fn proven_binary_u32_range(
     op: BinaryOp,
     left: &HirExpr,
@@ -511,6 +465,7 @@ fn proven_u32_range(expr: &HirExpr, facts: &[KnownFact]) -> Option<(u64, u64)> {
         | HirExprKind::Tuple(_)
         | HirExprKind::Array(_)
         | HirExprKind::Block(_)
+        | HirExprKind::Recover { .. }
         | HirExprKind::Call { .. }
         | HirExprKind::Index { .. } => None,
     }
@@ -563,6 +518,7 @@ fn eval_const_u64(expr: &HirExpr) -> Option<u64> {
         | HirExprKind::Tuple(_)
         | HirExprKind::Array(_)
         | HirExprKind::Block(_)
+        | HirExprKind::Recover { .. }
         | HirExprKind::Call { .. }
         | HirExprKind::Index { .. } => None,
         HirExprKind::Binary { op, left, right } => {
@@ -578,27 +534,6 @@ fn eval_const_u64(expr: &HirExpr) -> Option<u64> {
             }
         }
     }
-}
-
-fn non_zero_is_proven(expr: &HirExpr, facts: &[KnownFact]) -> bool {
-    if let Some(value) = eval_const_u64(expr) {
-        return value != 0;
-    }
-
-    let Some(subject) = binding_id(expr) else {
-        return false;
-    };
-
-    facts.iter().rev().any(|fact| {
-        fact.subject == subject
-            && match fact.op {
-                ObserveOp::Eq => fact.value != 0,
-                ObserveOp::NotEq => fact.value == 0,
-                ObserveOp::Gt => true,
-                ObserveOp::GtEq => fact.value > 0,
-                ObserveOp::Lt | ObserveOp::LtEq => false,
-            }
-    })
 }
 
 fn index_is_proven_in_bounds(target: &HirExpr, index: &HirExpr, facts: &[KnownFact]) -> bool {
@@ -739,6 +674,17 @@ fn collect_expr_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>, expr
         HirExprKind::Binary { left, right, .. } => {
             collect_expr_bindings(bindings, left);
             collect_expr_bindings(bindings, right);
+        }
+        HirExprKind::Recover {
+            expr,
+            error_binding,
+            fallback,
+        } => {
+            collect_expr_bindings(bindings, expr);
+            if let Some(binding) = error_binding {
+                collect_binding(bindings, binding);
+            }
+            collect_expr_bindings(bindings, fallback);
         }
         HirExprKind::Call { callee, args } => {
             collect_expr_bindings(bindings, callee);

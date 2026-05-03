@@ -153,12 +153,12 @@ fn requirement_llg_lex_02_recognizes_boolean_literals() {
 
 //= SPEC.md#llg-lex-03-reserved-keywords
 //= type=test
-//# The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `true`, and `false`.
+//# The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `or`, `true`, and `false`.
 #[test]
 fn requirement_llg_lex_03_reserves_keywords() {
     let lexed = lex(
         "requirement.llg",
-        "fn let mut if else match for in return observe true false",
+        "fn let mut if else match for in return observe or true false",
     );
     let tags: Vec<_> = lexed.tokens.iter().map(|token| token.tag()).collect();
 
@@ -175,6 +175,7 @@ fn requirement_llg_lex_03_reserves_keywords() {
             TokenTag::In,
             TokenTag::Return,
             TokenTag::Observe,
+            TokenTag::Or,
             TokenTag::True,
             TokenTag::False,
             TokenTag::Eof,
@@ -796,6 +797,46 @@ fn requirement_llg_syn_03_logical_or_binds_tighter_than_range() {
             ));
         }
         other => panic!("expected range expression, got {other:?}"),
+    }
+}
+
+//= SPEC.md#llg-syn-03-expressions-and-precedence
+//= type=test
+//# Recovery expressions MUST parse `expr or fallback` and `expr or(err) fallback`, and recovery MUST bind looser than range construction.
+#[test]
+fn requirement_llg_syn_03_parses_recovery_expressions_at_lowest_precedence() {
+    let option_recovery = parse_trailing_expr("1 .. 2 or 3");
+    match option_recovery.kind {
+        ExprKind::Recover {
+            expr,
+            error_binding,
+            fallback,
+        } => {
+            assert!(error_binding.is_none());
+            assert!(matches!(
+                expr.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Range,
+                    ..
+                }
+            ));
+            assert!(matches!(fallback.kind, ExprKind::Int(3)));
+        }
+        other => panic!("expected recovery expression, got {other:?}"),
+    }
+
+    let result_recovery = parse_trailing_expr("1 + 2 or(err) 0");
+    match result_recovery.kind {
+        ExprKind::Recover {
+            error_binding,
+            fallback,
+            ..
+        } => {
+            let binding = error_binding.expect("expected recovery error binding");
+            assert_eq!(binding.value, "err");
+            assert!(matches!(fallback.kind, ExprKind::Int(0)));
+        }
+        other => panic!("expected recovery expression, got {other:?}"),
     }
 }
 

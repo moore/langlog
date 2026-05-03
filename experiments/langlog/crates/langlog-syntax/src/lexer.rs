@@ -238,6 +238,7 @@ impl Lexer {
             "in" => TokenKind::In,
             "return" => TokenKind::Return,
             "observe" => TokenKind::Observe,
+            "or" => TokenKind::Or,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "_" => TokenKind::Underscore,

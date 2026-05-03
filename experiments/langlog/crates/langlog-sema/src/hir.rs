@@ -197,6 +197,11 @@ pub enum HirExprKind {
         left: Box<HirExpr>,
         right: Box<HirExpr>,
     },
+    Recover {
+        expr: Box<HirExpr>,
+        error_binding: Option<HirBinding>,
+        fallback: Box<HirExpr>,
+    },
     Call {
         callee: Box<HirExpr>,
         args: Vec<HirExpr>,
@@ -212,6 +217,7 @@ pub enum HirType {
     Unit,
     Bool,
     U32,
+    ArithmeticError,
     Tuple(Vec<HirType>),
     Array {
         element: Box<HirType>,
@@ -489,6 +495,21 @@ impl<'a> HirLowerer<'a> {
                 ty,
                 span: expr.span,
             },
+            ExprKind::Recover {
+                expr: target,
+                error_binding,
+                fallback,
+            } => HirExpr {
+                kind: HirExprKind::Recover {
+                    expr: Box::new(self.lower_expr(target)),
+                    error_binding: error_binding.as_ref().map(|binding| {
+                        self.lower_named_binding(binding, BindingKind::Local, false)
+                    }),
+                    fallback: Box::new(self.lower_expr(fallback)),
+                },
+                ty,
+                span: expr.span,
+            },
             ExprKind::Call { callee, args } => HirExpr {
                 kind: HirExprKind::Call {
                     callee: Box::new(self.lower_expr(callee)),
@@ -563,6 +584,7 @@ fn lower_semantic_type(ty: &SemanticType) -> Option<HirType> {
         SemanticType::Unit => HirType::Unit,
         SemanticType::Bool => HirType::Bool,
         SemanticType::U32 => HirType::U32,
+        SemanticType::ArithmeticError => HirType::ArithmeticError,
         SemanticType::Tuple(elements) => HirType::Tuple(
             elements
                 .iter()

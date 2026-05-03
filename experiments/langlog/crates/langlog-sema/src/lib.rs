@@ -4,7 +4,7 @@ use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MatchBody, ObserveOp,
     Pattern, PatternKind, Stmt, Type, TypeKind, UnaryOp,
 };
-use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span};
+use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
 mod hir;
 
@@ -32,14 +32,30 @@ pub enum HostBuiltin {
     PrintU32,
     PrintBool,
     PrintNewline,
+    Some,
+    None,
+    Ok,
+    Err,
+    ArithmeticOverflow,
+    ArithmeticUnderflow,
+    DivideByZero,
+    RemainderByZero,
 }
 
 impl HostBuiltin {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 12] = [
         Self::ReadU32,
         Self::PrintU32,
         Self::PrintBool,
         Self::PrintNewline,
+        Self::Some,
+        Self::None,
+        Self::Ok,
+        Self::Err,
+        Self::ArithmeticOverflow,
+        Self::ArithmeticUnderflow,
+        Self::DivideByZero,
+        Self::RemainderByZero,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -48,7 +64,26 @@ impl HostBuiltin {
             Self::PrintU32 => "print_u32",
             Self::PrintBool => "print_bool",
             Self::PrintNewline => "print_newline",
+            Self::Some => "some",
+            Self::None => "none",
+            Self::Ok => "ok",
+            Self::Err => "err",
+            Self::ArithmeticOverflow => "arithmetic_overflow",
+            Self::ArithmeticUnderflow => "arithmetic_underflow",
+            Self::DivideByZero => "divide_by_zero",
+            Self::RemainderByZero => "remainder_by_zero",
         }
+    }
+
+    pub const fn is_host_import(self) -> bool {
+        matches!(
+            self,
+            Self::ReadU32 | Self::PrintU32 | Self::PrintBool | Self::PrintNewline
+        )
+    }
+
+    const fn has_generic_signature(self) -> bool {
+        matches!(self, Self::Some | Self::None | Self::Ok | Self::Err)
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -141,6 +176,7 @@ enum SemanticType {
     Unit,
     Bool,
     U32,
+    ArithmeticError,
     Tuple(Vec<SemanticType>),
     Array {
         element: Box<SemanticType>,
@@ -178,6 +214,7 @@ impl SemanticType {
             Self::Unit => "()".to_owned(),
             Self::Bool => "bool".to_owned(),
             Self::U32 => "u32".to_owned(),
+            Self::ArithmeticError => "ArithmeticError".to_owned(),
             Self::Tuple(elements) => format!(
                 "({})",
                 elements
@@ -215,13 +252,11 @@ impl SemanticType {
             Self::Unit
             | Self::Bool
             | Self::U32
+            | Self::ArithmeticError
             | Self::Named(_)
             | Self::Unknown => matches!(self, Self::Unknown),
             Self::Function(signature) => {
-                signature
-                    .params
-                    .iter()
-                    .any(SemanticType::contains_unknown)
+                signature.params.iter().any(SemanticType::contains_unknown)
                     || signature.return_type.contains_unknown()
             }
             Self::Tuple(elements) => elements.iter().any(SemanticType::contains_unknown),
@@ -466,6 +501,28 @@ impl<'a> Analyzer<'a> {
                 self.analyze_expr(right, scopes, function);
                 None
             }
+            ExprKind::Recover {
+                expr,
+                error_binding,
+                fallback,
+            } => {
+                self.analyze_expr(expr, scopes, function);
+                scopes.push();
+                if let Some(binding) = error_binding {
+                    scopes.insert(
+                        binding.value.clone(),
+                        Binding {
+                            kind: BindingKind::Local,
+                            span: binding.span,
+                            loop_bound: false,
+                            mutable: false,
+                        },
+                    );
+                }
+                self.analyze_expr(fallback, scopes, function);
+                scopes.pop();
+                None
+            }
             ExprKind::Call { callee, args } => {
                 let callee_binding = self.analyze_expr(callee, scopes, function);
                 if matches!(
@@ -672,6 +729,7 @@ impl<'a> Analyzer<'a> {
             | ExprKind::Call { .. }
             | ExprKind::Index { .. } => Some(false),
             ExprKind::Binary { .. } => Some(false),
+            ExprKind::Recover { .. } => Some(false),
         }
     }
 
@@ -745,6 +803,10 @@ impl<'a> Analyzer<'a> {
             ExprKind::Binary { left, right, .. } => {
                 self.check_observe_expr_stability(left, scopes);
                 self.check_observe_expr_stability(right, scopes);
+            }
+            ExprKind::Recover { expr, fallback, .. } => {
+                self.check_observe_expr_stability(expr, scopes);
+                self.check_observe_expr_stability(fallback, scopes);
             }
             ExprKind::Call { callee, args } => {
                 self.check_observe_expr_stability(callee, scopes);
@@ -833,7 +895,7 @@ impl<'a> TypeChecker<'a> {
         let result = block
             .trailing_expr
             .as_deref()
-            .map(|expr| self.check_expr(expr, scopes))
+            .map(|expr| self.check_expr_with_expected(expr, scopes, Some(expected_return)))
             .unwrap_or(SemanticType::Unit);
         scopes.pop();
         result
@@ -847,15 +909,15 @@ impl<'a> TypeChecker<'a> {
     ) {
         match statement {
             Stmt::Let(stmt) => {
-                let value_type = stmt
-                    .value
-                    .as_ref()
-                    .map(|expr| self.check_expr(expr, scopes));
+                let annotation_type = stmt.ty.as_ref().map(lower_type);
+                let value_type = stmt.value.as_ref().map(|expr| {
+                    self.check_expr_with_expected(expr, scopes, annotation_type.as_ref())
+                });
                 if stmt.ty.is_none() && stmt.value.is_none() {
                     self.report_let_requires_type_or_initializer(stmt.name.span);
                 }
-                if let (Some(annotation), Some(value_type)) = (&stmt.ty, &value_type) {
-                    self.require_same_type(stmt.span, &lower_type(annotation), value_type);
+                if let (Some(annotation_type), Some(value_type)) = (&annotation_type, &value_type) {
+                    self.require_same_type(stmt.span, annotation_type, value_type);
                 }
                 let binding_type = stmt
                     .ty
@@ -869,7 +931,7 @@ impl<'a> TypeChecker<'a> {
             }
             Stmt::Assign(stmt) => {
                 let target = self.check_expr(&stmt.target, scopes);
-                let value = self.check_expr(&stmt.value, scopes);
+                let value = self.check_expr_with_expected(&stmt.value, scopes, Some(&target));
                 self.require_same_type(stmt.value.span, &target, &value);
             }
             Stmt::Expr(stmt) => {
@@ -914,7 +976,9 @@ impl<'a> TypeChecker<'a> {
                 let value_type = stmt
                     .value
                     .as_ref()
-                    .map(|value| self.check_expr(value, scopes))
+                    .map(|value| {
+                        self.check_expr_with_expected(value, scopes, Some(expected_return))
+                    })
                     .unwrap_or(SemanticType::Unit);
                 self.require_same_type(stmt.span, expected_return, &value_type);
             }
@@ -959,6 +1023,15 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_expr(&mut self, expr: &Expr, scopes: &mut TypeScopeStack) -> SemanticType {
+        self.check_expr_with_expected(expr, scopes, None)
+    }
+
+    fn check_expr_with_expected(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut TypeScopeStack,
+        expected: Option<&SemanticType>,
+    ) -> SemanticType {
         let ty = match &expr.kind {
             ExprKind::Int(_) => SemanticType::U32,
             ExprKind::Bool(_) => SemanticType::Bool,
@@ -997,13 +1070,26 @@ impl<'a> TypeChecker<'a> {
                 let right_type = self.check_expr(right, scopes);
                 self.check_binary_expr(expr.span, *op, &left_type, &right_type)
             }
+            ExprKind::Recover {
+                expr: target,
+                error_binding,
+                fallback,
+            } => self.check_recovery_expr(
+                expr.span,
+                target,
+                error_binding.as_ref(),
+                fallback,
+                scopes,
+            ),
             ExprKind::Call { callee, args } => {
+                if let Some(builtin) = callee_builtin(callee) {
+                    let ty = self.check_builtin_call_expr(
+                        expr.span, callee, builtin, args, scopes, expected,
+                    );
+                    return self.facts.record_expr(expr.span, ty);
+                }
                 let callee_type = self.check_expr(callee, scopes);
-                let arg_types: Vec<_> = args
-                    .iter()
-                    .map(|arg| self.check_expr(arg, scopes))
-                    .collect();
-                self.check_call_expr(callee.span, &callee_type, args, &arg_types)
+                self.check_call_expr(callee.span, &callee_type, args, scopes)
             }
             ExprKind::Index { target, index } => {
                 let target_type = self.check_expr(target, scopes);
@@ -1071,9 +1157,245 @@ impl<'a> TypeChecker<'a> {
                 SemanticType::Bool
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                self.require_u32(span, left, "arithmetic operators");
-                self.require_u32(span, right, "arithmetic operators");
-                SemanticType::U32
+                let left_inner = self.check_arithmetic_operand(span, left);
+                let right_inner = self.check_arithmetic_operand(span, right);
+                if let (Some(left_inner), Some(right_inner)) = (&left_inner, &right_inner) {
+                    self.require_same_type(span, left_inner, right_inner);
+                }
+                SemanticType::Result {
+                    ok: Box::new(SemanticType::U32),
+                    err: Box::new(SemanticType::ArithmeticError),
+                }
+            }
+        }
+    }
+
+    fn check_arithmetic_operand(&mut self, span: Span, ty: &SemanticType) -> Option<SemanticType> {
+        match ty {
+            SemanticType::Unknown => None,
+            SemanticType::U32 => Some(SemanticType::U32),
+            SemanticType::Result { ok, err }
+                if **ok == SemanticType::U32 && **err == SemanticType::ArithmeticError =>
+            {
+                Some(SemanticType::U32)
+            }
+            _ => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
+                    )
+                    .with_label(Label::primary(
+                        span,
+                        "expected `u32` or `Result<u32, ArithmeticError>` here",
+                    )),
+                );
+                None
+            }
+        }
+    }
+
+    fn check_builtin_call_expr(
+        &mut self,
+        call_span: Span,
+        callee: &Expr,
+        builtin: HostBuiltin,
+        args: &[Expr],
+        scopes: &mut TypeScopeStack,
+        expected: Option<&SemanticType>,
+    ) -> SemanticType {
+        match builtin {
+            HostBuiltin::Some => {
+                if !self.require_builtin_arity(callee.span, builtin, 1, args.len()) {
+                    return SemanticType::Option(Box::new(SemanticType::Unknown));
+                }
+                let expected_inner = match expected {
+                    Some(SemanticType::Option(inner)) => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let value = self.check_expr_with_expected(&args[0], scopes, expected_inner);
+                let return_type = SemanticType::Option(Box::new(value.clone()));
+                self.record_builtin_callee_type(callee.span, vec![value], return_type.clone());
+                return_type
+            }
+            HostBuiltin::None => {
+                if !self.require_builtin_arity(callee.span, builtin, 0, args.len()) {
+                    return SemanticType::Option(Box::new(SemanticType::Unknown));
+                }
+                let return_type = match expected {
+                    Some(SemanticType::Option(inner)) => {
+                        SemanticType::Option(Box::new((**inner).clone()))
+                    }
+                    _ => {
+                        self.report_cannot_infer_builtin(call_span, "none");
+                        SemanticType::Option(Box::new(SemanticType::Unknown))
+                    }
+                };
+                self.record_builtin_callee_type(callee.span, Vec::new(), return_type.clone());
+                return_type
+            }
+            HostBuiltin::Ok => {
+                if !self.require_builtin_arity(callee.span, builtin, 1, args.len()) {
+                    return arithmetic_result(SemanticType::Unknown);
+                }
+                let expected_ok = match expected {
+                    Some(SemanticType::Result { ok, err })
+                        if **err == SemanticType::ArithmeticError =>
+                    {
+                        Some(ok.as_ref())
+                    }
+                    _ => None,
+                };
+                let value = self.check_expr_with_expected(&args[0], scopes, expected_ok);
+                let return_type = arithmetic_result(value.clone());
+                self.record_builtin_callee_type(callee.span, vec![value], return_type.clone());
+                return_type
+            }
+            HostBuiltin::Err => {
+                if !self.require_builtin_arity(callee.span, builtin, 1, args.len()) {
+                    return arithmetic_result(SemanticType::Unknown);
+                }
+                let err_type = self.check_expr_with_expected(
+                    &args[0],
+                    scopes,
+                    Some(&SemanticType::ArithmeticError),
+                );
+                self.require_same_type(args[0].span, &SemanticType::ArithmeticError, &err_type);
+                let return_type = match expected {
+                    Some(SemanticType::Result { ok, err })
+                        if **err == SemanticType::ArithmeticError =>
+                    {
+                        SemanticType::Result {
+                            ok: Box::new((**ok).clone()),
+                            err: Box::new(SemanticType::ArithmeticError),
+                        }
+                    }
+                    _ => {
+                        self.report_cannot_infer_builtin(call_span, "err");
+                        arithmetic_result(SemanticType::Unknown)
+                    }
+                };
+                self.record_builtin_callee_type(
+                    callee.span,
+                    vec![SemanticType::ArithmeticError],
+                    return_type.clone(),
+                );
+                return_type
+            }
+            HostBuiltin::ArithmeticOverflow
+            | HostBuiltin::ArithmeticUnderflow
+            | HostBuiltin::DivideByZero
+            | HostBuiltin::RemainderByZero => {
+                if !self.require_builtin_arity(callee.span, builtin, 0, args.len()) {
+                    return SemanticType::ArithmeticError;
+                }
+                let return_type = SemanticType::ArithmeticError;
+                self.record_builtin_callee_type(callee.span, Vec::new(), return_type.clone());
+                return_type
+            }
+            HostBuiltin::ReadU32
+            | HostBuiltin::PrintU32
+            | HostBuiltin::PrintBool
+            | HostBuiltin::PrintNewline => {
+                let signature = host_builtin_signature(builtin);
+                self.record_builtin_callee_type(
+                    callee.span,
+                    signature.params.clone(),
+                    (*signature.return_type).clone(),
+                );
+                self.check_call_expr(
+                    callee.span,
+                    &SemanticType::Function(signature),
+                    args,
+                    scopes,
+                )
+            }
+        }
+    }
+
+    fn record_builtin_callee_type(
+        &mut self,
+        span: Span,
+        params: Vec<SemanticType>,
+        return_type: SemanticType,
+    ) {
+        self.facts.record_expr(
+            span,
+            SemanticType::Function(FunctionType {
+                params,
+                return_type: Box::new(return_type),
+            }),
+        );
+    }
+
+    fn require_builtin_arity(
+        &mut self,
+        callee_span: Span,
+        builtin: HostBuiltin,
+        expected: usize,
+        found: usize,
+    ) -> bool {
+        if expected == found {
+            return true;
+        }
+        self.report_call_arity_mismatch(callee_span, expected, found);
+        if builtin.has_generic_signature() {
+            return false;
+        }
+        false
+    }
+
+    fn check_recovery_expr(
+        &mut self,
+        span: Span,
+        target: &Expr,
+        error_binding: Option<&Spanned<String>>,
+        fallback: &Expr,
+        scopes: &mut TypeScopeStack,
+    ) -> SemanticType {
+        let target_type = self.check_expr(target, scopes);
+        match (error_binding, target_type) {
+            (None, SemanticType::Option(inner)) => {
+                let fallback_type =
+                    self.check_expr_with_expected(fallback, scopes, Some(inner.as_ref()));
+                self.require_same_type(fallback.span, inner.as_ref(), &fallback_type);
+                *inner
+            }
+            (Some(binding), SemanticType::Result { ok, err }) => {
+                scopes.push();
+                self.facts.record_binding(binding.span, (*err).clone());
+                scopes.insert(binding.value.clone(), (*err).clone());
+                let fallback_type =
+                    self.check_expr_with_expected(fallback, scopes, Some(ok.as_ref()));
+                scopes.pop();
+                self.require_same_type(fallback.span, ok.as_ref(), &fallback_type);
+                *ok
+            }
+            (None, SemanticType::Unknown) | (Some(_), SemanticType::Unknown) => {
+                self.check_expr(fallback, scopes);
+                SemanticType::Unknown
+            }
+            (None, found) => {
+                self.report_type_mismatch(
+                    span,
+                    &SemanticType::Option(Box::new(SemanticType::Unknown)),
+                    &found,
+                );
+                self.check_expr(fallback, scopes);
+                SemanticType::Unknown
+            }
+            (Some(binding), found) => {
+                self.facts
+                    .record_binding(binding.span, SemanticType::Unknown);
+                self.report_type_mismatch(
+                    span,
+                    &SemanticType::Result {
+                        ok: Box::new(SemanticType::Unknown),
+                        err: Box::new(SemanticType::Unknown),
+                    },
+                    &found,
+                );
+                self.check_expr(fallback, scopes);
+                SemanticType::Unknown
             }
         }
     }
@@ -1083,7 +1405,7 @@ impl<'a> TypeChecker<'a> {
         callee_span: Span,
         callee_type: &SemanticType,
         args: &[Expr],
-        arg_types: &[SemanticType],
+        scopes: &mut TypeScopeStack,
     ) -> SemanticType {
         let SemanticType::Function(signature) = callee_type else {
             if !matches!(callee_type, SemanticType::Unknown) {
@@ -1097,11 +1419,9 @@ impl<'a> TypeChecker<'a> {
             return (*signature.return_type).clone();
         }
 
-        for (arg, (expected, found)) in args
-            .iter()
-            .zip(signature.params.iter().zip(arg_types.iter()))
-        {
-            self.require_same_type(arg.span, expected, found);
+        for (arg, expected) in args.iter().zip(signature.params.iter()) {
+            let found = self.check_expr_with_expected(arg, scopes, Some(expected));
+            self.require_same_type(arg.span, expected, &found);
         }
 
         (*signature.return_type).clone()
@@ -1228,6 +1548,13 @@ impl<'a> TypeChecker<'a> {
             ),
         );
     }
+
+    fn report_cannot_infer_builtin(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("cannot infer type for builtin `{name}`"))
+                .with_label(Label::primary(span, "add a type annotation here")),
+        );
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1267,6 +1594,21 @@ fn name_span(expr: &Expr) -> Span {
     }
 }
 
+fn callee_builtin(expr: &Expr) -> Option<HostBuiltin> {
+    match &expr.kind {
+        ExprKind::Name(name) => HostBuiltin::from_name(name.value.as_str()),
+        ExprKind::Grouped(expr) => callee_builtin(expr),
+        _ => None,
+    }
+}
+
+fn arithmetic_result(ok: SemanticType) -> SemanticType {
+    SemanticType::Result {
+        ok: Box::new(ok),
+        err: Box::new(SemanticType::ArithmeticError),
+    }
+}
+
 fn function_signature(function: &Function) -> FunctionType {
     FunctionType {
         params: function
@@ -1302,6 +1644,29 @@ fn host_builtin_signature(builtin: HostBuiltin) -> FunctionType {
             params: Vec::new(),
             return_type: Box::new(SemanticType::Unit),
         },
+        HostBuiltin::Some => FunctionType {
+            params: vec![SemanticType::Unknown],
+            return_type: Box::new(SemanticType::Option(Box::new(SemanticType::Unknown))),
+        },
+        HostBuiltin::None => FunctionType {
+            params: Vec::new(),
+            return_type: Box::new(SemanticType::Option(Box::new(SemanticType::Unknown))),
+        },
+        HostBuiltin::Ok => FunctionType {
+            params: vec![SemanticType::Unknown],
+            return_type: Box::new(arithmetic_result(SemanticType::Unknown)),
+        },
+        HostBuiltin::Err => FunctionType {
+            params: vec![SemanticType::ArithmeticError],
+            return_type: Box::new(arithmetic_result(SemanticType::Unknown)),
+        },
+        HostBuiltin::ArithmeticOverflow
+        | HostBuiltin::ArithmeticUnderflow
+        | HostBuiltin::DivideByZero
+        | HostBuiltin::RemainderByZero => FunctionType {
+            params: Vec::new(),
+            return_type: Box::new(SemanticType::ArithmeticError),
+        },
     }
 }
 
@@ -1311,6 +1676,7 @@ fn lower_type(ty: &Type) -> SemanticType {
         TypeKind::Named(name) => match name.value.as_str() {
             "u32" => SemanticType::U32,
             "bool" => SemanticType::Bool,
+            "ArithmeticError" => SemanticType::ArithmeticError,
             _ => SemanticType::Named(name.value.clone()),
         },
         TypeKind::Tuple(elements) => SemanticType::Tuple(elements.iter().map(lower_type).collect()),
