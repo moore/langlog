@@ -53,7 +53,7 @@ See also:
 Reserved keywords in the current language:
 
 `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`,
-`true`, `false`
+`or`, `true`, `false`
 
 ## Items
 
@@ -210,8 +210,11 @@ Rules:
 - Comparisons over `mut` bindings are retained only for diagnostics: they can
   trigger warnings when an obligation would otherwise rely on them, but they do
   not discharge proofs.
-- The proof phase currently rejects arithmetic overflow, division or remainder
-  by zero, and indexing expressions that are not proven safe.
+- Ordinary arithmetic returns `Result<u32, ArithmeticError>`, so overflow,
+  underflow, division-by-zero, and remainder-by-zero are explicit checked
+  results rather than hidden panics.
+- The proof phase currently rejects indexing expressions that are not proven
+  safe and map indexing whose key is not proven present.
 
 ## Patterns
 
@@ -359,12 +362,13 @@ The current semantic checker already enforces these rules:
 - tuple, `Option`, `Result`, `Set`, and `Map` types participate in those same
   compatibility checks.
 - `if` conditions and logical operators must use `bool`.
-- arithmetic operators, ordering comparisons, and range bounds must use `u32`.
+- arithmetic operators must use `u32` or `Result<u32, ArithmeticError>`, while
+  ordering comparisons and range bounds must use `u32`.
 - phase 1 rejects bindings and literals whose types would remain unknown after
   checking, including `let` bindings with neither annotation nor initializer
   and empty array literals.
-- array literals must be homogeneous, and indexing requires an array target
-  plus a `u32` index.
+- array literals must be homogeneous, and indexing requires either an array
+  target plus a `u32` index or a `Map<K, V, N>` target plus a `K` key.
 
 ## Wasm V1 Backend
 

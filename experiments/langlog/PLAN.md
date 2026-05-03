@@ -8,10 +8,10 @@ allocation.
 
 ## Current Status
 
-- Current phase: `M2 semantic typing plus early proof checks`
-- Last completed milestone: `M1 Lexer and parser to AST`
-- Next concrete task: Lower HIR into Proof IR and move proof discharge onto
-  that representation before relation work continues.
+- Current phase: `M3 Proof IR plus checked arithmetic`
+- Last completed milestone: `M2 HIR plus semantic checks`
+- Next concrete task: Decide whether declared collection-relation syntax belongs
+  in M4 before broader relation work continues.
 - Current blockers: None. LLVM tooling is intentionally deferred until after
   executable MIR semantics exist.
 - Implemented semantic baseline: name resolution, recursion rejection, bounded
@@ -31,8 +31,8 @@ allocation.
   - `HIR.md` defines AST-to-HIR elaboration plus HIR invariants.
   - `PROOF_IR.md` defines HIR-to-Proof-IR lowering plus proof-facing
     invariants.
-  - A future `SEMANTICS.md` should define formal static semantics over HIR and
-    Proof IR and dynamic semantics over MIR.
+  - `SEMANTICS.md` defines the current checked-result semantics; future MIR
+    work should extend it with dynamic semantics.
 - Formatting defaults: `rustfmt` and `rumdl` are both pinned to a 100-column
   line length so requirement text stays stable across Rust and Markdown tooling.
 
@@ -64,9 +64,9 @@ into AST and report parse errors with precise spans.
 
 ### M2 HIR plus semantic checks
 
-- [ ] Draft `HIR.md` and define the initial AST-to-HIR elaboration boundary.
-- [ ] Lower AST into a typed HIR.
-- [ ] Re-home binding identity, mutability, and type attachment into HIR
+- [x] Draft `HIR.md` and define the initial AST-to-HIR elaboration boundary.
+- [x] Lower AST into a typed HIR.
+- [x] Re-home binding identity, mutability, and type attachment into HIR
   construction so later phases stop depending on parser AST plus semantic side
   tables.
 - [x] Implement name resolution and scope handling.
@@ -81,7 +81,7 @@ rejected, and unbounded loop forms are rejected.
 ### M3 Proof engine for obligations and observations
 
 - [x] Draft `PROOF_IR.md` and define the initial HIR-to-Proof-IR boundary.
-- [ ] Lower HIR into a control-flow-based Proof IR.
+- [x] Lower HIR into a control-flow-based Proof IR.
 - [x] Represent obligations for divide/mod by zero and out-of-bounds indexing.
 - [x] Add overflow obligations.
 - [x] Infer facts from comparison-based control flow.
@@ -94,8 +94,8 @@ inferred or explicit facts.
 ### M4 Minimal relation enforcement on collections
 
 - [ ] Add syntax and HIR support for declared collection relations.
-- [ ] Enforce one initial relation form: `Set<K, N>` membership implies presence
-  in a `Map<K, V, M>`.
+- [x] Enforce one initial implicit relation form: iterating `Set<K, N>` implies
+  key presence in a `Map<K, V, M>` for the loop binding.
 - [ ] Create proof obligations for constrained collection updates.
 - [ ] Report relation violations with source-linked diagnostics.
 

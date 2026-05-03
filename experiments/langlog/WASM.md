@@ -10,7 +10,7 @@ This document complements, but does not replace, the main language spec:
 
 - [SPEC.md](./SPEC.md) defines the user-facing language and CLI front end.
 - [HIR.md](./HIR.md) defines the semantic IR consumed by later compiler phases.
-- [PROOF_IR.md](./PROOF_IR.md) defines the planned proof-specific IR boundary.
+- [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific IR boundary.
 
 ## LLG-WASM-01 Build Gate And Entry Point
 

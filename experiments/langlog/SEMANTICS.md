@@ -11,7 +11,7 @@ This document complements, but does not replace, the other traceable specs:
 - [SPEC.md](./SPEC.md) defines surface syntax, diagnostics, and front-end
   behavior.
 - [HIR.md](./HIR.md) defines compiler-facing semantic IR requirements.
-- [PROOF_IR.md](./PROOF_IR.md) defines the planned proof-specific IR boundary.
+- [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific IR boundary.
 - [WASM.md](./WASM.md) defines backend and host-ABI requirements.
 - [INTEGER_SAFETY.md](./INTEGER_SAFETY.md) gives non-normative rationale for
   the integer safety model.

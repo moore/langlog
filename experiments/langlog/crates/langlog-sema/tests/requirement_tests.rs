@@ -1475,11 +1475,17 @@ fn main() {
     let success: Result<u32, ArithmeticError> = ok(2);
     let nested_result: Result<Option<u32>, ArithmeticError> = ok(none());
     let failure: Result<u32, ArithmeticError> = err(arithmetic_overflow());
+    let bool_error_success: Result<u32, bool> = ok(3);
+    let bool_error_failure: Result<u32, bool> = err(false);
+    let nested_bool_error: Result<Option<u32>, bool> = ok(none());
+    let nested_bool_error_copy: Result<Option<u32>, bool> = ok(some(1));
     let recovered: Option<u32> = nested_result or(err) some(0);
     present == absent;
     present == grouped;
     nested_option == some(recovered);
     success == failure;
+    bool_error_success == bool_error_failure;
+    nested_bool_error == nested_bool_error_copy;
 }
 "#,
     );
@@ -1490,9 +1496,10 @@ fn main() {
         r#"
 fn main() {
     let unknown_option = none();
+    let unknown_ok = ok(1);
     let unknown_result = err(arithmetic_overflow());
     let wrong_error: Result<u32, bool> = err(arithmetic_overflow());
-    let wrong_ok: Result<Option<u32>, bool> = ok(none());
+    let wrong_ok: Result<Option<u32>, bool> = ok(true);
     some();
     none(1);
     ok();
@@ -1507,16 +1514,29 @@ fn main() {
             .iter()
             .filter(|diagnostic| diagnostic.message == "cannot infer type for builtin `none`")
             .count()
-            >= 2
+            >= 1
     );
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message == "cannot infer type for builtin `ok`"));
     assert!(
         invalid
             .diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.message == "cannot infer type for builtin `err`")
             .count()
-            >= 2
+            >= 1
     );
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message
+            == "type mismatch: expected bool, found ArithmeticError"));
+    assert!(invalid
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message == "type mismatch: expected Option<u32>, found bool"));
     assert!(invalid
         .diagnostics
         .iter()

@@ -1224,50 +1224,60 @@ impl<'a> TypeChecker<'a> {
             }
             HostBuiltin::Ok => {
                 if !self.require_builtin_arity(callee.span, builtin, 1, args.len()) {
-                    return arithmetic_result(SemanticType::Unknown);
+                    return SemanticType::Result {
+                        ok: Box::new(SemanticType::Unknown),
+                        err: Box::new(SemanticType::Unknown),
+                    };
                 }
-                let expected_ok = match expected {
-                    Some(SemanticType::Result { ok, err })
-                        if **err == SemanticType::ArithmeticError =>
-                    {
-                        Some(ok.as_ref())
+                let (expected_ok, result_err) = match expected {
+                    Some(SemanticType::Result { ok, err }) => {
+                        (Some(ok.as_ref()), Some((**err).clone()))
                     }
-                    _ => None,
+                    _ => (None, None),
                 };
                 let value = self.check_expr_with_expected(&args[0], scopes, expected_ok);
-                let return_type = arithmetic_result(value.clone());
+                if let Some(expected_ok) = expected_ok {
+                    self.require_same_type(args[0].span, expected_ok, &value);
+                }
+                let result_err = match result_err {
+                    Some(err) => err,
+                    None => {
+                        self.report_cannot_infer_builtin(call_span, "ok");
+                        SemanticType::Unknown
+                    }
+                };
+                let return_type = SemanticType::Result {
+                    ok: Box::new(value.clone()),
+                    err: Box::new(result_err),
+                };
                 self.record_builtin_callee_type(callee, vec![value], return_type.clone());
                 return_type
             }
             HostBuiltin::Err => {
                 if !self.require_builtin_arity(callee.span, builtin, 1, args.len()) {
-                    return arithmetic_result(SemanticType::Unknown);
+                    return SemanticType::Result {
+                        ok: Box::new(SemanticType::Unknown),
+                        err: Box::new(SemanticType::Unknown),
+                    };
                 }
-                let err_type = self.check_expr_with_expected(
-                    &args[0],
-                    scopes,
-                    Some(&SemanticType::ArithmeticError),
-                );
-                self.require_same_type(args[0].span, &SemanticType::ArithmeticError, &err_type);
-                let return_type = match expected {
-                    Some(SemanticType::Result { ok, err })
-                        if **err == SemanticType::ArithmeticError =>
-                    {
-                        SemanticType::Result {
-                            ok: Box::new((**ok).clone()),
-                            err: Box::new(SemanticType::ArithmeticError),
-                        }
+                let (result_ok, expected_err) = match expected {
+                    Some(SemanticType::Result { ok, err }) => {
+                        (Some((**ok).clone()), Some(err.as_ref()))
                     }
                     _ => {
                         self.report_cannot_infer_builtin(call_span, "err");
-                        arithmetic_result(SemanticType::Unknown)
+                        (None, None)
                     }
                 };
-                self.record_builtin_callee_type(
-                    callee,
-                    vec![SemanticType::ArithmeticError],
-                    return_type.clone(),
-                );
+                let err_type = self.check_expr_with_expected(&args[0], scopes, expected_err);
+                if let Some(expected_err) = expected_err {
+                    self.require_same_type(args[0].span, expected_err, &err_type);
+                }
+                let return_type = SemanticType::Result {
+                    ok: Box::new(result_ok.unwrap_or(SemanticType::Unknown)),
+                    err: Box::new(err_type.clone()),
+                };
+                self.record_builtin_callee_type(callee, vec![err_type], return_type.clone());
                 return_type
             }
             HostBuiltin::ArithmeticOverflow
