@@ -12,6 +12,10 @@ source = "HIR.md"
 format = "markdown"
 
 [[specification]]
+source = "SEMANTICS.md"
+format = "markdown"
+
+[[specification]]
 source = "PROOF_IR.md"
 format = "markdown"
 

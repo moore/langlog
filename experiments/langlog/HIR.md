@@ -11,11 +11,11 @@ This document complements, but does not replace, the main language spec:
 
 - [SPEC.md](./SPEC.md) remains the authoritative surface-language and
   user-visible behavior spec.
+- [SEMANTICS.md](./SEMANTICS.md) defines normative static and dynamic language
+  semantics that sit above HIR.
 - [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific lowering boundary and
   proof-facing invariants that sit after HIR.
 - [PLAN.md](./PLAN.md) tracks implementation sequencing and milestone status.
-- A future `SEMANTICS.md` should formalize static semantics over HIR, proof
-  judgments over Proof IR, and dynamic semantics over MIR.
 
 ## LLG-HIR-01 Pipeline And Lowering
 
@@ -87,8 +87,9 @@ Future formalization should target this pipeline rather than the raw parser AST
 alone:
 
 - elaboration rules from AST to HIR;
-- static semantics, proof facts, and obligation generation over HIR;
-- dynamic semantics over MIR.
+- static semantics from [SEMANTICS.md](./SEMANTICS.md) over HIR;
+- proof facts and obligation generation over HIR or Proof IR;
+- dynamic semantics from [SEMANTICS.md](./SEMANTICS.md) over executable IR.
 
 ## Design Goals
 

@@ -2,8 +2,9 @@
 
 Langlog uses [Duvet](https://awslabs.github.io/duvet/) to trace normative
 requirements in [SPEC.md](./SPEC.md), [HIR.md](./HIR.md),
-[PROOF_IR.md](./PROOF_IR.md), [WASM.md](./WASM.md), and
-[TOOLS.md](./TOOLS.md) to implementation and planned work.
+[SEMANTICS.md](./SEMANTICS.md), [PROOF_IR.md](./PROOF_IR.md),
+[WASM.md](./WASM.md), and [TOOLS.md](./TOOLS.md) to implementation and planned
+work.
 
 ## Layout
 
@@ -11,6 +12,8 @@ requirements in [SPEC.md](./SPEC.md), [HIR.md](./HIR.md),
 - `SPEC.md` contains the normative surface-language requirements using RFC 2119
   terms.
 - `HIR.md` contains normative compiler-facing semantic-IR requirements using
+  RFC 2119 terms.
+- `SEMANTICS.md` contains normative static and dynamic language semantics using
   RFC 2119 terms.
 - `PROOF_IR.md` contains normative compiler-facing proof-IR requirements using
   RFC 2119 terms.
@@ -58,7 +61,8 @@ This uses `.duvet/config.toml` by default and writes reports under
   mutation lane, treat that as evidence of a missing requirement or missing
   citation, not as requirement coverage.
 - Semantic and proof requirements that are planned but not implemented are
-  traced by placeholder tests in `langlog-sema/tests/` and
-  `langlog-proof/tests/`, including future Proof IR work.
+  traced by ignored placeholder tests in `langlog-sema/tests/` and
+  `langlog-proof/tests/`, including checked-result semantics and future Proof
+  IR work.
 - The spec is intentionally small and requirement-oriented so the traceability
   graph remains stable while the language evolves.

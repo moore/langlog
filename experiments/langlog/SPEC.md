@@ -13,6 +13,7 @@ User-facing docs:
 Compiler-facing docs:
 
 - [HIR.md](./HIR.md)
+- [SEMANTICS.md](./SEMANTICS.md)
 - [PROOF_IR.md](./PROOF_IR.md)
 - [WASM.md](./WASM.md)
 - [TOOLS.md](./TOOLS.md)
