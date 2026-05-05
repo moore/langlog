@@ -192,6 +192,43 @@ events is part of a task or state machine and can be bounded, checked, moved,
 and reasoned about. Anything allocated during one dispatch is temporary and can
 be reclaimed when that dispatch finishes.
 
+## Await State And Persistent Stacks
+
+A related question is whether suspended Langlog tasks should keep a persistent
+stack, like a green thread, or whether the compiler should lower suspension
+points into explicit task state. Since Langlog functions are total, bounded, and
+non-recursive, the usual stack-sizing problem is less severe here than it is in
+a general-purpose language. The compiler should be able to compute a
+conservative worst-case stack requirement for each bounded dispatch path.
+
+That makes stackful tasks more plausible, but it does not make them the best
+default. A persistent stack keeps the suspended call chain alive. Even when the
+stack is correctly sized, it may retain values that are no longer conceptually
+part of the task's long-lived state. With many suspended tasks, the memory cost
+looks like the number of tasks multiplied by the worst-case retained stack size.
+
+An explicit await-state representation has a tighter resource story. Each task
+can store an enum or tagged state representing the current await point, plus
+only the values that are live across that await. Normal computation during one
+dispatch can still use the native call stack and CPU registers. Only values that
+must survive after dispatch returns become fields in the task state.
+
+This is not only a performance choice. It also supports the language model:
+cross-event state is visible, bounded, inspectable, and subject to the same
+resource reasoning as other task-owned data. Dispatch-local temporaries can use
+fast temporary allocation and then be reclaimed at the event boundary. Event
+data should probably be handled separately through explicit buffer pools: a task
+can retain ownership of a pooled buffer until the event is processed or until
+the task explicitly releases it. That would avoid unnecessary copies and leave
+room for zero-copy or low-copy APIs such as moving data between files and
+network sockets with `splice`.
+
+The likely default should therefore be stackless lowering for suspended work:
+use the native stack inside a bounded dispatch, but do not give every task a
+persistent stack by default. A stackful task model could still be useful as an
+explicit advanced feature for cases where direct-style execution is worth the
+larger retained memory footprint.
+
 ## Loop Bounds And Complexity
 
 Today Langlog has `for` loops for iterating over collections. Since collections
