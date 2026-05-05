@@ -201,9 +201,10 @@ thought. A loop inside another loop is still total if both bounds are known, but
 the worst-case work is the product of the bounds, which matters for availability
 and embedded scheduling.
 
-Thinking further, nested loops deserve special attention to avoid quadratic or worse dispatch latency. Langlog may want to disallow nested loops
-in ordinary total functions, or at least warn on them by default and require an
-explicit annotation when the programmer really wants that cost.
+Thinking further, nested loops deserve special attention to avoid quadratic or
+worse dispatch latency. Langlog may want to disallow nested loops in ordinary
+total functions, or at least warn on them by default and require an explicit
+annotation when the programmer really wants that cost.
 
 Many nested-loop use cases could instead be expressed with co-iteration
 operations. Examples might include `zip`, `merge`, `join`, or `intersect`.
@@ -249,3 +250,19 @@ should warn or reject when the worst-case cost exceeds the budget. For
 be checked against a static per-iteration budget. This would extend totality
 from "this handler returns" to "this handler returns within a predictable
 budget."
+
+## Guiding Idea
+
+Looking across these ideas, the guiding question seems to be:
+
+> What would a language focused on operational simplicity and reliability look
+> like?
+
+Operational simplicity means that deployed behavior should be predictable:
+failure paths are explicit, execution is bounded, resource use is visible, and
+state transitions preserve declared invariants.
+
+That goal ties the language together. Langlog should help people write software
+that is reliable, fast, and predictable. A second goal, on equal footing, is
+that the language should still be something developers actually enjoy using. The
+language should make safe and predictable code feel natural, not ceremonial.
