@@ -137,42 +137,47 @@ discharge those obligations.
 
 ## Top Level System
 
-Given that all functions in Langlog are meant to be total, any long-running
-program will need to be event driven. My thought is that the top level of a
-Langlog program is a system definition that contains one or more state machines
-and explicit orchestration loops.
+Given that all ordinary Langlog functions are meant to be total, any
+long-running program needs a separate top-level system form. The top level
+should still be hosted in Langlog rather than in a separate host language,
+because a separate host language would complicate build and deployment,
+especially for embedded and systems programming.
+
+A Langlog system should define one or more tasks or state machines and the
+explicit orchestration loops that drive them. These loops are not ordinary
+functions. They describe the long-running schedule of the program, while the
+task transitions they call remain total Langlog functions.
+
+For orchestration code, Langlog could introduce a distinct `forever` loop. A
+`forever` loop is guaranteed not to complete. It can support `continue`, but not
+`break`. The only way to leave a `forever` loop is to exit the thread or
+program. This cleanly separates total event handlers from intentionally
+non-returning top-level systems.
+
+Each `forever` iteration should still be bounded. One pass through the loop
+should be a bounded dispatch or polling step, such as waiting for an event,
+reading a device, advancing a tick, and dispatching to a task.
+
+Event routing should use ordinary `match` syntax where possible. If programmers
+already understand `match`, dispatching an event should look like a constrained
+use of the same construct rather than a separate dispatch syntax. Task entry
+points should probably be named `dispatch`, because dispatch is the boundary
+between orchestration and total Langlog code.
 
 As an example, for a network server there might be a top-level "accept" state
 machine that requests accept events and then creates and owns connection state
-machines. The connection state machines would handle the rest of the network
-state and handle events by calling in to functions to handle the events.
+machines. Each connection task would own its own retained state and expose a
+`dispatch` entry point for connection events.
+
+## Dispatch Lifetimes
 
 I think we want to explicitly understand the dispatch of an event, as we will
 later tie it to the management of allocation lifetimes. Any allocations required
 to process the event can be freed when the event is finished being processed.
 Any data that needs to be retained between events must be owned by the state
-machine so that it is not collected at the end of processing the event.
+machine or task so that it is not collected at the end of processing the event.
 
-The top-level system should be hosted in Langlog rather than in a separate host
-language. Depending on another host language would complicate the build and
-deployment story, especially for embedded and systems programming. Instead,
-Langlog should have an orchestration sublanguage that is less expressive than
-ordinary Langlog code but still lets the programmer write the event loop
-directly.
-
-The orchestration layer should not hide the loop. A top-level system should be
-able to say that it waits for events, polls devices, or advances a tick loop.
-Those loops are not ordinary Langlog functions; they define the long-running
-schedule of the program. Each iteration must still be a bounded dispatch step,
-and every called task transition remains a total Langlog function.
-
-Event routing should use ordinary `match` syntax where possible. If Langlog
-programmers already understand `match`, dispatching an event should look like a
-restricted use of the same construct rather than a new dispatch syntax. Task
-entry points should probably be named `dispatch`, because dispatch is the
-boundary between orchestration and total Langlog code.
-
-It should be possible for one task to register another task with the driver. We
+It should be possible for one task to register another task with the system. We
 might consider just making tasks actors. We should study Erlang here.
 
 Langlog should define task structs that implement the dispatch trait. We may not
@@ -186,3 +191,61 @@ This gives the language a simpler lifetime story. Anything retained between
 events is part of a task or state machine and can be bounded, checked, moved,
 and reasoned about. Anything allocated during one dispatch is temporary and can
 be reclaimed when that dispatch finishes.
+
+## Loop Bounds And Complexity
+
+Today Langlog has `for` loops for iterating over collections. Since collections
+are bounded, those loops are bounded too. This seems like a reasonable place to
+support `break` and `continue`, though nested bounded loops still need careful
+thought. A loop inside another loop is still total if both bounds are known, but
+the worst-case work is the product of the bounds, which matters for availability
+and embedded scheduling.
+
+Thinking further, nested loops deserve special attention to avoid quadratic or worse dispatch latency. Langlog may want to disallow nested loops
+in ordinary total functions, or at least warn on them by default and require an
+explicit annotation when the programmer really wants that cost.
+
+Many nested-loop use cases could instead be expressed with co-iteration
+operations. Examples might include `zip`, `merge`, `join`, or `intersect`.
+Those operations could carry known complexity contracts, so the compiler can
+reason about their worst-case behavior without treating them as arbitrary nested
+iteration.
+
+As a long-term availability goal, ordinary total functions and event handlers
+should default to linear-time or better over their explicit input and task-owned
+state. Superlinear work should be visible and explicit. Queries against large or
+unbounded task-owned collections should use data structures with declared
+`O(log n)` or better worst-case lookup and membership behavior, so dispatch
+latency remains predictable even when `n` is large.
+
+## Efficient Collection Queries
+
+Langlog should also explore developer assistance for efficient queries over
+multiple collections. Modern databases use query planners that can choose
+complex strategies such as index selection, joins, and materialized subqueries.
+Langlog probably should not hide that much complexity inside the compiler, but
+it can borrow the cost model. Since collections have explicit bounds and
+declared operation complexity, the compiler can estimate worst-case query cost
+and warn when a query shape is unnecessarily expensive.
+
+Suggestions could include co-iteration, using an indexed collection, declaring
+a relation, or explicitly materializing a bounded intermediate result. The
+emphasis should be predictable worst-case performance, not average-case
+cleverness. If the compiler gives a performance suggestion, it should explain
+the bound that led to the warning, such as the product of two collection
+capacities or a repeated linear scan over a large task-owned collection.
+
+## Static Cost Budgets
+
+Langlog should eventually produce a static worst-case cost model for total
+functions. The model can count conservative operation units rather than exact
+CPU cycles. Function calls contribute the callee's cost, bounded loops multiply
+the body cost by the loop bound, `match` and `if` use the maximum branch cost,
+and collection operations contribute their declared worst-case complexity.
+
+Event handlers should be able to declare maximum budgets, and the compiler
+should warn or reject when the worst-case cost exceeds the budget. For
+`forever` loops, the loop itself has no finite cost, but each iteration should
+be checked against a static per-iteration budget. This would extend totality
+from "this handler returns" to "this handler returns within a predictable
+budget."
