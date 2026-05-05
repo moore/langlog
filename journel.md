@@ -229,6 +229,131 @@ persistent stack by default. A stackful task model could still be useful as an
 explicit advanced feature for cases where direct-style execution is worth the
 larger retained memory footprint.
 
+## I/O Programs
+
+The distinction between tasks and handlers needs to be precise. A task is
+orchestration code: it may contain a `forever` loop, owns long-lived state and
+resources, and drives progress for the system. A handler is a total function
+dispatched to handle an event or continue work. Handler execution between
+suspension points remains bounded.
+
+Handlers should be allowed to construct and await I/O work, but they should not
+directly execute that work. Awaiting an I/O operation should mean yielding an
+I/O program to the task/runtime and resuming the handler later with the
+program's terminal result. In direct-style handler code, this might look like:
+
+```text
+let request = await connection.read(within 5s);
+let response = await lease_buffer(1024, within 1s);
+
+encode_response(request, response);
+
+await connection.send_all(response, within 5s);
+```
+
+The handler describes business intent. The task/runtime owns the operational
+machinery required to make those awaits complete.
+
+An I/O program is a bounded state machine for operational progress. It can
+encode retry logic, backoff, readiness handling, completion handling, partial
+read and write handling, timeout handling, and resource cleanup. This keeps
+unbounded operational loops out of handlers while still allowing direct-style
+handler code. The I/O program may make progress across many scheduler
+activations, but each activation should do bounded CPU work. Operations that can
+wait should carry an explicit timeout duration that bounds total elapsed
+operation time. A timeout is a terminal failure for that I/O program. The
+handler should not be asked to manually retry partial writes or spin on
+`would-block`, because that would move an operational loop back into total
+handler code.
+
+An initial I/O program model could start with one operation per program while
+still preserving the shape needed for later multi-step programs:
+
+```text
+LeaseBuffer { size, timeout } -> BufferLease | Timeout | Error
+Read       { source, timeout } -> BufferLease | Closed | Timeout | Error
+SendAll    { sink, buffer, timeout } -> Sent | Closed | Timeout | Error
+Transfer   { source, sink, limit, timeout } -> Done | Closed | Timeout | Error
+```
+
+The important property is not that every backend has these exact operations.
+The important property is that an operation has typed inputs, typed outputs,
+owned resources, bounded per-activation work, and a terminal result. If a
+`SendAll` times out after the backend accepted some bytes locally, the handler
+should generally not receive a "sent byte count" or an "unsent remainder". The
+runtime cannot know what the peer received or processed, and zero-copy backends
+may not have an inspectable original buffer to return. Timeout should therefore
+be treated as a terminal I/O-program failure, with cleanup handled by the
+task/runtime policy.
+
+This creates a useful separation of concerns. Handlers express business logic:
+parse a request, build a response, ask that data be sent, and handle terminal
+success or failure. I/O programs express operational policy: how to retry, how
+to adapt to a readiness-based backend, how to submit completion-based work, and
+how to clean up when progress fails.
+
+The I/O model should be backend-agnostic. It should not bake Linux `io_uring`
+into the language, even though a completion-oriented I/O program maps naturally
+to `io_uring` submission and completion queues. A readiness backend such as
+`epoll` can drive the same program by attempting nonblocking operations,
+waiting for readiness when progress would block, and resuming the program later.
+Embedded runtimes should also fit the model: interrupt-driven peripherals, DMA
+engines, and specialized I/O machines such as Raspberry Pi PIO can all be
+represented by task-owned handles and operations that make bounded progress over
+time.
+
+The same `SendAll` operation can therefore lower differently on different
+systems. On `io_uring`, the runtime may submit one or more writes or linked
+operations and resume the handler from completions. On `epoll`, the runtime may
+attempt a nonblocking write, register interest when the operation would block,
+and resume the I/O program when the descriptor is ready again. On an embedded
+target, the runtime may arm an interrupt or DMA transfer and resume the program
+when the device reports progress. These are backend details, not handler
+semantics.
+
+The core abstraction should be typed handles plus typed operations. Task
+implementers can define the concrete handle types and the operations that
+produce, use, transform, or consume those handles. Handlers should normally see
+only the capabilities exposed by the task, not raw file descriptors, completion
+queue entries, DMA descriptors, interrupt tokens, or other backend resources.
+Those details belong to the task and the I/O program implementation.
+
+For example, a connection capability exposed to handlers might support
+`read(timeout)` and `send_all(buffer, timeout)`, while the concrete task
+implementation privately stores a socket handle, a registered-buffer handle, an
+`epoll` registration, an `io_uring` operation id, or a device-specific transfer
+descriptor. The handler can pass the capability back to its methods, but it
+cannot inspect or manufacture the backend handles.
+
+For handler-visible data, the interface should be buffers. A handler that needs
+to inspect or construct bytes can await a buffer lease, mutate it while it owns
+the lease, and move it into an I/O program such as `send`. Once moved into an
+in-flight I/O program, the handler no longer owns the buffer. The program
+eventually completes with success or terminal error, and buffer cleanup is part
+of the task/runtime's resource policy.
+
+This suggests a linear or affine resource rule for buffers and handles. A buffer
+lease can be read or mutated only while the handler owns it. Moving it into
+`send_all` transfers ownership to the I/O program. Receiving a buffer from
+`read` gives the handler ownership of a filled lease. Explicitly releasing a
+lease returns it to the task's pool. The task owns the pool itself, so handlers
+do not need to thread scratch buffers through every dispatch call just to reach
+the operation that needs storage.
+
+Zero-copy paths should not be forced through buffers. If a handler does not need
+to inspect the data, operations such as file-to-socket transfer can remain
+handle-to-handle I/O programs. This leaves room for mechanisms like `splice`,
+DMA transfers, or backend-specific descriptor chaining while keeping the
+handler-facing model simple.
+
+A later multi-step I/O program could be a fixed-size sequence of these typed
+operations, where each step produces, consumes, or transforms handles. For
+example, a file-to-network program might consume a file-range handle and a
+connection handle and produce only a terminal result. A sensor-read program
+might arm a DMA handle, wait for a completion handle, and then return a filled
+buffer lease to the handler. The sequence must remain statically bounded, and
+any waiting step must have an explicit timeout duration.
+
 ## Loop Bounds And Complexity
 
 Today Langlog has `for` loops for iterating over collections. Since collections
