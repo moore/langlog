@@ -134,3 +134,55 @@ be present in `employees`. Likewise, removing an employee from `employees` would
 create an obligation to show that the ID is no longer present in `managers`.
 Observations elsewhere in the program would provide the evidence needed to
 discharge those obligations.
+
+## Top Level System
+
+Given that all functions in Langlog are meant to be total, any long-running
+program will need to be event driven. My thought is that the top level of a
+Langlog program is a system definition that contains one or more state machines
+and explicit orchestration loops.
+
+As an example, for a network server there might be a top-level "accept" state
+machine that requests accept events and then creates and owns connection state
+machines. The connection state machines would handle the rest of the network
+state and handle events by calling in to functions to handle the events.
+
+I think we want to explicitly understand the dispatch of an event, as we will
+later tie it to the management of allocation lifetimes. Any allocations required
+to process the event can be freed when the event is finished being processed.
+Any data that needs to be retained between events must be owned by the state
+machine so that it is not collected at the end of processing the event.
+
+The top-level system should be hosted in Langlog rather than in a separate host
+language. Depending on another host language would complicate the build and
+deployment story, especially for embedded and systems programming. Instead,
+Langlog should have an orchestration sublanguage that is less expressive than
+ordinary Langlog code but still lets the programmer write the event loop
+directly.
+
+The orchestration layer should not hide the loop. A top-level system should be
+able to say that it waits for events, polls devices, or advances a tick loop.
+Those loops are not ordinary Langlog functions; they define the long-running
+schedule of the program. Each iteration must still be a bounded dispatch step,
+and every called task transition remains a total Langlog function.
+
+Event routing should use ordinary `match` syntax where possible. If Langlog
+programmers already understand `match`, dispatching an event should look like a
+restricted use of the same construct rather than a new dispatch syntax. Task
+entry points should probably be named `dispatch`, because dispatch is the
+boundary between orchestration and total Langlog code.
+
+It should be possible for one task to register another task with the driver. We
+might consider just making tasks actors. We should study Erlang here.
+
+Langlog should define task structs that implement the dispatch trait. We may not
+want to support persistent stacks at all. Instead, Langlog can lower suspended
+or multi-event work into explicit task or state structs, similar to how Rust
+async functions lower call state into future structs. Event-local temporaries
+can still exist during a dispatch, but nothing from that temporary region may be
+retained after dispatch returns.
+
+This gives the language a simpler lifetime story. Anything retained between
+events is part of a task or state machine and can be bounded, checked, moved,
+and reasoned about. Anything allocated during one dispatch is temporary and can
+be reclaimed when that dispatch finishes.
