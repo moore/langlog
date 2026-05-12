@@ -27,7 +27,9 @@ See also:
   out_dir = "target/langlog"
   ```
 
-- The parser accepts one or more top-level function items.
+- The current parser accepts one or more top-level function items.
+- The task-orchestration surface described below is the next M6 design target;
+  compiler support is not implemented yet.
 - Multi-file compilation, imports, modules, and packages do not exist yet.
 
 ## Lexical Structure
@@ -55,9 +57,13 @@ Reserved keywords in the current language:
 `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`,
 `or`, `true`, `false`
 
+Task orchestration additionally reserves:
+
+`task`, `forever`, `exit`, `delegate`
+
 ## Items
 
-The only top-level item is a function:
+The current executable subset uses top-level functions:
 
 ```langlog
 fn name(param1: Type, param2: Type) -> Type {
@@ -72,9 +78,89 @@ Notes:
 - Recursion is a language-level non-goal, but recursion rejection is part of
   later semantic checking rather than parsing.
 
+The planned task-orchestration surface also adds top-level tasks:
+
+```langlog
+task name(param1: Type, param2: Type) -> Type {
+    ...
+}
+```
+
+Tasks are orchestration code, not ordinary total functions.
+
+Rules:
+
+- A task return type is mandatory.
+- Executable task programs use `task main() -> u32` as the root task for now.
+- Ordinary functions cannot call tasks.
+- Tasks can call ordinary functions.
+- Tasks can transfer to other tasks with `delegate`.
+- `delegate` is a terminal orchestration statement and does not return to the
+  caller.
+- A `delegate` statement requires the callee return type to exactly match the
+  caller task return type.
+- Plain call syntax cannot call a task.
+- Cyclic task delegation is rejected.
+
+Examples:
+
+```langlog
+task main() -> u32 {
+    exit 0;
+}
+
+task service() -> u32 {
+    forever {
+        tick();
+    }
+}
+
+task setup() -> u32 {
+    delegate worker();
+}
+
+task worker() -> u32 {
+    exit 0;
+}
+```
+
+Invalid examples:
+
+```langlog
+// Invalid: task return type is mandatory.
+task missing_return_type() {
+    exit 0;
+}
+
+task main() -> u32 {
+    exit 0;
+}
+
+// Invalid: ordinary functions cannot call tasks.
+fn not_allowed() -> u32 {
+    main();
+}
+
+// Invalid: task calls require `delegate`, even inside another task.
+task not_delegated() -> u32 {
+    worker();
+}
+
+// Invalid: delegation requires matching return types.
+task wrong_type() -> u32 {
+    delegate shutdown();
+}
+
+task shutdown() -> bool {
+    exit true;
+}
+```
+
 ## Statements
 
-The parser currently accepts these statements:
+The current parser accepts these statements in functions. The planned
+task-orchestration surface additionally defines `forever`, `delegate`, and
+`exit` for task bodies.
 
 ### `let`
 
@@ -175,6 +261,74 @@ Rules:
 return total;
 return;
 ```
+
+`return` is invalid inside task bodies. Tasks must terminate with `exit`,
+`delegate`, or a non-nested `forever` loop.
+
+### `forever`
+
+```langlog
+task main() -> u32 {
+    forever {
+        tick();
+    }
+}
+```
+
+`forever` is the task orchestration loop. It is valid only inside task bodies.
+
+Rules:
+
+- `forever` uses the form `forever { ... }`.
+- A bare `forever` loop is a valid crash-only or externally terminated task.
+- Nested `forever` loops are rejected in the initial task design.
+- Each iteration is expected to contain bounded work; runtime scheduling and
+  handler dispatch semantics are future work.
+
+### `delegate`
+
+```langlog
+task setup() -> u32 {
+    delegate worker();
+}
+
+task worker() -> u32 {
+    exit 0;
+}
+```
+
+`delegate` transfers orchestration from the current task to another task.
+
+Rules:
+
+- `delegate` uses the form `delegate name(args...);`.
+- `delegate` is valid only inside task bodies.
+- `delegate` must target a task, not an ordinary function.
+- `delegate` does not return to the current task.
+- The target task return type must exactly match the current task return type.
+- Cyclic task delegation is rejected.
+
+Future versions may consider using `delegate` for explicit tail calls to
+ordinary functions, but the initial task-orchestration surface limits it to
+tasks.
+
+### `exit`
+
+```langlog
+task main() -> u32 {
+    exit 0;
+}
+```
+
+`exit` terminates the program from a task.
+
+Rules:
+
+- `exit` uses the form `exit <expr>;`.
+- `exit` is valid only inside task bodies.
+- The expression must match the task return type.
+- A task body cannot accidentally fall through. Every reachable path must end
+  in `exit`, a same-return-type `delegate`, or a non-nested `forever`.
 
 ### `observe`
 

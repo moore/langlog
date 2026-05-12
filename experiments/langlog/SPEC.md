@@ -80,26 +80,37 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-LEX-03 Reserved Keywords
 
-- The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`,
-  `match`, `for`, `in`, `return`, `observe`, `or`, `true`, and `false`.
+- The keyword set MUST reserve `fn`, `task`, `let`, `mut`, `if`, `else`,
+  `match`, `for`, `in`, `forever`, `return`, `exit`, `delegate`, `observe`,
+  `or`, `true`, and `false`.
 
 ## LLG-LEX-04 Lexical Error Diagnostics
 
 - Lexical diagnostics for invalid characters MUST include a primary span
   covering the offending character.
 
-## LLG-SYN-01 Top-Level Functions
+## LLG-SYN-01 Top-Level Items
 
-- A phase 1 source file MUST contain only function items at the top level.
-- A non-function top-level item MUST be rejected with a syntax diagnostic.
+- A phase 1 source file MUST contain only function items and task items at the
+  top level.
+- A non-function, non-task top-level item MUST be rejected with a syntax
+  diagnostic.
 - A function item MUST use Rust-like syntax with `fn`, a name, a parameter list,
   and a block body.
 - The current parser allows the return type to be omitted in phase 1.
+- A task item MUST use the form `task name(param: Type, ...) -> Type { ... }`.
+- A task item MUST include an explicit return type.
+- A task item MUST be treated as orchestration code rather than an ordinary
+  total function.
+- An executable task program MUST use `task main() -> u32` as its root task.
+- Future root task configuration MAY allow other root task names or signatures.
 
 ## LLG-SYN-02 Statements
 
 - The parser MUST accept `let`, assignment, expression, `if`, `match`, `for`,
   `return`, and `observe` statements.
+- The task-orchestration parser MUST additionally accept `forever`, `exit`, and
+  `delegate` statements.
 - The current parser allows a `let` statement to include `mut`, a type
   annotation, and an initializer.
 - A statement form that requires a semicolon MUST reject the form if the
@@ -154,6 +165,17 @@ properties that should be enforced structurally rather than by convention:
   range, logical, equality, and comparison subexpressions.
 - In phase 1, `observe` proof expressions MUST reject non-proof call callees,
   call arguments, index targets, and index values.
+
+## LLG-SYN-07 Task Orchestration Statements
+
+- A `forever` statement MUST use the form `forever { ... }`.
+- A `forever` statement MUST appear only inside a task body.
+- A nested `forever` statement MUST be rejected.
+- An `exit` statement MUST use the form `exit <expr>;`.
+- An `exit` statement MUST appear only inside a task body.
+- A `delegate` statement MUST use the form `delegate name(args...);`.
+- A `delegate` statement MUST appear only inside a task body.
+- A `return` statement MUST be rejected inside a task body.
 
 ## LLG-TYPE-01 Phase 1 Types
 
@@ -271,6 +293,32 @@ properties that should be enforced structurally rather than by convention:
 - The semantic phase MUST require `observe` equality operands to have matching
   types and ordering operands to use `u32`.
 
+## LLG-SEMA-05 Task Orchestration Semantics
+
+- The semantic phase MUST reject ordinary functions that call task items.
+- A task body MAY call ordinary functions, and ordinary function calls from a
+  task body MUST return to the task normally.
+- A task body MAY transfer to another task only with a terminal `delegate`
+  statement.
+- A `delegate` statement MUST target a task item.
+- In the initial task-orchestration surface, `delegate` MUST NOT target an
+  ordinary function.
+- A `delegate` statement MUST NOT return to the current task.
+- A `delegate` statement MUST have a callee return type that exactly matches the
+  caller task return type.
+- A task item MUST NOT be callable through ordinary call expression syntax,
+  including as a subexpression, initializer, call argument, expression
+  statement, or any other non-`delegate` expression.
+- Cyclic task delegation MUST be rejected.
+- An `exit` statement MUST type check its expression against the enclosing task
+  return type.
+- An `exit` statement MUST exit the program with the checked value.
+- A task body MUST NOT fall through accidentally. Every reachable task control
+  path MUST end in an `exit` statement, a same-return-type `delegate`
+  statement, or a non-nested `forever` statement.
+- A bare `forever { ... }` task body MUST be accepted as a valid crash-only or
+  externally terminated task shape.
+
 ## LLG-PROOF-01 Proof-Required Operations
 
 - The proof phase MUST reject indexing that may go out of bounds unless safety
@@ -315,7 +363,8 @@ Phase 1 does not attempt to provide:
 
 - unrestricted Rust compatibility;
 - general Turing completeness;
-- async or event-loop syntax;
+- async or I/O handler syntax beyond the `task`/`forever`/`exit`/`delegate`
+  orchestration surface;
 - modules, traits, generics beyond the current parser surface, or multi-file
   compilation;
 - implicit panics from arithmetic, indexing, or similar operations.
@@ -329,4 +378,9 @@ evolve:
 - whether `Result` error types are closed or user-defined in early phases;
 - whether collection insertion is proof-required or explicitly fallible in the
   first executable runtime;
-- the final async surface syntax for the event-loop runtime.
+- root task configuration beyond the initial `task main() -> u32` executable
+  entrypoint;
+- possible future use of `delegate` for explicit tail calls to ordinary
+  functions;
+- the final async, I/O program, and handler surface syntax for the event-loop
+  runtime.

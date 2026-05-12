@@ -151,7 +151,13 @@ VM.
 
 ### M6 Event-loop runtime and async lowering
 
+- [x] Draft the initial task orchestration surface: `task`, `forever`, `exit`,
+  `delegate`, `task main() -> u32`, task-only terminal delegation, explicit
+  program exit, and no accidental task fallthrough.
+- [ ] Implement parser, AST, HIR, semantic diagnostics, and tests for `task`,
+  `forever`, `exit`, and `delegate`.
 - [ ] Define the single-event-loop runtime model.
+- [ ] Define I/O programs as task-driven bounded state machines.
 - [ ] Add bounded event handlers and scheduling semantics.
 - [ ] Implement per-event temporary allocation and long-lived bounded
   collections.
