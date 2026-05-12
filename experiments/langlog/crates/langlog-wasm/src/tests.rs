@@ -1,4 +1,5 @@
-use super::compile;
+use super::{compile, Compiler, TaskRuntimeLayout};
+use langlog_sema::{HirFunction, HirFunctionKind};
 use wasmtime::{Caller, Engine, Instance, Linker, Module, Store};
 
 fn checked(source: &str) -> langlog_sema::CheckedProgram {
@@ -64,6 +65,25 @@ fn checked_with_errors(source: &str) -> langlog_sema::CheckedProgram {
     langlog_sema::analyze(parsed)
 }
 
+fn task_runtime_layout<'a>(
+    checked: &'a langlog_sema::CheckedProgram,
+) -> (TaskRuntimeLayout<'a>, &'a HirFunction) {
+    let hir = checked.hir.as_ref().expect("expected checked HIR");
+    let root = hir
+        .functions
+        .iter()
+        .find(|function| function.kind == HirFunctionKind::Task && function.name == "main")
+        .expect("expected task main");
+    let mut compiler = Compiler::new(hir);
+    let layout = TaskRuntimeLayout::build(&mut compiler, root).expect("expected task layout");
+    assert!(
+        compiler.diagnostics.is_empty(),
+        "{:#?}",
+        compiler.diagnostics
+    );
+    (layout, root)
+}
+
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
 //= type=test
 //# The Wasm compiler MUST reject programs that do not have checked HIR.
@@ -105,21 +125,319 @@ fn requirement_llg_wasm_01_rejects_unsupported_main_shapes() {
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
 //= type=test
-//# Wasm V1 MUST reject task items because task execution is not supported by the Wasm v1 backend.
+//# Wasm builds MUST export `task main() -> u32` as `main`.
 #[test]
-fn requirement_llg_wasm_01_rejects_task_items() {
+fn requirement_llg_wasm_01_executes_task_main_exit() {
+    assert_eq!(
+        run_main(
+            r#"
+task main() -> u32 {
+    exit 42;
+}
+"#
+        ),
+        42
+    );
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST reject task-mode roots other than `task main() -> u32`.
+#[test]
+fn requirement_llg_wasm_01_rejects_unsupported_task_roots() {
+    let no_root = checked(
+        r#"
+task worker() -> u32 {
+    exit 0;
+}
+"#,
+    );
+    let diagnostics = compile(&no_root).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("requires `task main() -> u32`")));
+
+    let param_root = checked(
+        r#"
+task main(value: u32) -> u32 {
+    exit value;
+}
+"#,
+    );
+    let diagnostics = compile(&param_root).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("requires `task main() -> u32`")));
+
+    let bool_root = checked(
+        r#"
+task main() -> bool {
+    exit true;
+}
+"#,
+    );
+    let diagnostics = compile(&bool_root).expect_err("expected backend error");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("requires `task main() -> u32`")));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 task-state layout MUST include exactly the tasks reachable from `task main` through `delegate` statements and MUST size the shared state slots to the largest reachable task-state variant.
+#[test]
+fn requirement_llg_wasm_01_layout_includes_reachable_tasks_and_largest_variant() {
     let checked = checked(
         r#"
 task main() -> u32 {
+    delegate worker(1, 2, 3);
+}
+
+task worker(a: u32, b: u32, c: u32) -> u32 {
+    let d = c;
+    exit a;
+}
+
+task unused(a: u32, b: u32, c: u32, d: u32, e: u32) -> u32 {
+    exit a;
+}
+"#,
+    );
+    let (layout, root) = task_runtime_layout(&checked);
+
+    assert_eq!(layout.states.len(), 2);
+    assert_eq!(layout.state(root.id).unwrap().variant_width, 0);
+    assert_eq!(layout.state_width, 4);
+    assert!(layout
+        .states
+        .iter()
+        .all(|state| state.function.name != "unused"));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 task-state layout MUST collect cyclic delegation without recursive stack growth.
+#[test]
+fn requirement_llg_wasm_01_collects_cyclic_task_delegation_layout() {
+    let checked = checked(
+        r#"
+task main() -> u32 {
+    delegate left(2);
+}
+
+task left(value: u32) -> u32 {
+    delegate right(value);
+}
+
+task right(value: u32) -> u32 {
+    delegate left(value);
+}
+"#,
+    );
+    let (layout, _) = task_runtime_layout(&checked);
+
+    assert_eq!(layout.states.len(), 3);
+    assert_eq!(layout.state_width, 1);
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 task-state layout MUST expose delegate target parameter offsets for state transitions.
+#[test]
+fn requirement_llg_wasm_01_records_delegate_target_parameter_offsets() {
+    let checked = checked(
+        r#"
+task main() -> u32 {
+    delegate worker(7, (8, true));
+}
+
+task worker(count: u32, pair: (u32, bool)) -> u32 {
+    exit count;
+}
+"#,
+    );
+    let (layout, _) = task_runtime_layout(&checked);
+    let worker = layout
+        .states
+        .iter()
+        .find(|state| state.function.name == "worker")
+        .expect("expected worker state");
+
+    assert_eq!(worker.param_bindings.len(), 2);
+    assert_eq!(worker.param_bindings[0].offsets, vec![0]);
+    assert_eq!(worker.param_bindings[1].offsets, vec![1, 2]);
+    assert_eq!(worker.variant_width, 3);
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST lower `delegate` statements as task-state transitions without direct Wasm calls to task items.
+#[test]
+fn requirement_llg_wasm_01_executes_task_delegate_as_state_transition() {
+    let checked = checked(
+        r#"
+task main() -> u32 {
+    delegate worker(42);
+}
+
+task worker(value: u32) -> u32 {
+    exit value;
+}
+"#,
+    );
+    let module = compile(&checked).expect("expected Wasm module");
+    assert!(module.wat.contains("br $task_dispatch"));
+    assert!(!module.wat.contains("call $task"));
+
+    assert_eq!(
+        run_main(
+            r#"
+task main() -> u32 {
+    delegate worker(42);
+}
+
+task worker(value: u32) -> u32 {
+    exit value;
+}
+"#
+        ),
+        42
+    );
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST execute cyclic task delegation as bounded task-state transitions.
+#[test]
+fn requirement_llg_wasm_01_executes_cyclic_task_delegation() {
+    assert_eq!(
+        run_main(
+            r#"
+task main() -> u32 {
+    delegate count(3);
+}
+
+task count(value: u32) -> u32 {
+    if value == 0 {
+        exit 42;
+    } else {
+        delegate count(value - 1 or(err) 0);
+    }
+}
+"#
+        ),
+        42
+    );
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST evaluate delegate arguments before replacing caller task state.
+#[test]
+fn requirement_llg_wasm_01_evaluates_delegate_args_before_state_replacement() {
+    assert_eq!(
+        run_main(
+            r#"
+task main() -> u32 {
+    delegate swap(7, 42);
+}
+
+task swap(first: u32, second: u32) -> u32 {
+    if first == 42 {
+        exit second;
+    } else {
+        delegate swap(second, first);
+    }
+}
+"#
+        ),
+        7
+    );
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST discard caller task-local state before entering delegated target task state.
+#[test]
+fn requirement_llg_wasm_01_discards_caller_task_locals_on_delegate() {
+    assert_eq!(
+        run_main(
+            r#"
+task main() -> u32 {
+    delegate source(99);
+}
+
+task source(value: u32) -> u32 {
+    let hidden = value;
+    delegate target();
+}
+
+task target() -> u32 {
+    let leaked: u32;
+    exit leaked;
+}
+"#
+        ),
+        0
+    );
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST compile `forever` task statements as Wasm loops.
+#[test]
+fn requirement_llg_wasm_01_compiles_task_forever_loop() {
+    let checked = checked(
+        r#"
+task main() -> u32 {
+    forever {
+    }
+}
+"#,
+    );
+    let module = compile(&checked).expect("expected Wasm module");
+
+    assert!(module.wat.contains("loop $task_forever"));
+    assert!(!module.wasm.is_empty());
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST emit imports for host builtins used inside reachable task bodies.
+#[test]
+fn requirement_llg_wasm_01_compiles_task_host_builtin_imports() {
+    let (result, output) = run_main_with_host(
+        r#"
+task main() -> u32 {
+    print_u32(7);
+    exit 0;
+}
+"#,
+        0,
+    );
+
+    assert_eq!(result, 0);
+    assert_eq!(output, vec![7]);
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm V1 MUST reject task-state values that are not representable as flattened Wasm values.
+#[test]
+fn requirement_llg_wasm_01_rejects_unsupported_task_state_values() {
+    let checked = checked(
+        r#"
+task main() -> u32 {
+    let values: Set<u32, 16>;
     exit 0;
 }
 "#,
     );
     let diagnostics = compile(&checked).expect_err("expected backend error");
 
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("tasks are not supported by Wasm v1")));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("check/proof-only")));
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point

@@ -27,9 +27,9 @@ See also:
   out_dir = "target/langlog"
   ```
 
-- The current parser accepts one or more top-level function items.
-- The task-orchestration surface described below is the next M6 design target;
-  compiler support is not implemented yet.
+- The current parser accepts one or more top-level function and task items.
+- The Wasm V1 backend can execute either a `fn main() -> u32` program or a
+  task-mode program rooted at `task main() -> u32`.
 - Multi-file compilation, imports, modules, and packages do not exist yet.
 
 ## Lexical Structure
@@ -553,6 +553,8 @@ The backend runs only after syntax, semantic, and proof checks succeed.
 Wasm V1 supports:
 
 - `fn main() -> u32`
+- `task main() -> u32`, with reachable tasks lowered into one dispatcher using
+  a tag local and flattened task-state slots
 - flattened non-collection values using `i32` slots:
   - `()`
   - `u32`, `bool`, and `ArithmeticError`
@@ -565,6 +567,8 @@ Wasm V1 supports:
 - arithmetic, structural equality, ordering comparisons over `u32`, array
   indexing, `if`, `match`, `for` over arrays and ranges, direct calls,
   `observe`, recovery expressions, and `return`
+- task `exit`, `delegate`, cyclic delegation, and compile-only `forever`
+  loops
 - playground host builtins lowered as `langlog_host` imports
 
 Wasm V1 rejects:
@@ -573,7 +577,8 @@ Wasm V1 rejects:
   check/proof-only until a runtime collection representation is designed
 - first-class function values and indirect calls
 - assignment targets other than local bindings
-- `main` forms other than `fn main() -> u32`
+- ordinary-function roots other than `fn main() -> u32`
+- task-mode roots other than `task main() -> u32`
 
 ## Diagnostics
 

@@ -428,3 +428,21 @@ That goal ties the language together. Langlog should help people write software
 that is reliable, fast, and predictable. A second goal, on equal footing, is
 that the language should still be something developers actually enjoy using. The
 language should make safe and predictable code feel natural, not ceremonial.
+
+## Task loops
+
+we implmented task delagation and support recurisve delagation as it dose not
+use a stack, but this dose allow for infinite loops that do no work. This is also
+true of `foevere` loops. We shoudl see if we can come up with a way to show that
+either of these loops is "doing work" that is to say that they are taking in new
+input from outsied the world, via IO for example, or that they are making progress
+torwas a termination state. This second is harder as it requires proving that there
+is a terminal case and that each iteration move twords it. That we might want to
+leave for later. It is more tractable at firs to show that each pass thought a
+infinet loop gets new external information. This dose not prouve the loop is
+productive but it excludes many forms of accdental non prodetive iteration.
+
+## Explisit initilazation
+We should not allow `let` statments that don't inilize values. This implies we should
+have if/else and match {} as expressions. We may also want to implment `reduce` as a 
+first call oppration over iterables.

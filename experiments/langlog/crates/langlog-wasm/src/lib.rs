@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use langlog_sema::{
     CheckedProgram, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind, HirForStmt,
@@ -52,6 +52,7 @@ impl<'a> Compiler<'a> {
         let function_indices = program
             .functions
             .iter()
+            .filter(|function| function.kind == HirFunctionKind::Function)
             .enumerate()
             .map(|(index, function)| (function.id, index))
             .collect();
@@ -64,15 +65,13 @@ impl<'a> Compiler<'a> {
 
     fn compile_program(&mut self) -> String {
         let mut module = String::from("(module\n");
-        if let Some(task) = self
+        if self
             .program
             .functions
             .iter()
-            .find(|function| function.kind == HirFunctionKind::Task)
+            .any(|function| function.kind == HirFunctionKind::Task)
         {
-            self.error(Some(task.span), "tasks are not supported by Wasm v1");
-            module.push_str(")\n");
-            return module;
+            return self.compile_task_program(module);
         }
 
         let Some(main) = self
@@ -105,6 +104,49 @@ impl<'a> Compiler<'a> {
         module
     }
 
+    fn compile_task_program(&mut self, mut module: String) -> String {
+        let Some(root) = self
+            .program
+            .functions
+            .iter()
+            .find(|function| function.kind == HirFunctionKind::Task && function.name == "main")
+        else {
+            self.error(None, "Wasm task build requires `task main() -> u32`");
+            module.push_str(")\n");
+            return module;
+        };
+        if !root.params.is_empty() || root.return_type != HirType::U32 {
+            self.error(
+                Some(root.span),
+                "Wasm task build requires `task main() -> u32`",
+            );
+        }
+
+        let Some(layout) = TaskRuntimeLayout::build(self, root) else {
+            module.push_str(")\n");
+            return module;
+        };
+
+        for builtin in used_host_builtins(self.program) {
+            module.push_str(host_builtin_import(builtin));
+        }
+
+        for function in self
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.kind == HirFunctionKind::Function)
+        {
+            let mut body = FunctionCompiler::new(self, function);
+            module.push_str(&body.compile_function(false));
+        }
+
+        let mut body = FunctionCompiler::new_task_dispatcher(self, root, layout);
+        module.push_str(&body.compile_task_dispatcher());
+        module.push_str(")\n");
+        module
+    }
+
     fn function_index(&self, id: HirItemId) -> Option<usize> {
         self.function_indices.get(&id).copied()
     }
@@ -120,12 +162,152 @@ impl<'a> Compiler<'a> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TaskRuntimeLayout<'a> {
+    states: Vec<TaskStateLayout<'a>>,
+    state_by_id: HashMap<HirItemId, usize>,
+    state_width: u32,
+}
+
+#[derive(Debug, Clone)]
+struct TaskStateLayout<'a> {
+    function: &'a HirFunction,
+    tag: u32,
+    bindings: HashMap<HirBindingId, StateSlotValue>,
+    param_bindings: Vec<StateSlotValue>,
+    variant_width: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateSlotValue {
+    offsets: Vec<u32>,
+}
+
+impl<'a> TaskRuntimeLayout<'a> {
+    fn build(compiler: &mut Compiler<'a>, root: &'a HirFunction) -> Option<Self> {
+        let task_by_id: HashMap<_, _> = compiler
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.kind == HirFunctionKind::Task)
+            .map(|function| (function.id, function))
+            .collect();
+
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::from([root.id]);
+        let mut reachable = Vec::new();
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(task) = task_by_id.get(&id).copied() else {
+                compiler.error(None, "delegate target is not a task item");
+                continue;
+            };
+            reachable.push(task);
+            for target in delegate_targets_in_block(&task.body) {
+                if task_by_id.contains_key(&target) {
+                    queue.push_back(target);
+                }
+            }
+        }
+
+        let mut states = Vec::new();
+        let mut state_by_id = HashMap::new();
+        let mut state_width = 0;
+        for task in reachable {
+            let tag = u32::try_from(states.len()).unwrap_or(u32::MAX);
+            let Some(state) = TaskStateLayout::build(compiler, task, tag) else {
+                continue;
+            };
+            state_width = state_width.max(state.variant_width);
+            state_by_id.insert(task.id, states.len());
+            states.push(state);
+        }
+
+        if compiler.diagnostics.is_empty() {
+            Some(Self {
+                states,
+                state_by_id,
+                state_width,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn state(&self, id: HirItemId) -> Option<&TaskStateLayout<'a>> {
+        self.state_by_id
+            .get(&id)
+            .and_then(|index| self.states.get(*index))
+    }
+}
+
+impl<'a> TaskStateLayout<'a> {
+    fn build(compiler: &mut Compiler<'a>, function: &'a HirFunction, tag: u32) -> Option<Self> {
+        let mut bindings = HashMap::new();
+        let mut param_bindings = Vec::new();
+        let mut next_offset = 0_u32;
+        let mut valid = true;
+
+        for param in &function.params {
+            match state_slot_value(&param.ty, &mut next_offset) {
+                Some(slot) => {
+                    bindings.insert(param.id, slot.clone());
+                    param_bindings.push(slot);
+                }
+                None => {
+                    compiler.error(Some(param.span), wasm_type_diagnostic(&param.ty));
+                    valid = false;
+                }
+            }
+        }
+
+        let mut locals = Vec::new();
+        collect_task_local_bindings(&function.body, &mut locals);
+        for binding in locals {
+            if bindings.contains_key(&binding.id) {
+                continue;
+            }
+            match state_slot_value(&binding.ty, &mut next_offset) {
+                Some(slot) => {
+                    bindings.insert(binding.id, slot);
+                }
+                None => {
+                    compiler.error(Some(binding.span), wasm_type_diagnostic(&binding.ty));
+                    valid = false;
+                }
+            }
+        }
+
+        valid.then_some(Self {
+            function,
+            tag,
+            bindings,
+            param_bindings,
+            variant_width: next_offset,
+        })
+    }
+}
+
+fn state_slot_value(ty: &HirType, next_offset: &mut u32) -> Option<StateSlotValue> {
+    let width = supported_value_width(ty)?;
+    let end = next_offset.checked_add(width)?;
+    let offsets = (*next_offset..end).collect();
+    *next_offset = end;
+    Some(StateSlotValue { offsets })
+}
+
 struct FunctionCompiler<'a, 'b> {
     compiler: &'a mut Compiler<'b>,
     function: &'b HirFunction,
     locals: HashMap<HirBindingId, LocalValue>,
     param_count: u32,
     next_local: u32,
+    task_layout: Option<TaskRuntimeLayout<'b>>,
+    task_state_start: u32,
+    task_tag_local: u32,
+    next_label: u32,
     code: Vec<String>,
 }
 
@@ -151,6 +333,32 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             locals,
             param_count,
             next_local: param_count,
+            task_layout: None,
+            task_state_start: 0,
+            task_tag_local: 0,
+            next_label: 0,
+            code: Vec::new(),
+        }
+    }
+
+    fn new_task_dispatcher(
+        compiler: &'a mut Compiler<'b>,
+        root: &'b HirFunction,
+        layout: TaskRuntimeLayout<'b>,
+    ) -> Self {
+        let task_tag_local = 0;
+        let task_state_start = 1;
+        let next_local = task_state_start + layout.state_width;
+        Self {
+            compiler,
+            function: root,
+            locals: HashMap::new(),
+            param_count: 0,
+            next_local,
+            task_layout: Some(layout),
+            task_state_start,
+            task_tag_local,
+            next_label: 0,
             code: Vec::new(),
         }
     }
@@ -215,6 +423,75 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         rendered
     }
 
+    fn compile_task_dispatcher(&mut self) -> String {
+        // The task dispatcher is the executable form of the task memory model:
+        // one tag local selects the active task-state variant, and one shared
+        // bank of locals holds the flattened slots for the largest reachable
+        // variant. Each loop iteration runs the task matching the tag.
+        // `delegate` updates those shared slots, changes the tag, and branches
+        // back to `$task_dispatch` instead of emitting a Wasm task call.
+        let layout = self
+            .task_layout
+            .as_ref()
+            .expect("task dispatcher requires a task layout");
+        let root_tag = layout
+            .state(self.function.id)
+            .expect("root task should be reachable")
+            .tag;
+        let states = layout.states.clone();
+
+        self.emit(format!("i32.const {root_tag}"));
+        self.emit(format!("local.set {}", self.task_tag_local));
+        self.emit("loop $task_dispatch");
+        for state in states {
+            self.emit(format!("local.get {}", self.task_tag_local));
+            self.emit(format!("i32.const {}", state.tag));
+            self.emit("i32.eq");
+            self.emit("if");
+            self.locals = self.task_locals_for_state(&state);
+            self.compile_block(&state.function.body, &state.function.return_type);
+            self.emit("end");
+        }
+        self.emit("unreachable");
+        self.emit("end");
+        self.emit("i32.const 0");
+
+        let mut rendered = String::from("  (func $task_main (result i32)\n");
+        for local in 0..self.next_local {
+            let _ = local;
+            rendered.push_str("    (local i32)\n");
+        }
+        for line in &self.code {
+            rendered.push_str("    ");
+            rendered.push_str(line);
+            rendered.push('\n');
+        }
+        rendered.push_str("  )\n");
+        rendered.push_str("  (export \"main\" (func $task_main))\n");
+        rendered
+    }
+
+    fn task_locals_for_state(
+        &self,
+        state: &TaskStateLayout<'_>,
+    ) -> HashMap<HirBindingId, LocalValue> {
+        state
+            .bindings
+            .iter()
+            .map(|(id, slots)| (*id, self.task_local_value(slots)))
+            .collect()
+    }
+
+    fn task_local_value(&self, slots: &StateSlotValue) -> LocalValue {
+        LocalValue {
+            slots: slots
+                .offsets
+                .iter()
+                .map(|offset| self.task_state_start + offset)
+                .collect(),
+        }
+    }
+
     fn compile_block(&mut self, block: &HirBlock, return_type: &HirType) {
         for statement in &block.statements {
             self.compile_stmt(statement, return_type);
@@ -263,13 +540,26 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit("return");
             }
             HirStmt::Forever(stmt) => {
-                self.unsupported(stmt.span, "`forever` is not supported by Wasm v1");
+                if self.task_layout.is_some() {
+                    self.compile_task_forever(&stmt.body);
+                } else {
+                    self.unsupported(stmt.span, "`forever` is not supported by Wasm v1");
+                }
             }
             HirStmt::Exit(stmt) => {
-                self.unsupported(stmt.span, "`exit` is not supported by Wasm v1");
+                if self.task_layout.is_some() {
+                    self.compile_expr(&stmt.value);
+                    self.emit("return");
+                } else {
+                    self.unsupported(stmt.span, "`exit` is not supported by Wasm v1");
+                }
             }
             HirStmt::Delegate(stmt) => {
-                self.unsupported(stmt.span, "`delegate` is not supported by Wasm v1");
+                if self.task_layout.is_some() {
+                    self.compile_task_delegate(stmt);
+                } else {
+                    self.unsupported(stmt.span, "`delegate` is not supported by Wasm v1");
+                }
             }
             HirStmt::Match(stmt) => self.compile_match_stmt(stmt, return_type),
             HirStmt::For(stmt) => self.compile_for_stmt(stmt, return_type),
@@ -282,6 +572,63 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.compile_block(&stmt.else_block, return_type);
                 self.emit("end");
             }
+        }
+    }
+
+    fn compile_task_forever(&mut self, body: &HirBlock) {
+        let label = self.fresh_label("task_forever");
+        self.emit(format!("loop ${label}"));
+        self.compile_block(body, &self.function.return_type);
+        self.emit(format!("br ${label}"));
+        self.emit("end");
+    }
+
+    fn compile_task_delegate(&mut self, stmt: &langlog_sema::HirDelegateStmt) {
+        let Some(target) = self
+            .task_layout
+            .as_ref()
+            .and_then(|layout| layout.state(stmt.target))
+            .cloned()
+        else {
+            self.unsupported(stmt.span, "delegate target is not reachable from task main");
+            return;
+        };
+        if stmt.args.len() != target.param_bindings.len() {
+            self.unsupported(
+                stmt.span,
+                "delegate argument count does not match target task",
+            );
+            return;
+        }
+
+        let mut evaluated_args = Vec::new();
+        for arg in &stmt.args {
+            let Some(width) = supported_value_width(&arg.ty) else {
+                self.unsupported(arg.span, wasm_type_diagnostic(&arg.ty));
+                return;
+            };
+            let slots = self.allocate_scratch_locals(width);
+            self.compile_expr(arg);
+            self.store_slots(&slots);
+            evaluated_args.push(slots);
+        }
+
+        self.clear_task_state_slots(&target);
+        for (slots, target_param) in evaluated_args.iter().zip(target.param_bindings.iter()) {
+            let target_local = self.task_local_value(target_param);
+            self.emit_get_slots(slots);
+            self.store_slots(&target_local.slots);
+        }
+
+        self.emit(format!("i32.const {}", target.tag));
+        self.emit(format!("local.set {}", self.task_tag_local));
+        self.emit("br $task_dispatch");
+    }
+
+    fn clear_task_state_slots(&mut self, state: &TaskStateLayout<'_>) {
+        for offset in 0..state.variant_width {
+            self.emit("i32.const 0");
+            self.emit(format!("local.set {}", self.task_state_start + offset));
         }
     }
 
@@ -1011,12 +1358,27 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
     }
 
     fn allocate_local(&mut self, id: HirBindingId, ty: &HirType) -> LocalValue {
+        if self.task_layout.is_some() {
+            if let Some(local) = self.locals.get(&id).cloned() {
+                return local;
+            }
+            self.compiler
+                .error(None, "task local is missing from task state layout");
+            return LocalValue { slots: Vec::new() };
+        }
+
         let width = value_width(ty).unwrap_or(1);
         let slots = (self.next_local..self.next_local + width).collect::<Vec<_>>();
         self.next_local += width;
         let local = LocalValue { slots };
         self.locals.insert(id, local.clone());
         local
+    }
+
+    fn fresh_label(&mut self, prefix: &str) -> String {
+        let label = format!("{prefix}_{}", self.next_label);
+        self.next_label += 1;
+        label
     }
 
     fn allocate_scratch_local(&mut self) -> u32 {
@@ -1085,6 +1447,251 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
     fn emit(&mut self, instruction: impl Into<String>) {
         self.code.push(instruction.into());
+    }
+}
+
+fn delegate_targets_in_block(block: &HirBlock) -> Vec<HirItemId> {
+    let mut targets = Vec::new();
+    collect_delegate_targets_block(block, &mut targets);
+    targets
+}
+
+fn collect_delegate_targets_block(block: &HirBlock, targets: &mut Vec<HirItemId>) {
+    for statement in &block.statements {
+        collect_delegate_targets_stmt(statement, targets);
+    }
+    if let Some(result) = &block.result {
+        collect_delegate_targets_expr(result, targets);
+    }
+}
+
+fn collect_delegate_targets_stmt(statement: &HirStmt, targets: &mut Vec<HirItemId>) {
+    match statement {
+        HirStmt::Let(stmt) => {
+            if let Some(value) = &stmt.value {
+                collect_delegate_targets_expr(value, targets);
+            }
+        }
+        HirStmt::Assign(stmt) => {
+            collect_delegate_targets_expr(&stmt.target, targets);
+            collect_delegate_targets_expr(&stmt.value, targets);
+        }
+        HirStmt::Expr(stmt) => collect_delegate_targets_expr(&stmt.expr, targets),
+        HirStmt::If(stmt) => {
+            collect_delegate_targets_expr(&stmt.condition, targets);
+            collect_delegate_targets_block(&stmt.then_block, targets);
+            if let Some(branch) = &stmt.else_branch {
+                collect_delegate_targets_else(branch, targets);
+            }
+        }
+        HirStmt::Match(stmt) => {
+            collect_delegate_targets_expr(&stmt.expr, targets);
+            for arm in &stmt.arms {
+                match &arm.body {
+                    HirMatchBody::Block(block) => collect_delegate_targets_block(block, targets),
+                    HirMatchBody::Expr(expr) => collect_delegate_targets_expr(expr, targets),
+                }
+            }
+        }
+        HirStmt::For(stmt) => {
+            collect_delegate_targets_expr(&stmt.iterable, targets);
+            collect_delegate_targets_block(&stmt.body, targets);
+        }
+        HirStmt::Return(stmt) => {
+            if let Some(value) = &stmt.value {
+                collect_delegate_targets_expr(value, targets);
+            }
+        }
+        HirStmt::Forever(stmt) => collect_delegate_targets_block(&stmt.body, targets),
+        HirStmt::Exit(stmt) => collect_delegate_targets_expr(&stmt.value, targets),
+        HirStmt::Delegate(stmt) => {
+            targets.push(stmt.target);
+            for arg in &stmt.args {
+                collect_delegate_targets_expr(arg, targets);
+            }
+        }
+        HirStmt::Observe(stmt) => {
+            collect_delegate_targets_expr(&stmt.left, targets);
+            collect_delegate_targets_expr(&stmt.right, targets);
+            collect_delegate_targets_block(&stmt.else_block, targets);
+        }
+    }
+}
+
+fn collect_delegate_targets_else(branch: &HirElseBranch, targets: &mut Vec<HirItemId>) {
+    match branch {
+        HirElseBranch::Block(block) => collect_delegate_targets_block(block, targets),
+        HirElseBranch::If(stmt) => {
+            collect_delegate_targets_expr(&stmt.condition, targets);
+            collect_delegate_targets_block(&stmt.then_block, targets);
+            if let Some(branch) = &stmt.else_branch {
+                collect_delegate_targets_else(branch, targets);
+            }
+        }
+    }
+}
+
+fn collect_delegate_targets_expr(expr: &HirExpr, targets: &mut Vec<HirItemId>) {
+    match &expr.kind {
+        HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
+            for element in elements {
+                collect_delegate_targets_expr(element, targets);
+            }
+        }
+        HirExprKind::Block(block) => collect_delegate_targets_block(block, targets),
+        HirExprKind::Unary { expr, .. } => collect_delegate_targets_expr(expr, targets),
+        HirExprKind::Binary { left, right, .. } => {
+            collect_delegate_targets_expr(left, targets);
+            collect_delegate_targets_expr(right, targets);
+        }
+        HirExprKind::Recover { expr, fallback, .. } => {
+            collect_delegate_targets_expr(expr, targets);
+            collect_delegate_targets_expr(fallback, targets);
+        }
+        HirExprKind::Call { callee, args } => {
+            collect_delegate_targets_expr(callee, targets);
+            for arg in args {
+                collect_delegate_targets_expr(arg, targets);
+            }
+        }
+        HirExprKind::Index { target, index } => {
+            collect_delegate_targets_expr(target, targets);
+            collect_delegate_targets_expr(index, targets);
+        }
+        HirExprKind::Binding(_)
+        | HirExprKind::Item(_)
+        | HirExprKind::HostBuiltin(_)
+        | HirExprKind::Int(_)
+        | HirExprKind::Bool(_) => {}
+    }
+}
+
+fn collect_task_local_bindings(block: &HirBlock, bindings: &mut Vec<langlog_sema::HirBinding>) {
+    for statement in &block.statements {
+        collect_task_local_bindings_stmt(statement, bindings);
+    }
+    if let Some(result) = &block.result {
+        collect_task_local_bindings_expr(result, bindings);
+    }
+}
+
+fn collect_task_local_bindings_stmt(
+    statement: &HirStmt,
+    bindings: &mut Vec<langlog_sema::HirBinding>,
+) {
+    match statement {
+        HirStmt::Let(stmt) => {
+            bindings.push(stmt.binding.clone());
+            if let Some(value) = &stmt.value {
+                collect_task_local_bindings_expr(value, bindings);
+            }
+        }
+        HirStmt::Assign(stmt) => {
+            collect_task_local_bindings_expr(&stmt.target, bindings);
+            collect_task_local_bindings_expr(&stmt.value, bindings);
+        }
+        HirStmt::Expr(stmt) => collect_task_local_bindings_expr(&stmt.expr, bindings),
+        HirStmt::If(stmt) => {
+            collect_task_local_bindings_expr(&stmt.condition, bindings);
+            collect_task_local_bindings(&stmt.then_block, bindings);
+            if let Some(branch) = &stmt.else_branch {
+                collect_task_local_bindings_else(branch, bindings);
+            }
+        }
+        HirStmt::Match(stmt) => {
+            collect_task_local_bindings_expr(&stmt.expr, bindings);
+            for arm in &stmt.arms {
+                if let HirPatternKind::Binding(binding) = &arm.pattern.kind {
+                    bindings.push(binding.clone());
+                }
+                match &arm.body {
+                    HirMatchBody::Block(block) => collect_task_local_bindings(block, bindings),
+                    HirMatchBody::Expr(expr) => collect_task_local_bindings_expr(expr, bindings),
+                }
+            }
+        }
+        HirStmt::For(stmt) => {
+            collect_task_local_bindings_expr(&stmt.iterable, bindings);
+            if let HirPatternKind::Binding(binding) = &stmt.binding.kind {
+                bindings.push(binding.clone());
+            }
+            collect_task_local_bindings(&stmt.body, bindings);
+        }
+        HirStmt::Return(stmt) => {
+            if let Some(value) = &stmt.value {
+                collect_task_local_bindings_expr(value, bindings);
+            }
+        }
+        HirStmt::Forever(stmt) => collect_task_local_bindings(&stmt.body, bindings),
+        HirStmt::Exit(stmt) => collect_task_local_bindings_expr(&stmt.value, bindings),
+        HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_task_local_bindings_expr(arg, bindings);
+            }
+        }
+        HirStmt::Observe(stmt) => {
+            collect_task_local_bindings_expr(&stmt.left, bindings);
+            collect_task_local_bindings_expr(&stmt.right, bindings);
+            collect_task_local_bindings(&stmt.else_block, bindings);
+        }
+    }
+}
+
+fn collect_task_local_bindings_else(
+    branch: &HirElseBranch,
+    bindings: &mut Vec<langlog_sema::HirBinding>,
+) {
+    match branch {
+        HirElseBranch::Block(block) => collect_task_local_bindings(block, bindings),
+        HirElseBranch::If(stmt) => {
+            collect_task_local_bindings_expr(&stmt.condition, bindings);
+            collect_task_local_bindings(&stmt.then_block, bindings);
+            if let Some(branch) = &stmt.else_branch {
+                collect_task_local_bindings_else(branch, bindings);
+            }
+        }
+    }
+}
+
+fn collect_task_local_bindings_expr(expr: &HirExpr, bindings: &mut Vec<langlog_sema::HirBinding>) {
+    match &expr.kind {
+        HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
+            for element in elements {
+                collect_task_local_bindings_expr(element, bindings);
+            }
+        }
+        HirExprKind::Block(block) => collect_task_local_bindings(block, bindings),
+        HirExprKind::Unary { expr, .. } => collect_task_local_bindings_expr(expr, bindings),
+        HirExprKind::Binary { left, right, .. } => {
+            collect_task_local_bindings_expr(left, bindings);
+            collect_task_local_bindings_expr(right, bindings);
+        }
+        HirExprKind::Recover {
+            expr,
+            error_binding,
+            fallback,
+        } => {
+            collect_task_local_bindings_expr(expr, bindings);
+            if let Some(binding) = error_binding {
+                bindings.push(binding.clone());
+            }
+            collect_task_local_bindings_expr(fallback, bindings);
+        }
+        HirExprKind::Call { callee, args } => {
+            collect_task_local_bindings_expr(callee, bindings);
+            for arg in args {
+                collect_task_local_bindings_expr(arg, bindings);
+            }
+        }
+        HirExprKind::Index { target, index } => {
+            collect_task_local_bindings_expr(target, bindings);
+            collect_task_local_bindings_expr(index, bindings);
+        }
+        HirExprKind::Binding(_)
+        | HirExprKind::Item(_)
+        | HirExprKind::HostBuiltin(_)
+        | HirExprKind::Int(_)
+        | HirExprKind::Bool(_) => {}
     }
 }
 

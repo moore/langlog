@@ -20,19 +20,38 @@ This document complements, but does not replace, the main language spec:
 - A successful Wasm build MUST produce WAT and non-empty Wasm bytes.
 - Wasm builds MUST export `fn main() -> u32` as `main`.
 - Wasm V1 MUST reject `main` forms other than `fn main() -> u32`.
+- Wasm builds MUST export `task main() -> u32` as `main`.
+- Wasm V1 MUST reject task-mode roots other than `task main() -> u32`.
 - Wasm V1 MUST compile helper functions returning flattened aggregate values.
 - Wasm V1 MUST compile generic flattened `Result<T, E>` values.
 - Wasm V1 MUST compile helper functions returning `()` without Wasm result
   values.
-- Wasm V1 MUST reject task items because task execution is not supported by the
-  Wasm v1 backend.
+- Wasm V1 task-state layout MUST include exactly the tasks reachable from
+  `task main` through `delegate` statements and MUST size the shared state
+  slots to the largest reachable task-state variant.
+- Wasm V1 task-state layout MUST collect cyclic delegation without recursive
+  stack growth.
+- Wasm V1 task-state layout MUST expose delegate target parameter offsets for
+  state transitions.
+- Wasm V1 MUST lower `delegate` statements as task-state transitions without
+  direct Wasm calls to task items.
+- Wasm V1 MUST execute cyclic task delegation as bounded task-state
+  transitions.
+- Wasm V1 MUST evaluate delegate arguments before replacing caller task state.
+- Wasm V1 MUST discard caller task-local state before entering delegated target
+  task state.
+- Wasm V1 MUST compile `forever` task statements as Wasm loops.
+- Wasm V1 MUST emit imports for host builtins used inside reachable task
+  bodies.
+- Wasm V1 MUST reject task-state values that are not representable as flattened
+  Wasm values.
 - Wasm V1 MUST reject Set and Map values as check/proof-only runtime values.
 - Wasm V1 MUST reject first-class function values and indirect calls.
 - Wasm V1 MUST reject assignment targets other than local bindings.
 - When backend lowering fails during `langlog build --target wasm`, the CLI
   MUST print diagnostics to stderr.
-- Wasm task-item rejection diagnostics MUST be reported through the CLI stderr
-  path during build.
+- Wasm task-root diagnostics MUST be reported through the CLI stderr path
+  during build.
 - Wasm build diagnostics MUST be reported without panicking.
 
 ## LLG-WASM-02 Scalar Execution

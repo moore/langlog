@@ -133,6 +133,9 @@ M5 because there is still no backend-independent executable semantics layer.
   blocks in Wasm V1.
 - [x] Add host builtin imports for browser/playground interaction.
 - [x] Add `langlog-playground-wasm` and a static browser playground adapter.
+- [x] Lower `task main() -> u32` programs to Wasm V1 using a single dispatcher
+  with bounded task-state slots; `delegate` updates state instead of calling
+  task items.
 - [ ] Keep Wasm V1 behavior aligned with future MIR/interpreter semantics once
   M5 exists.
 
@@ -159,6 +162,7 @@ VM.
 - [x] Specify the task memory model: a task instance is one active state enum
   variant, and `delegate` replaces caller task-local state rather than pushing
   a task stack frame.
+- [x] Implement Wasm V1 task runtime lowering for `task main() -> u32`.
 - [ ] Define the single-event-loop runtime model.
 - [ ] Define I/O programs as task-driven bounded state machines.
 - [ ] Add bounded event handlers and scheduling semantics.
