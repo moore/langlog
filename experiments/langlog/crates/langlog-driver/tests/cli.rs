@@ -331,6 +331,27 @@ fn main() -> u32 { 1 }
     assert!(stderr.contains("check/proof-only"));
 }
 
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
+//# Wasm task-item rejection diagnostics MUST be reported through the CLI stderr path during build.
+#[test]
+fn requirement_llg_wasm_01_build_reports_task_backend_rejection_to_stderr() {
+    let source = TempSource::new(
+        r#"
+task main() -> u32 {
+    exit 0;
+}
+"#,
+    );
+    let failure = run_build_wasm(&source.path);
+
+    assert!(!failure.status.success());
+    let stdout = String::from_utf8(failure.stdout).unwrap();
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("tasks are not supported by Wasm v1"));
+}
+
 //= SPEC.md#llg-cli-02-cli-output-behavior
 //= type=test
 //# When `.langlog-config` cannot be read, the CLI MUST print an error to stderr.

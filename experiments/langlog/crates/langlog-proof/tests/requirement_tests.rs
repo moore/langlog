@@ -244,6 +244,74 @@ fn main(values: [u32; 4], index: u32) {
     }));
 }
 
+//= SPEC.md#llg-proof-01-proof-required-operations
+//= type=test
+//# Proof checking MUST traverse task bodies, including `forever` bodies, `exit` values, and `delegate` arguments.
+#[test]
+fn requirement_llg_proof_01_checks_indexing_inside_task_bodies() {
+    let (_, proven) = check_ok(
+        r#"
+task main(values: [u32; 4], index: u32) -> u32 {
+    forever {
+        observe index < 4 else {
+            exit 1;
+        }
+        values[index];
+    }
+}
+"#,
+    );
+    assert_eq!(proof_ir(&proven).functions.len(), 1);
+
+    let (checked, unproven_forever) = check_err(
+        r#"
+task main(values: [u32; 4], index: u32) -> u32 {
+    forever {
+        values[index];
+    }
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &unproven_forever,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+
+    let (checked, unproven_exit) = check_err(
+        r#"
+task main(values: [u32; 4], index: u32) -> u32 {
+    exit values[index];
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &unproven_exit,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+
+    let (checked, unproven_delegate) = check_err(
+        r#"
+task worker(value: u32) -> u32 {
+    exit value;
+}
+
+task main(values: [u32; 4], index: u32) -> u32 {
+    delegate worker(values[index]);
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &unproven_delegate,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+}
+
 //= PROOF_IR.md#llg-pir-01-pipeline-and-lowering
 //= type=test
 //# Every Proof IR node MUST preserve a source span sufficient for diagnostics and traceability.

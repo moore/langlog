@@ -105,6 +105,25 @@ fn requirement_llg_wasm_01_rejects_unsupported_main_shapes() {
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point
 //= type=test
+//# Wasm V1 MUST reject task items because task execution is not supported by the Wasm v1 backend.
+#[test]
+fn requirement_llg_wasm_01_rejects_task_items() {
+    let checked = checked(
+        r#"
+task main() -> u32 {
+    exit 0;
+}
+"#,
+    );
+    let diagnostics = compile(&checked).expect_err("expected backend error");
+
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("tasks are not supported by Wasm v1")));
+}
+
+//= WASM.md#llg-wasm-01-build-gate-and-entry-point
+//= type=test
 //# Wasm V1 MUST compile helper functions returning flattened aggregate values.
 #[test]
 fn requirement_llg_wasm_01_compiles_flattened_aggregate_returns() {

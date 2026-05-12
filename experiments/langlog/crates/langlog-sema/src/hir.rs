@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MatchBody, ObserveOp, Pattern,
-    PatternKind, Stmt, Type, UnaryOp,
+    PatternKind, Stmt, Task, Type, UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -25,8 +25,15 @@ pub struct HirProgram {
     pub functions: Vec<HirFunction>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirFunctionKind {
+    Function,
+    Task,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirFunction {
+    pub kind: HirFunctionKind,
     pub id: HirItemId,
     pub name: String,
     pub params: Vec<HirBinding>,
@@ -61,6 +68,9 @@ pub enum HirStmt {
     Match(HirMatchStmt),
     For(HirForStmt),
     Return(HirReturnStmt),
+    Forever(HirForeverStmt),
+    Exit(HirExitStmt),
+    Delegate(HirDelegateStmt),
     Observe(HirObserveStmt),
 }
 
@@ -74,6 +84,9 @@ impl HirStmt {
             Self::Match(stmt) => stmt.span,
             Self::For(stmt) => stmt.span,
             Self::Return(stmt) => stmt.span,
+            Self::Forever(stmt) => stmt.span,
+            Self::Exit(stmt) => stmt.span,
+            Self::Delegate(stmt) => stmt.span,
             Self::Observe(stmt) => stmt.span,
         }
     }
@@ -145,6 +158,25 @@ pub struct HirForStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirReturnStmt {
     pub value: Option<HirExpr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirForeverStmt {
+    pub body: HirBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirExitStmt {
+    pub value: HirExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirDelegateStmt {
+    pub target: HirItemId,
+    pub args: Vec<HirExpr>,
     pub span: Span,
 }
 
@@ -259,9 +291,9 @@ pub(crate) fn lower_program(
             .module
             .items
             .iter()
-            .map(|item| {
-                let Item::Function(function) = item;
-                lowerer.lower_function(function)
+            .map(|item| match item {
+                Item::Function(function) => lowerer.lower_function(function),
+                Item::Task(task) => lowerer.lower_task(task),
             })
             .collect(),
     }
@@ -285,6 +317,7 @@ impl<'a> HirLowerer<'a> {
 
     fn lower_function(&self, function: &Function) -> HirFunction {
         HirFunction {
+            kind: HirFunctionKind::Function,
             id: HirItemId {
                 declaration_span: function.name.span,
             },
@@ -301,6 +334,24 @@ impl<'a> HirLowerer<'a> {
                 .unwrap_or(HirType::Unit),
             body: self.lower_block(&function.body),
             span: function.span,
+        }
+    }
+
+    fn lower_task(&self, task: &Task) -> HirFunction {
+        HirFunction {
+            kind: HirFunctionKind::Task,
+            id: HirItemId {
+                declaration_span: task.name.span,
+            },
+            name: task.name.value.clone(),
+            params: task
+                .params
+                .iter()
+                .map(|param| self.lower_named_binding(&param.name, BindingKind::Param, false))
+                .collect(),
+            return_type: lower_ast_type(&task.return_type),
+            body: self.lower_block(&task.body),
+            span: task.span,
         }
     }
 
@@ -368,6 +419,27 @@ impl<'a> HirLowerer<'a> {
                 value: stmt.value.as_ref().map(|expr| self.lower_expr(expr)),
                 span: stmt.span,
             }),
+            Stmt::Forever(stmt) => HirStmt::Forever(HirForeverStmt {
+                body: self.lower_block(&stmt.body),
+                span: stmt.span,
+            }),
+            Stmt::Exit(stmt) => HirStmt::Exit(HirExitStmt {
+                value: self.lower_expr(&stmt.value),
+                span: stmt.span,
+            }),
+            Stmt::Delegate(stmt) => {
+                let resolution = self
+                    .resolutions
+                    .get(&stmt.target.span)
+                    .expect("checked delegate targets must be resolved");
+                HirStmt::Delegate(HirDelegateStmt {
+                    target: HirItemId {
+                        declaration_span: resolution.declaration_span,
+                    },
+                    args: stmt.args.iter().map(|arg| self.lower_expr(arg)).collect(),
+                    span: stmt.span,
+                })
+            }
             Stmt::Observe(stmt) => HirStmt::Observe(HirObserveStmt {
                 left: self.lower_expr(&stmt.left),
                 op: stmt.op,
@@ -436,7 +508,7 @@ impl<'a> HirLowerer<'a> {
                     .get(&name.span)
                     .expect("checked HIR expressions must be resolved");
                 let kind = match resolution.kind {
-                    BindingKind::Item => HirExprKind::Item(HirItemId {
+                    BindingKind::Item | BindingKind::TaskItem => HirExprKind::Item(HirItemId {
                         declaration_span: resolution.declaration_span,
                     }),
                     BindingKind::HostBuiltin => HirExprKind::HostBuiltin(

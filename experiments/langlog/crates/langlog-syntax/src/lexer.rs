@@ -235,6 +235,7 @@ impl Lexer {
         let text = self.source.span_text(span).unwrap_or_default();
         let kind = match text {
             "fn" => TokenKind::Fn,
+            "task" => TokenKind::Task,
             "let" => TokenKind::Let,
             "mut" => TokenKind::Mut,
             "if" => TokenKind::If,
@@ -242,7 +243,10 @@ impl Lexer {
             "match" => TokenKind::Match,
             "for" => TokenKind::For,
             "in" => TokenKind::In,
+            "forever" => TokenKind::Forever,
             "return" => TokenKind::Return,
+            "exit" => TokenKind::Exit,
+            "delegate" => TokenKind::Delegate,
             "observe" => TokenKind::Observe,
             "or" => TokenKind::Or,
             "true" => TokenKind::True,

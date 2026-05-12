@@ -24,11 +24,15 @@ This document complements, but does not replace, the main language spec:
 - Wasm V1 MUST compile generic flattened `Result<T, E>` values.
 - Wasm V1 MUST compile helper functions returning `()` without Wasm result
   values.
+- Wasm V1 MUST reject task items because task execution is not supported by the
+  Wasm v1 backend.
 - Wasm V1 MUST reject Set and Map values as check/proof-only runtime values.
 - Wasm V1 MUST reject first-class function values and indirect calls.
 - Wasm V1 MUST reject assignment targets other than local bindings.
 - When backend lowering fails during `langlog build --target wasm`, the CLI
   MUST print diagnostics to stderr.
+- Wasm task-item rejection diagnostics MUST be reported through the CLI stderr
+  path during build.
 - Wasm build diagnostics MUST be reported without panicking.
 
 ## LLG-WASM-02 Scalar Execution

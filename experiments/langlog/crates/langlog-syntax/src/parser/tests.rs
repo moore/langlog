@@ -24,7 +24,10 @@ fn sum(values: [u32; 4]) -> u32 {
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     assert_eq!(parsed.module.items.len(), 1);
 
-    let Item::Function(function) = &parsed.module.items[0];
+    let function = match &parsed.module.items[0] {
+        Item::Function(function) => function,
+        other => panic!("expected function item, got {other:?}"),
+    };
     assert_eq!(function.name.value, "sum");
     assert_eq!(function.params.len(), 1);
     assert!(matches!(

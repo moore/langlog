@@ -1,7 +1,8 @@
 use crate::ast::{
-    AssignStmt, BinaryOp, Block, ElseBranch, Expr, ExprKind, ExprStmt, ForStmt, Function,
-    GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp,
-    ObserveStmt, Param, Pattern, PatternKind, ReturnStmt, Stmt, Type, TypeKind, UnaryOp,
+    AssignStmt, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr, ExprKind, ExprStmt,
+    ForStmt, ForeverStmt, Function, GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody,
+    MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern, PatternKind, ReturnStmt, Stmt, Task,
+    Type, TypeKind, UnaryOp,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -83,12 +84,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> Option<Item> {
-        if !self.at(TokenTag::Fn) {
-            self.error_current("expected a top-level item", "expected `fn`");
-            return None;
+        match self.current_tag() {
+            TokenTag::Fn => self.parse_function().map(Item::Function),
+            TokenTag::Task => self.parse_task().map(Item::Task),
+            _ => {
+                self.error_current("expected a top-level item", "expected `fn` or `task`");
+                None
+            }
         }
-
-        self.parse_function().map(Item::Function)
     }
 
     fn parse_function(&mut self) -> Option<Function> {
@@ -105,6 +108,25 @@ impl<'a> Parser<'a> {
         let span = start.span.cover(body.span).unwrap_or(body.span);
 
         Some(Function {
+            span,
+            name,
+            params,
+            return_type,
+            body,
+        })
+    }
+
+    fn parse_task(&mut self) -> Option<Task> {
+        let start = self.expect_tag(TokenTag::Task, "expected `task` to start a task")?;
+        let name = self.expect_identifier("expected a task name")?;
+        self.expect_tag(TokenTag::LParen, "expected `(` after task name")?;
+        let params = self.parse_params()?;
+        self.expect_tag(TokenTag::Arrow, "expected `->` before task return type")?;
+        let return_type = self.parse_type()?;
+        let body = self.parse_block()?;
+        let span = start.span.cover(body.span).unwrap_or(body.span);
+
+        Some(Task {
             span,
             name,
             params,
@@ -366,6 +388,9 @@ impl<'a> Parser<'a> {
                 | TokenTag::Match
                 | TokenTag::For
                 | TokenTag::Return
+                | TokenTag::Forever
+                | TokenTag::Exit
+                | TokenTag::Delegate
                 | TokenTag::Observe
         )
     }
@@ -377,6 +402,9 @@ impl<'a> Parser<'a> {
             TokenTag::Match => self.parse_match_statement().map(Stmt::Match),
             TokenTag::For => self.parse_for_statement().map(Stmt::For),
             TokenTag::Return => self.parse_return_statement().map(Stmt::Return),
+            TokenTag::Forever => self.parse_forever_statement().map(Stmt::Forever),
+            TokenTag::Exit => self.parse_exit_statement().map(Stmt::Exit),
+            TokenTag::Delegate => self.parse_delegate_statement().map(Stmt::Delegate),
             TokenTag::Observe => self.parse_observe_statement().map(Stmt::Observe),
             _ => {
                 self.error_current("expected a statement", "statement expected here");
@@ -541,6 +569,40 @@ impl<'a> Parser<'a> {
         let span = start.span.cover(end.span).unwrap_or(start.span);
 
         Some(ReturnStmt { span, value })
+    }
+
+    fn parse_forever_statement(&mut self) -> Option<ForeverStmt> {
+        let start = self.expect_tag(TokenTag::Forever, "expected `forever`")?;
+        let body = self.parse_block()?;
+        let span = start.span.cover(body.span).unwrap_or(start.span);
+
+        Some(ForeverStmt { span, body })
+    }
+
+    fn parse_exit_statement(&mut self) -> Option<ExitStmt> {
+        let start = self.expect_tag(TokenTag::Exit, "expected `exit`")?;
+        let value = self.parse_expression(0)?;
+        let end = self.expect_tag(TokenTag::Semi, "expected `;` after `exit`")?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+
+        Some(ExitStmt { span, value })
+    }
+
+    fn parse_delegate_statement(&mut self) -> Option<DelegateStmt> {
+        let start = self.expect_tag(TokenTag::Delegate, "expected `delegate`")?;
+        let target = self.expect_identifier("expected a task name after `delegate`")?;
+        self.expect_tag(TokenTag::LParen, "expected `(` after delegated task name")?;
+        let args = self.parse_call_arguments(TokenTag::RParen)?;
+        let args_end =
+            self.expect_tag(TokenTag::RParen, "expected `)` after delegate arguments")?;
+        let end = self.expect_tag(TokenTag::Semi, "expected `;` after `delegate`")?;
+        let span = start
+            .span
+            .cover(end.span)
+            .or_else(|| start.span.cover(args_end.span))
+            .unwrap_or(start.span);
+
+        Some(DelegateStmt { span, target, args })
     }
 
     fn parse_observe_statement(&mut self) -> Option<ObserveStmt> {
@@ -734,34 +796,7 @@ impl<'a> Parser<'a> {
             match self.current_tag() {
                 TokenTag::LParen => {
                     self.bump();
-                    let mut args = Vec::new();
-                    if !self.at(TokenTag::RParen) {
-                        loop {
-                            match self.parse_expression(0) {
-                                Some(arg) => args.push(arg),
-                                None => {
-                                    self.synchronize_expression_list_item(TokenTag::RParen);
-                                    if self.bump_if(TokenTag::Comma) {
-                                        if self.at(TokenTag::RParen) {
-                                            break;
-                                        }
-                                        continue;
-                                    }
-                                    if self.at(TokenTag::RParen) {
-                                        break;
-                                    }
-                                    return None;
-                                }
-                            }
-                            if self.bump_if(TokenTag::Comma) {
-                                if self.at(TokenTag::RParen) {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
+                    let args = self.parse_call_arguments(TokenTag::RParen)?;
                     let end = self.expect_tag(TokenTag::RParen, "expected `)` after arguments")?;
                     let span = expr.span.cover(end.span).unwrap_or(expr.span);
                     expr = Expr::new(
@@ -799,6 +834,41 @@ impl<'a> Parser<'a> {
         }
 
         Some(expr)
+    }
+
+    fn parse_call_arguments(&mut self, close: TokenTag) -> Option<Vec<Expr>> {
+        let mut args = Vec::new();
+        if self.at(close) {
+            return Some(args);
+        }
+
+        loop {
+            match self.parse_expression(0) {
+                Some(arg) => args.push(arg),
+                None => {
+                    self.synchronize_expression_list_item(close);
+                    if self.bump_if(TokenTag::Comma) {
+                        if self.at(close) {
+                            break;
+                        }
+                        continue;
+                    }
+                    if self.at(close) {
+                        break;
+                    }
+                    return None;
+                }
+            }
+            if self.bump_if(TokenTag::Comma) {
+                if self.at(close) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Some(args)
     }
 
     fn parse_atom(&mut self) -> Option<Expr> {
@@ -965,7 +1035,7 @@ impl<'a> Parser<'a> {
 
     fn synchronize_item(&mut self) {
         while !self.at(TokenTag::Eof) {
-            if self.at(TokenTag::Fn) {
+            if self.at(TokenTag::Fn) || self.at(TokenTag::Task) {
                 break;
             }
             self.bump();
@@ -985,6 +1055,9 @@ impl<'a> Parser<'a> {
                 | TokenTag::Match
                 | TokenTag::For
                 | TokenTag::Return
+                | TokenTag::Forever
+                | TokenTag::Exit
+                | TokenTag::Delegate
                 | TokenTag::Observe => break,
                 _ => {
                     self.bump();

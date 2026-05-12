@@ -8,12 +8,14 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Function(Function),
+    Task(Task),
 }
 
 impl Item {
     pub fn span(&self) -> Span {
         match self {
             Self::Function(function) => function.span,
+            Self::Task(task) => task.span,
         }
     }
 }
@@ -24,6 +26,15 @@ pub struct Function {
     pub name: Spanned<String>,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub span: Span,
+    pub name: Spanned<String>,
+    pub params: Vec<Param>,
+    pub return_type: Type,
     pub body: Block,
 }
 
@@ -50,6 +61,9 @@ pub enum Stmt {
     Match(MatchStmt),
     For(ForStmt),
     Return(ReturnStmt),
+    Forever(ForeverStmt),
+    Exit(ExitStmt),
+    Delegate(DelegateStmt),
     Observe(ObserveStmt),
 }
 
@@ -63,6 +77,9 @@ impl Stmt {
             Self::Match(stmt) => stmt.span,
             Self::For(stmt) => stmt.span,
             Self::Return(stmt) => stmt.span,
+            Self::Forever(stmt) => stmt.span,
+            Self::Exit(stmt) => stmt.span,
+            Self::Delegate(stmt) => stmt.span,
             Self::Observe(stmt) => stmt.span,
         }
     }
@@ -136,6 +153,25 @@ pub struct ForStmt {
 pub struct ReturnStmt {
     pub span: Span,
     pub value: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeverStmt {
+    pub span: Span,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitStmt {
+    pub span: Span,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegateStmt {
+    pub span: Span,
+    pub target: Spanned<String>,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

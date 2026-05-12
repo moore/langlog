@@ -1,8 +1,8 @@
 use langlog_sema::{
-    analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction, HirStmt,
-    HirType, HostBuiltin,
+    analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction,
+    HirFunctionKind, HirStmt, HirType, HostBuiltin,
 };
-use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt};
+use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt, Task};
 use langlog_syntax::{parse, LabelStyle, Span};
 
 fn analyze_ok(source: &str) -> CheckedProgram {
@@ -22,6 +22,19 @@ fn function<'a>(checked: &'a CheckedProgram, name: &str) -> &'a langlog_syntax::
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing function {name:?}"))
+}
+
+fn task<'a>(checked: &'a CheckedProgram, name: &str) -> &'a Task {
+    checked
+        .parsed
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Task(task) if task.name.value == name => Some(task),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing task {name:?}"))
 }
 
 fn hir_function<'a>(checked: &'a CheckedProgram, name: &str) -> &'a HirFunction {
@@ -168,6 +181,17 @@ fn assert_no_diagnostic_message(checked: &CheckedProgram, message: &str) {
             .iter()
             .all(|diagnostic| diagnostic.message != message),
         "unexpected diagnostic {message:?}: {:#?}",
+        checked.diagnostics
+    );
+}
+
+fn assert_diagnostic_message_contains(checked: &CheckedProgram, message: &str) {
+    assert!(
+        checked
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains(message)),
+        "missing diagnostic containing {message:?}: {:#?}",
         checked.diagnostics
     );
 }
@@ -1777,6 +1801,268 @@ fn main(left: u32, right: u32) {
     assert!(checked
         .resolution(name_span(raw_sub_use))
         .is_some_and(|resolution| resolution.kind == BindingKind::Local));
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A bare `forever { ... }` task body MUST be accepted as a valid crash-only or externally terminated task shape.
+#[test]
+fn requirement_llg_sema_05_accepts_terminal_task_forms_and_lowers_hir() {
+    let checked = analyze_ok(
+        r#"
+fn tick() {}
+fn id(value: u32) -> u32 { value }
+
+task exiting(value: u32) -> u32 {
+    exit id(value);
+}
+
+task looping() -> u32 {
+    forever {
+        tick();
+    }
+}
+
+task setup() -> u32 {
+    delegate exiting(0);
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let ast_exiting = task(&checked, "exiting");
+    let hir_exiting = hir_function(&checked, "exiting");
+    let hir_looping = hir_function(&checked, "looping");
+    let hir_setup = hir_function(&checked, "setup");
+
+    assert_eq!(hir_exiting.kind, HirFunctionKind::Task);
+    assert_eq!(hir_looping.kind, HirFunctionKind::Task);
+    assert_eq!(hir_setup.kind, HirFunctionKind::Task);
+    assert_eq!(hir_exiting.return_type, HirType::U32);
+    assert!(matches!(hir_exiting.body.statements[0], HirStmt::Exit(_)));
+    assert!(matches!(
+        hir_looping.body.statements[0],
+        HirStmt::Forever(_)
+    ));
+    assert!(matches!(hir_setup.body.statements[0], HirStmt::Delegate(_)));
+    let exit_value = match &ast_exiting.body.statements[0] {
+        Stmt::Exit(stmt) => &stmt.value,
+        other => panic!("expected exit statement, got {other:?}"),
+    };
+    assert_resolves_to(
+        &checked,
+        call_callee(exit_value),
+        BindingKind::Item,
+        function(&checked, "id").name.span,
+        "task ordinary function call",
+    );
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A task item MUST NOT be callable through ordinary call expression syntax, including as a subexpression, initializer, call argument, expression statement, or any other non-`delegate` expression.
+#[test]
+fn requirement_llg_sema_05_rejects_plain_task_calls_and_invalid_delegates() {
+    let checked = analyze_ok(
+        r#"
+fn helper(value: u32) -> u32 { value }
+task worker(value: u32) -> u32 { exit value; }
+task flag() -> bool { exit true; }
+
+fn function_calls_task() {
+    worker(0);
+}
+
+task task_calls_task() -> u32 {
+    worker(0);
+    exit 0;
+}
+
+task delegate_function() -> u32 {
+    delegate helper(0);
+}
+
+task delegate_unknown() -> u32 {
+    delegate missing();
+}
+
+task delegate_wrong_arity() -> u32 {
+    delegate worker();
+}
+
+task delegate_wrong_arg() -> u32 {
+    delegate worker(true);
+}
+
+task delegate_wrong_return() -> u32 {
+    delegate flag();
+}
+
+task delegate_local() -> u32 {
+    let local = 0;
+    delegate local();
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "task items can only be used with `delegate`");
+    assert_diagnostic_message_contains(&checked, "`delegate` requires a task target");
+    assert_diagnostic_message_contains(&checked, "undefined binding `missing`");
+    assert_diagnostic_message_contains(
+        &checked,
+        "delegate arity mismatch: expected 1 argument(s), found 0",
+    );
+    assert_diagnostic_message_contains(&checked, "type mismatch: expected u32, found bool");
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# Cyclic task delegation MUST be rejected.
+#[test]
+fn requirement_llg_sema_05_rejects_cyclic_task_delegation() {
+    let checked = analyze_ok(
+        r#"
+task alpha() -> u32 {
+    delegate beta();
+}
+
+task beta() -> u32 {
+    delegate alpha();
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "cyclic task delegation is not allowed");
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A task body MUST NOT fall through accidentally. Every reachable task control path MUST end in an `exit` statement, a same-return-type `delegate` statement, or a non-nested `forever` statement.
+#[test]
+fn requirement_llg_sema_05_rejects_task_fallthrough_paths() {
+    let checked = analyze_ok(
+        r#"
+fn tick() {}
+
+task direct() -> u32 {
+    let value = 0;
+}
+
+task branch(flag: bool) -> u32 {
+    if flag {
+        exit 0;
+    }
+}
+
+task choose(flag: bool) -> u32 {
+    match flag {
+        true => { exit 0; },
+        false => { tick(); }
+    }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    let fallthrough_count = checked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message == "task bodies must not fall through")
+        .count();
+    assert_eq!(fallthrough_count, 3, "{:#?}", checked.diagnostics);
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# An `exit` statement MUST appear only inside a task body.
+#[test]
+fn requirement_llg_sema_05_rejects_exit_outside_tasks() {
+    let checked = analyze_ok(
+        r#"
+fn bad_exit() {
+    exit 0;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "`exit` is only allowed inside a task");
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A `forever` statement MUST appear only inside a task body.
+#[test]
+fn requirement_llg_sema_05_rejects_forever_outside_tasks() {
+    let checked = analyze_ok(
+        r#"
+fn bad_forever() {
+    forever {}
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "`forever` is only allowed inside a task");
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A `delegate` statement MUST appear only inside a task body.
+#[test]
+fn requirement_llg_sema_05_rejects_delegate_outside_tasks() {
+    let checked = analyze_ok(
+        r#"
+task worker() -> u32 {
+    exit 0;
+}
+
+fn bad_delegate() {
+    delegate worker();
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "`delegate` is only allowed inside a task");
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A `return` statement MUST be rejected inside a task body.
+#[test]
+fn requirement_llg_sema_05_rejects_return_inside_tasks() {
+    let checked = analyze_ok(
+        r#"
+task bad_return() -> u32 {
+    return 0;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "`return` is not allowed inside a task");
+}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=test
+//# A nested `forever` statement MUST be rejected.
+#[test]
+fn requirement_llg_sema_05_rejects_nested_forever() {
+    let checked = analyze_ok(
+        r#"
+task bad_nested() -> u32 {
+    forever {
+        forever {}
+    }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "nested `forever` loops are not allowed");
 }
 
 //= HIR.md#llg-hir-01-pipeline-and-lowering

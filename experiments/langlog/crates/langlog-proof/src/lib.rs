@@ -324,6 +324,18 @@ impl ProofLowerer {
                     self.lower_expr(value, entries);
                 }
             }
+            HirStmt::Forever(stmt) => entries.push(ProofEntry::Scope {
+                block: self.lower_block(&stmt.body),
+                span: stmt.span,
+            }),
+            HirStmt::Exit(stmt) => {
+                self.lower_expr(&stmt.value, entries);
+            }
+            HirStmt::Delegate(stmt) => {
+                for arg in &stmt.args {
+                    self.lower_expr(arg, entries);
+                }
+            }
             HirStmt::Observe(stmt) => {
                 let (Some(left), Some(right)) = (
                     self.lower_expr(&stmt.left, entries),
@@ -674,6 +686,17 @@ impl<'a> Checker<'a> {
             HirStmt::Return(stmt) => {
                 if let Some(value) = &stmt.value {
                     self.check_expr(value, state);
+                }
+            }
+            HirStmt::Forever(stmt) => {
+                self.check_block(&stmt.body, state);
+            }
+            HirStmt::Exit(stmt) => {
+                self.check_expr(&stmt.value, state);
+            }
+            HirStmt::Delegate(stmt) => {
+                for arg in &stmt.args {
+                    self.check_expr(arg, state);
                 }
             }
             HirStmt::Observe(stmt) => {
@@ -1108,6 +1131,17 @@ fn collect_statement_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>,
         HirStmt::Return(stmt) => {
             if let Some(value) = &stmt.value {
                 collect_expr_bindings(bindings, value);
+            }
+        }
+        HirStmt::Forever(stmt) => {
+            collect_block_bindings(bindings, &stmt.body);
+        }
+        HirStmt::Exit(stmt) => {
+            collect_expr_bindings(bindings, &stmt.value);
+        }
+        HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_expr_bindings(bindings, arg);
             }
         }
         HirStmt::Observe(stmt) => {

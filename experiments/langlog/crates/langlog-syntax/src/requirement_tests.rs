@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, ObserveOp, PatternKind, Stmt, TypeKind,
-    UnaryOp,
+    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, ObserveOp, PatternKind, Stmt, Task,
+    TypeKind, UnaryOp,
 };
 use crate::diagnostic::LabelStyle;
 use crate::lexer::lex;
@@ -30,6 +30,14 @@ fn parse_err(source: &str) -> ParsedModule {
 fn first_function(parsed: &ParsedModule) -> &Function {
     match &parsed.module.items[0] {
         Item::Function(function) => function,
+        other => panic!("expected function item, got {other:?}"),
+    }
+}
+
+fn first_task(parsed: &ParsedModule) -> &Task {
+    match &parsed.module.items[0] {
+        Item::Task(task) => task,
+        other => panic!("expected task item, got {other:?}"),
     }
 }
 
@@ -153,12 +161,12 @@ fn requirement_llg_lex_02_recognizes_boolean_literals() {
 
 //= SPEC.md#llg-lex-03-reserved-keywords
 //= type=test
-//# The phase 1 keyword set MUST reserve `fn`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `return`, `observe`, `or`, `true`, and `false`.
+//# The keyword set MUST reserve `fn`, `task`, `let`, `mut`, `if`, `else`, `match`, `for`, `in`, `forever`, `return`, `exit`, `delegate`, `observe`, `or`, `true`, and `false`.
 #[test]
 fn requirement_llg_lex_03_reserves_keywords() {
     let lexed = lex(
         "requirement.llg",
-        "fn let mut if else match for in return observe or true false",
+        "fn task let mut if else match for in forever return exit delegate observe or true false",
     );
     let tags: Vec<_> = lexed.tokens.iter().map(|token| token.tag()).collect();
 
@@ -166,6 +174,7 @@ fn requirement_llg_lex_03_reserves_keywords() {
         tags,
         vec![
             TokenTag::Fn,
+            TokenTag::Task,
             TokenTag::Let,
             TokenTag::Mut,
             TokenTag::If,
@@ -173,7 +182,10 @@ fn requirement_llg_lex_03_reserves_keywords() {
             TokenTag::Match,
             TokenTag::For,
             TokenTag::In,
+            TokenTag::Forever,
             TokenTag::Return,
+            TokenTag::Exit,
+            TokenTag::Delegate,
             TokenTag::Observe,
             TokenTag::Or,
             TokenTag::True,
@@ -196,37 +208,36 @@ fn requirement_llg_lex_04_marks_invalid_character_spans() {
     assert_eq!(lexed.source.span_text(label.span), Some("@"));
 }
 
-//= SPEC.md#llg-syn-01-top-level-functions
+//= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A phase 1 source file MUST contain only function items at the top level.
+//# A phase 1 source file MUST contain only function items and task items at the top level.
 #[test]
-fn requirement_llg_syn_01_accepts_only_function_top_level_items() {
+fn requirement_llg_syn_01_accepts_function_and_task_top_level_items() {
     let parsed = parse_ok(
         r#"
 fn main() {}
 fn helper() {}
+task worker() -> u32 { exit 0; }
 "#,
     );
 
-    assert_eq!(parsed.module.items.len(), 2);
-    assert!(parsed
-        .module
-        .items
-        .iter()
-        .all(|item| matches!(item, Item::Function(_))));
+    assert_eq!(parsed.module.items.len(), 3);
+    assert!(matches!(parsed.module.items[0], Item::Function(_)));
+    assert!(matches!(parsed.module.items[1], Item::Function(_)));
+    assert!(matches!(parsed.module.items[2], Item::Task(_)));
 }
 
-//= SPEC.md#llg-syn-01-top-level-functions
+//= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A non-function top-level item MUST be rejected with a syntax diagnostic.
+//# A non-function, non-task top-level item MUST be rejected with a syntax diagnostic.
 #[test]
-fn requirement_llg_syn_01_rejects_non_function_top_level_items_with_a_syntax_diagnostic() {
+fn requirement_llg_syn_01_rejects_non_item_top_level_forms_with_a_syntax_diagnostic() {
     let parsed = parse_err("let value = 1;");
 
     assert_diagnostic_contains(&parsed, "expected a top-level item");
 }
 
-//= SPEC.md#llg-syn-01-top-level-functions
+//= SPEC.md#llg-syn-01-top-level-items
 //= type=test
 //# A function item MUST use Rust-like syntax with `fn`, a name, a parameter list, and a block body.
 #[test]
@@ -240,7 +251,7 @@ fn requirement_llg_syn_01_parses_function_item_syntax() {
     assert!(function.body.trailing_expr.is_some());
 }
 
-//= SPEC.md#llg-syn-01-top-level-functions
+//= SPEC.md#llg-syn-01-top-level-items
 //= type=test
 //# The current parser allows the return type to be omitted in phase 1.
 #[test]
@@ -249,6 +260,30 @@ fn requirement_llg_syn_01_allows_omitted_return_types() {
     let function = first_function(&parsed);
 
     assert!(function.return_type.is_none());
+}
+
+//= SPEC.md#llg-syn-01-top-level-items
+//= type=test
+//# A task item MUST use the form `task name(param: Type, ...) -> Type { ... }`.
+#[test]
+fn requirement_llg_syn_01_parses_task_item_syntax() {
+    let parsed = parse_ok("task main(value: u32) -> u32 { exit value; }");
+    let task = first_task(&parsed);
+
+    assert_eq!(task.name.value, "main");
+    assert_eq!(task.params.len(), 1);
+    assert!(matches!(task.return_type.kind, TypeKind::Named(_)));
+    assert!(matches!(task.body.statements.as_slice(), [Stmt::Exit(_)]));
+}
+
+//= SPEC.md#llg-syn-01-top-level-items
+//= type=test
+//# A task item MUST include an explicit return type.
+#[test]
+fn requirement_llg_syn_01_rejects_task_items_without_return_types() {
+    let parsed = parse_err("task main() { exit 0; }");
+
+    assert_diagnostic_contains(&parsed, "expected `->` before task return type");
 }
 
 //= SPEC.md#llg-syn-02-statements
@@ -295,6 +330,29 @@ fn main() {
     assert!(matches!(statements[5], Stmt::For(_)));
     assert!(matches!(statements[6], Stmt::Observe(_)));
     assert!(matches!(statements[7], Stmt::Return(_)));
+}
+
+//= SPEC.md#llg-syn-02-statements
+//= type=test
+//# The task-orchestration parser MUST additionally accept `forever`, `exit`, and `delegate` statements.
+#[test]
+fn requirement_llg_syn_02_parses_task_statement_forms() {
+    let parsed = parse_ok(
+        r#"
+task main() -> u32 {
+    forever {
+        tick();
+    }
+    delegate worker(1);
+    exit 0;
+}
+"#,
+    );
+
+    let statements = &first_task(&parsed).body.statements;
+    assert!(matches!(statements[0], Stmt::Forever(_)));
+    assert!(matches!(statements[1], Stmt::Delegate(_)));
+    assert!(matches!(statements[2], Stmt::Exit(_)));
 }
 
 //= SPEC.md#llg-syn-02-statements

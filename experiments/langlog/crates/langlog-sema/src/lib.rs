@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MatchBody, ObserveOp,
-    Pattern, PatternKind, Stmt, Type, TypeKind, UnaryOp,
+    Pattern, PatternKind, Stmt, Task, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -13,6 +13,7 @@ pub use hir::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingKind {
     Item,
+    TaskItem,
     HostBuiltin,
     Param,
     Local,
@@ -24,6 +25,31 @@ struct Binding {
     span: Span,
     loop_bound: bool,
     mutable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemKind {
+    Function,
+    Task,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ItemSignature {
+    kind: ItemKind,
+    signature: FunctionType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ItemContext<'a> {
+    kind: ItemKind,
+    name: &'a str,
+    name_span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ControlContext<'a> {
+    item: ItemContext<'a>,
+    forever_depth: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -290,6 +316,7 @@ struct Analyzer<'a> {
     diagnostics: Vec<Diagnostic>,
     resolutions: Vec<ResolvedName>,
     call_edges: Vec<CallEdge>,
+    delegation_edges: Vec<CallEdge>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -300,40 +327,68 @@ impl<'a> Analyzer<'a> {
             diagnostics: Vec::new(),
             resolutions: Vec::new(),
             call_edges: Vec::new(),
+            delegation_edges: Vec::new(),
         }
     }
 
     fn collect_items(&mut self) {
         for item in &self.parsed.module.items {
-            let Item::Function(function) = item;
-            if HostBuiltin::from_name(function.name.value.as_str()).is_some() {
-                self.report_reserved_host_builtin_name(function);
+            let (name, kind) = item_name_and_kind(item);
+            if HostBuiltin::from_name(name.value.as_str()).is_some() {
+                self.report_reserved_host_builtin_name(name);
                 continue;
             }
-            self.items
-                .entry(function.name.value.clone())
-                .or_insert(Binding {
-                    kind: BindingKind::Item,
-                    span: function.name.span,
-                    loop_bound: false,
-                    mutable: false,
-                });
+            self.items.entry(name.value.clone()).or_insert(Binding {
+                kind: match kind {
+                    ItemKind::Function => BindingKind::Item,
+                    ItemKind::Task => BindingKind::TaskItem,
+                },
+                span: name.span,
+                loop_bound: false,
+                mutable: false,
+            });
         }
     }
 
     fn analyze_module(&mut self) {
         for item in &self.parsed.module.items {
-            let Item::Function(function) = item;
-            self.analyze_function(function);
+            match item {
+                Item::Function(function) => self.analyze_function(function),
+                Item::Task(task) => self.analyze_task(task),
+            }
         }
 
         self.detect_indirect_recursion();
+        self.detect_task_delegation_cycles();
     }
 
     fn analyze_function(&mut self, function: &Function) {
+        let context = ItemContext {
+            kind: ItemKind::Function,
+            name: function.name.value.as_str(),
+            name_span: function.name.span,
+        };
+        self.analyze_callable(&function.params, &function.body, context);
+    }
+
+    fn analyze_task(&mut self, task: &Task) {
+        let context = ItemContext {
+            kind: ItemKind::Task,
+            name: task.name.value.as_str(),
+            name_span: task.name.span,
+        };
+        self.analyze_callable(&task.params, &task.body, context);
+    }
+
+    fn analyze_callable(
+        &mut self,
+        params: &[langlog_syntax::ast::Param],
+        body: &Block,
+        context: ItemContext<'_>,
+    ) {
         let mut scopes = ScopeStack::default();
         scopes.push();
-        for param in &function.params {
+        for param in params {
             scopes.insert(
                 param.name.value.clone(),
                 Binding {
@@ -345,16 +400,25 @@ impl<'a> Analyzer<'a> {
             );
         }
 
-        self.analyze_block(&function.body, &mut scopes, function);
+        let mut control = ControlContext {
+            item: context,
+            forever_depth: 0,
+        };
+        self.analyze_block(body, &mut scopes, &mut control);
     }
 
-    fn analyze_block(&mut self, block: &Block, scopes: &mut ScopeStack, function: &Function) {
+    fn analyze_block(
+        &mut self,
+        block: &Block,
+        scopes: &mut ScopeStack,
+        context: &mut ControlContext<'_>,
+    ) {
         scopes.push();
         for statement in &block.statements {
-            self.analyze_statement(statement, scopes, function);
+            self.analyze_statement(statement, scopes, context);
         }
         if let Some(expr) = &block.trailing_expr {
-            self.analyze_expr(expr, scopes, function);
+            self.analyze_expr(expr, scopes, context);
         }
         scopes.pop();
     }
@@ -363,12 +427,12 @@ impl<'a> Analyzer<'a> {
         &mut self,
         statement: &Stmt,
         scopes: &mut ScopeStack,
-        function: &Function,
+        context: &mut ControlContext<'_>,
     ) {
         match statement {
             Stmt::Let(stmt) => {
                 if let Some(value) = &stmt.value {
-                    self.analyze_expr(value, scopes, function);
+                    self.analyze_expr(value, scopes, context);
                 }
                 scopes.insert(
                     stmt.name.value.clone(),
@@ -386,63 +450,105 @@ impl<'a> Analyzer<'a> {
                 );
             }
             Stmt::Assign(stmt) => {
-                let target_binding = self.analyze_expr(&stmt.target, scopes, function);
-                self.analyze_expr(&stmt.value, scopes, function);
+                let target_binding = self.analyze_expr(&stmt.target, scopes, context);
+                self.analyze_expr(&stmt.value, scopes, context);
                 if matches!(target_binding, Some(Binding { mutable: false, .. })) {
                     self.report_immutable_assignment(stmt.target.span);
                 }
             }
             Stmt::Expr(stmt) => {
-                self.analyze_expr(&stmt.expr, scopes, function);
+                self.analyze_expr(&stmt.expr, scopes, context);
             }
             Stmt::If(stmt) => {
-                self.analyze_expr(&stmt.condition, scopes, function);
-                self.analyze_block(&stmt.then_block, scopes, function);
+                self.analyze_expr(&stmt.condition, scopes, context);
+                self.analyze_block(&stmt.then_block, scopes, context);
                 if let Some(else_branch) = &stmt.else_branch {
                     match else_branch {
-                        ElseBranch::Block(block) => self.analyze_block(block, scopes, function),
+                        ElseBranch::Block(block) => self.analyze_block(block, scopes, context),
                         ElseBranch::If(stmt) => {
-                            self.analyze_statement(&Stmt::If(*stmt.clone()), scopes, function)
+                            self.analyze_statement(&Stmt::If(*stmt.clone()), scopes, context)
                         }
                     }
                 }
             }
             Stmt::Match(stmt) => {
-                self.analyze_expr(&stmt.expr, scopes, function);
+                self.analyze_expr(&stmt.expr, scopes, context);
                 for arm in &stmt.arms {
                     scopes.push();
                     self.bind_pattern(&arm.pattern, scopes);
                     match &arm.body {
-                        MatchBody::Block(block) => self.analyze_block(block, scopes, function),
+                        MatchBody::Block(block) => self.analyze_block(block, scopes, context),
                         MatchBody::Expr(expr) => {
-                            self.analyze_expr(expr, scopes, function);
+                            self.analyze_expr(expr, scopes, context);
                         }
                     }
                     scopes.pop();
                 }
             }
             Stmt::For(stmt) => {
-                self.analyze_expr(&stmt.iterable, scopes, function);
+                self.analyze_expr(&stmt.iterable, scopes, context);
                 if matches!(self.iterable_bound(&stmt.iterable, scopes), Some(false)) {
                     self.report_unbounded_iteration(stmt.iterable.span);
                 }
                 scopes.push();
                 self.bind_pattern(&stmt.binding, scopes);
-                self.analyze_block(&stmt.body, scopes, function);
+                self.analyze_block(&stmt.body, scopes, context);
                 scopes.pop();
             }
             Stmt::Return(stmt) => {
+                if context.item.kind == ItemKind::Task {
+                    self.report_return_in_task(stmt.span);
+                }
                 if let Some(value) = &stmt.value {
-                    self.analyze_expr(value, scopes, function);
+                    self.analyze_expr(value, scopes, context);
+                }
+            }
+            Stmt::Forever(stmt) => {
+                if context.item.kind != ItemKind::Task {
+                    self.report_task_statement_outside_task(stmt.span, "`forever`");
+                }
+                if context.forever_depth > 0 {
+                    self.report_nested_forever(stmt.span);
+                }
+                context.forever_depth += 1;
+                self.analyze_block(&stmt.body, scopes, context);
+                context.forever_depth -= 1;
+            }
+            Stmt::Exit(stmt) => {
+                if context.item.kind != ItemKind::Task {
+                    self.report_task_statement_outside_task(stmt.span, "`exit`");
+                }
+                self.analyze_expr(&stmt.value, scopes, context);
+            }
+            Stmt::Delegate(stmt) => {
+                if context.item.kind != ItemKind::Task {
+                    self.report_task_statement_outside_task(stmt.span, "`delegate`");
+                }
+                if let Some(binding) =
+                    self.resolve_name(stmt.target.value.as_str(), stmt.target.span, scopes)
+                {
+                    if binding.kind == BindingKind::TaskItem {
+                        self.delegation_edges.push(CallEdge {
+                            caller_name: context.item.name.to_owned(),
+                            callee_name: stmt.target.value.clone(),
+                            callee_span: stmt.target.span,
+                            call_span: stmt.span,
+                        });
+                    } else {
+                        self.report_delegate_target_not_task(stmt.target.span);
+                    }
+                }
+                for arg in &stmt.args {
+                    self.analyze_expr(arg, scopes, context);
                 }
             }
             Stmt::Observe(stmt) => {
-                self.analyze_expr(&stmt.left, scopes, function);
-                self.analyze_expr(&stmt.right, scopes, function);
+                self.analyze_expr(&stmt.left, scopes, context);
+                self.analyze_expr(&stmt.right, scopes, context);
                 self.check_observe_expr_stability(&stmt.left, scopes);
                 self.check_observe_expr_stability(&stmt.right, scopes);
-                self.analyze_block(&stmt.else_block, scopes, function);
-                if !is_terminal_block(&stmt.else_block) {
+                self.analyze_block(&stmt.else_block, scopes, context);
+                if !is_terminal_block(&stmt.else_block, terminal_kind(context.item.kind)) {
                     self.report_non_terminal_observe_else(stmt.else_block.span);
                 }
             }
@@ -467,27 +573,27 @@ impl<'a> Analyzer<'a> {
         &mut self,
         expr: &Expr,
         scopes: &mut ScopeStack,
-        function: &Function,
+        context: &mut ControlContext<'_>,
     ) -> Option<Binding> {
         match &expr.kind {
             ExprKind::Int(_) | ExprKind::Bool(_) => None,
             ExprKind::Name(name) => self.resolve_name(name.value.as_str(), name.span, scopes),
             ExprKind::Tuple(elements) | ExprKind::Array(elements) => {
                 for element in elements {
-                    self.analyze_expr(element, scopes, function);
+                    self.analyze_expr(element, scopes, context);
                 }
                 None
             }
             ExprKind::Block(block) => {
-                self.analyze_block(block, scopes, function);
+                self.analyze_block(block, scopes, context);
                 None
             }
             ExprKind::Unary { expr, .. } | ExprKind::Grouped(expr) => {
-                self.analyze_expr(expr, scopes, function)
+                self.analyze_expr(expr, scopes, context)
             }
             ExprKind::Binary { left, right, .. } => {
-                self.analyze_expr(left, scopes, function);
-                self.analyze_expr(right, scopes, function);
+                self.analyze_expr(left, scopes, context);
+                self.analyze_expr(right, scopes, context);
                 None
             }
             ExprKind::Recover {
@@ -495,7 +601,7 @@ impl<'a> Analyzer<'a> {
                 error_binding,
                 fallback,
             } => {
-                self.analyze_expr(expr, scopes, function);
+                self.analyze_expr(expr, scopes, context);
                 scopes.push();
                 if let Some(binding) = error_binding {
                     scopes.insert(
@@ -508,21 +614,25 @@ impl<'a> Analyzer<'a> {
                         },
                     );
                 }
-                self.analyze_expr(fallback, scopes, function);
+                self.analyze_expr(fallback, scopes, context);
                 scopes.pop();
                 None
             }
             ExprKind::Call { callee, args } => {
-                let callee_binding = self.analyze_expr(callee, scopes, function);
+                let callee_binding = self.analyze_expr(callee, scopes, context);
                 if matches!(
                     callee_binding,
                     Some(Binding {
                         kind: BindingKind::Item,
                         span,
                         ..
-                    }) if span == function.name.span
+                    }) if span == context.item.name_span
                 ) {
-                    self.report_direct_recursion(function, callee.span);
+                    self.report_direct_recursion(
+                        context.item.name,
+                        context.item.name_span,
+                        callee.span,
+                    );
                 }
                 if let Some(Binding {
                     kind: BindingKind::Item,
@@ -536,20 +646,20 @@ impl<'a> Analyzer<'a> {
                         .map(|resolution| resolution.name.clone())
                         .expect("resolved item call should have a recorded name resolution");
                     self.call_edges.push(CallEdge {
-                        caller_name: function.name.value.clone(),
+                        caller_name: context.item.name.to_owned(),
                         callee_name,
                         callee_span: callee.span,
                         call_span: callee.span,
                     });
                 }
                 for arg in args {
-                    self.analyze_expr(arg, scopes, function);
+                    self.analyze_expr(arg, scopes, context);
                 }
                 None
             }
             ExprKind::Index { target, index } => {
-                self.analyze_expr(target, scopes, function);
-                self.analyze_expr(index, scopes, function);
+                self.analyze_expr(target, scopes, context);
+                self.analyze_expr(index, scopes, context);
                 None
             }
         }
@@ -585,28 +695,30 @@ impl<'a> Analyzer<'a> {
         None
     }
 
-    fn report_reserved_host_builtin_name(&mut self, function: &Function) {
+    fn report_reserved_host_builtin_name(&mut self, name: &Spanned<String>) {
         self.diagnostics.push(
-            Diagnostic::error(format!(
-                "`{}` is reserved for a host builtin",
-                function.name.value
-            ))
-            .with_label(Label::primary(
-                function.name.span,
-                "host builtin names cannot be redefined",
-            )),
+            Diagnostic::error(format!("`{}` is reserved for a host builtin", name.value))
+                .with_label(Label::primary(
+                    name.span,
+                    "host builtin names cannot be redefined",
+                )),
         );
     }
 
-    fn report_direct_recursion(&mut self, function: &Function, call_span: Span) {
+    fn report_direct_recursion(
+        &mut self,
+        function_name: &str,
+        function_span: Span,
+        call_span: Span,
+    ) {
         self.diagnostics.push(
             Diagnostic::error(format!(
                 "direct recursion is not allowed for `{}`",
-                function.name.value
+                function_name
             ))
             .with_label(Label::primary(call_span, "recursive call occurs here"))
             .with_label(Label::secondary(
-                function.name.span,
+                function_span,
                 "recursive function declared here",
             )),
         );
@@ -637,6 +749,75 @@ impl<'a> Analyzer<'a> {
                 &mut reported_edges,
             );
         }
+    }
+
+    fn detect_task_delegation_cycles(&mut self) {
+        let mut adjacency: HashMap<String, Vec<CallEdge>> = HashMap::new();
+        for edge in &self.delegation_edges {
+            adjacency
+                .entry(edge.caller_name.clone())
+                .or_default()
+                .push(edge.clone());
+        }
+
+        let mut states = HashMap::new();
+        let mut stack = Vec::new();
+        let mut reported_edges = HashSet::new();
+        let mut task_names: Vec<_> = self
+            .items
+            .iter()
+            .filter(|(_, binding)| binding.kind == BindingKind::TaskItem)
+            .map(|(name, _)| name.clone())
+            .collect();
+        task_names.sort();
+        for task_name in task_names {
+            self.visit_task_delegation_graph(
+                &task_name,
+                &adjacency,
+                &mut states,
+                &mut stack,
+                &mut reported_edges,
+            );
+        }
+    }
+
+    fn visit_task_delegation_graph(
+        &mut self,
+        task_name: &str,
+        adjacency: &HashMap<String, Vec<CallEdge>>,
+        states: &mut HashMap<String, VisitState>,
+        stack: &mut Vec<String>,
+        reported_edges: &mut HashSet<Span>,
+    ) {
+        match states.get(task_name) {
+            Some(VisitState::Visiting | VisitState::Visited) => return,
+            None => {}
+        }
+
+        states.insert(task_name.to_owned(), VisitState::Visiting);
+        stack.push(task_name.to_owned());
+
+        if let Some(edges) = adjacency.get(task_name) {
+            for edge in edges {
+                if stack.contains(&edge.callee_name) {
+                    if reported_edges.insert(edge.call_span) {
+                        self.report_task_delegation_cycle(edge, stack);
+                    }
+                    continue;
+                }
+
+                self.visit_task_delegation_graph(
+                    &edge.callee_name,
+                    adjacency,
+                    states,
+                    stack,
+                    reported_edges,
+                );
+            }
+        }
+
+        stack.pop();
+        states.insert(task_name.to_owned(), VisitState::Visited);
     }
 
     fn visit_call_graph(
@@ -691,6 +872,30 @@ impl<'a> Analyzer<'a> {
         );
     }
 
+    fn report_task_delegation_cycle(&mut self, edge: &CallEdge, stack: &[String]) {
+        let cycle_start = stack
+            .iter()
+            .position(|task_name| task_name == &edge.callee_name)
+            .expect("callee should appear in the active delegation stack");
+        let mut cycle: Vec<&str> = stack[cycle_start..].iter().map(String::as_str).collect();
+        cycle.push(edge.callee_name.as_str());
+        let cycle_text = cycle.join(" -> ");
+
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "cyclic task delegation is not allowed: {cycle_text}"
+            ))
+            .with_label(Label::primary(
+                edge.call_span,
+                "delegation cycle closes here",
+            ))
+            .with_label(Label::secondary(
+                edge.callee_span,
+                "cycle re-enters this task",
+            )),
+        );
+    }
+
     fn iterable_bound(&self, expr: &Expr, scopes: &ScopeStack) -> Option<bool> {
         match &expr.kind {
             ExprKind::Array(_) => Some(true),
@@ -738,6 +943,34 @@ impl<'a> Analyzer<'a> {
             Diagnostic::error("`observe` `else` blocks must be terminal in phase 1").with_label(
                 Label::primary(else_span, "false observations must not fall through"),
             ),
+        );
+    }
+
+    fn report_return_in_task(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("`return` is not allowed inside a task")
+                .with_label(Label::primary(span, "use `exit` or `delegate` in tasks")),
+        );
+    }
+
+    fn report_task_statement_outside_task(&mut self, span: Span, keyword: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("{keyword} is only allowed inside a task"))
+                .with_label(Label::primary(span, "task-only orchestration statement")),
+        );
+    }
+
+    fn report_nested_forever(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("nested `forever` loops are not allowed")
+                .with_label(Label::primary(span, "nested `forever` starts here")),
+        );
+    }
+
+    fn report_delegate_target_not_task(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("`delegate` requires a task target")
+                .with_label(Label::primary(span, "this target is not a task")),
         );
     }
 
@@ -814,34 +1047,55 @@ impl<'a> Analyzer<'a> {
 struct TypeChecker<'a> {
     parsed: &'a ParsedModule,
     diagnostics: Vec<Diagnostic>,
-    item_signatures: HashMap<String, FunctionType>,
+    item_signatures: HashMap<String, ItemSignature>,
+    host_signatures: HashMap<String, FunctionType>,
     facts: TypeFacts,
 }
 
 impl<'a> TypeChecker<'a> {
     fn new(parsed: &'a ParsedModule) -> Self {
-        let mut item_signatures: HashMap<String, FunctionType> = HostBuiltin::ALL
+        let host_signatures: HashMap<String, FunctionType> = HostBuiltin::ALL
             .iter()
             .copied()
             .map(|builtin| (builtin.name().to_owned(), host_builtin_signature(builtin)))
             .collect();
-        item_signatures.extend(parsed.module.items.iter().map(|item| {
-            let Item::Function(function) = item;
-            (function.name.value.clone(), function_signature(function))
-        }));
+        let item_signatures = parsed
+            .module
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::Function(function) => (
+                    function.name.value.clone(),
+                    ItemSignature {
+                        kind: ItemKind::Function,
+                        signature: function_signature(function),
+                    },
+                ),
+                Item::Task(task) => (
+                    task.name.value.clone(),
+                    ItemSignature {
+                        kind: ItemKind::Task,
+                        signature: task_signature(task),
+                    },
+                ),
+            })
+            .collect();
 
         Self {
             parsed,
             diagnostics: Vec::new(),
             item_signatures,
+            host_signatures,
             facts: TypeFacts::default(),
         }
     }
 
     fn check_module(&mut self) {
         for item in &self.parsed.module.items {
-            let Item::Function(function) = item;
-            self.check_function(function);
+            match item {
+                Item::Function(function) => self.check_function(function),
+                Item::Task(task) => self.check_task(task),
+            }
         }
     }
 
@@ -864,8 +1118,28 @@ impl<'a> TypeChecker<'a> {
 
         if let Some(expr) = &function.body.trailing_expr {
             self.require_same_type(expr.span, &expected_return, &body_type);
-        } else if !is_terminal_block(&function.body) {
+        } else if !is_terminal_block(&function.body, TerminalKind::Function) {
             self.require_same_type(function.body.span, &expected_return, &SemanticType::Unit);
+        }
+
+        scopes.pop();
+    }
+
+    fn check_task(&mut self, task: &Task) {
+        let mut scopes = TypeScopeStack::default();
+        scopes.push();
+        for param in &task.params {
+            let param_type = lower_type(&param.ty);
+            self.facts
+                .record_binding(param.name.span, param_type.clone());
+            scopes.insert(param.name.value.clone(), param_type);
+        }
+
+        let expected_return = lower_type(&task.return_type);
+        self.check_block(&task.body, &mut scopes, &expected_return);
+
+        if !is_terminal_block(&task.body, TerminalKind::Task) {
+            self.report_task_fallthrough(task.body.span);
         }
 
         scopes.pop();
@@ -971,6 +1245,17 @@ impl<'a> TypeChecker<'a> {
                     .unwrap_or(SemanticType::Unit);
                 self.require_same_type(stmt.span, expected_return, &value_type);
             }
+            Stmt::Forever(stmt) => {
+                self.check_block(&stmt.body, scopes, expected_return);
+            }
+            Stmt::Exit(stmt) => {
+                let value_type =
+                    self.check_expr_with_expected(&stmt.value, scopes, Some(expected_return));
+                self.require_same_type(stmt.span, expected_return, &value_type);
+            }
+            Stmt::Delegate(stmt) => {
+                self.check_delegate_stmt(stmt, scopes, expected_return);
+            }
             Stmt::Observe(stmt) => {
                 let left = self.check_expr(&stmt.left, scopes);
                 let right = self.check_expr(&stmt.right, scopes);
@@ -1027,7 +1312,16 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Name(name) => scopes
                 .lookup(name.value.as_str())
                 .or_else(|| {
-                    self.item_signatures
+                    let item = self.item_signatures.get(name.value.as_str())?.clone();
+                    if item.kind == ItemKind::Task {
+                        self.report_task_item_used_as_expression(name.span);
+                        Some(SemanticType::Unknown)
+                    } else {
+                        Some(SemanticType::Function(item.signature))
+                    }
+                })
+                .or_else(|| {
+                    self.host_signatures
                         .get(name.value.as_str())
                         .cloned()
                         .map(SemanticType::Function)
@@ -1425,6 +1719,48 @@ impl<'a> TypeChecker<'a> {
         (*signature.return_type).clone()
     }
 
+    fn check_delegate_stmt(
+        &mut self,
+        stmt: &langlog_syntax::ast::DelegateStmt,
+        scopes: &mut TypeScopeStack,
+        expected_return: &SemanticType,
+    ) {
+        let Some(item) = self
+            .item_signatures
+            .get(stmt.target.value.as_str())
+            .cloned()
+        else {
+            for arg in &stmt.args {
+                self.check_expr(arg, scopes);
+            }
+            return;
+        };
+
+        if item.kind != ItemKind::Task {
+            self.report_delegate_target_not_task(stmt.target.span);
+            for arg in &stmt.args {
+                self.check_expr(arg, scopes);
+            }
+            return;
+        }
+
+        let signature = item.signature;
+        if stmt.args.len() != signature.params.len() {
+            self.report_delegate_arity_mismatch(
+                stmt.target.span,
+                signature.params.len(),
+                stmt.args.len(),
+            );
+        } else {
+            for (arg, expected) in stmt.args.iter().zip(signature.params.iter()) {
+                let found = self.check_expr_with_expected(arg, scopes, Some(expected));
+                self.require_same_type(arg.span, expected, &found);
+            }
+        }
+
+        self.require_same_type(stmt.target.span, expected_return, &signature.return_type);
+    }
+
     fn check_index_expr(
         &mut self,
         expr_span: Span,
@@ -1518,12 +1854,45 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
+    fn report_task_item_used_as_expression(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("task items can only be used with `delegate`").with_label(
+                Label::primary(span, "use `delegate` to transfer to this task"),
+            ),
+        );
+    }
+
     fn report_call_arity_mismatch(&mut self, callee_span: Span, expected: usize, found: usize) {
         self.diagnostics.push(
             Diagnostic::error(format!(
                 "call arity mismatch: expected {expected} argument(s), found {found}"
             ))
             .with_label(Label::primary(callee_span, "adjust this call signature")),
+        );
+    }
+
+    fn report_delegate_target_not_task(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("`delegate` requires a task target")
+                .with_label(Label::primary(span, "this target is not a task")),
+        );
+    }
+
+    fn report_delegate_arity_mismatch(&mut self, span: Span, expected: usize, found: usize) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "delegate arity mismatch: expected {expected} argument(s), found {found}"
+            ))
+            .with_label(Label::primary(span, "adjust this delegate target")),
+        );
+    }
+
+    fn report_task_fallthrough(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("task bodies must not fall through").with_label(Label::primary(
+                span,
+                "end with `exit`, `delegate`, or a non-nested `forever`",
+            )),
         );
     }
 
@@ -1614,6 +1983,13 @@ fn arithmetic_result(ok: SemanticType) -> SemanticType {
     }
 }
 
+fn item_name_and_kind(item: &Item) -> (&Spanned<String>, ItemKind) {
+    match item {
+        Item::Function(function) => (&function.name, ItemKind::Function),
+        Item::Task(task) => (&task.name, ItemKind::Task),
+    }
+}
+
 fn function_signature(function: &Function) -> FunctionType {
     FunctionType {
         params: function
@@ -1628,6 +2004,17 @@ fn function_signature(function: &Function) -> FunctionType {
                 .map(lower_type)
                 .unwrap_or(SemanticType::Unit),
         ),
+    }
+}
+
+fn task_signature(task: &Task) -> FunctionType {
+    FunctionType {
+        params: task
+            .params
+            .iter()
+            .map(|param| lower_type(&param.ty))
+            .collect(),
+        return_type: Box::new(lower_type(&task.return_type)),
     }
 }
 
@@ -1739,47 +2126,65 @@ fn is_bounded_iterable_type(ty: &langlog_syntax::ast::Type) -> bool {
     }
 }
 
-fn is_terminal_block(block: &Block) -> bool {
-    block.trailing_expr.is_none() && block.statements.last().is_some_and(is_terminal_statement)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalKind {
+    Function,
+    Task,
 }
 
-fn is_terminal_statement(statement: &Stmt) -> bool {
+fn terminal_kind(item_kind: ItemKind) -> TerminalKind {
+    match item_kind {
+        ItemKind::Function => TerminalKind::Function,
+        ItemKind::Task => TerminalKind::Task,
+    }
+}
+
+fn is_terminal_block(block: &Block, kind: TerminalKind) -> bool {
+    block.trailing_expr.is_none()
+        && block
+            .statements
+            .last()
+            .is_some_and(|statement| is_terminal_statement(statement, kind))
+}
+
+fn is_terminal_statement(statement: &Stmt, kind: TerminalKind) -> bool {
     match statement {
-        Stmt::Return(_) => true,
+        Stmt::Return(_) => kind == TerminalKind::Function,
+        Stmt::Exit(_) | Stmt::Delegate(_) | Stmt::Forever(_) => kind == TerminalKind::Task,
         Stmt::If(stmt) => {
-            is_terminal_block(&stmt.then_block)
+            is_terminal_block(&stmt.then_block, kind)
                 && stmt
                     .else_branch
                     .as_ref()
-                    .is_some_and(is_terminal_else_branch)
+                    .is_some_and(|branch| is_terminal_else_branch(branch, kind))
         }
         Stmt::Match(stmt) => {
             !stmt.arms.is_empty()
                 && stmt
                     .arms
                     .iter()
-                    .all(|arm| is_terminal_match_body(&arm.body))
+                    .all(|arm| is_terminal_match_body(&arm.body, kind))
         }
         _ => false,
     }
 }
 
-fn is_terminal_else_branch(branch: &ElseBranch) -> bool {
+fn is_terminal_else_branch(branch: &ElseBranch, kind: TerminalKind) -> bool {
     match branch {
-        ElseBranch::Block(block) => is_terminal_block(block),
+        ElseBranch::Block(block) => is_terminal_block(block, kind),
         ElseBranch::If(stmt) => {
-            is_terminal_block(&stmt.then_block)
+            is_terminal_block(&stmt.then_block, kind)
                 && stmt
                     .else_branch
                     .as_ref()
-                    .is_some_and(is_terminal_else_branch)
+                    .is_some_and(|branch| is_terminal_else_branch(branch, kind))
         }
     }
 }
 
-fn is_terminal_match_body(body: &MatchBody) -> bool {
+fn is_terminal_match_body(body: &MatchBody, kind: TerminalKind) -> bool {
     match body {
-        MatchBody::Block(block) => is_terminal_block(block),
+        MatchBody::Block(block) => is_terminal_block(block, kind),
         MatchBody::Expr(_) => false,
     }
 }

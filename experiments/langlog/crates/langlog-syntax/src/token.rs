@@ -21,6 +21,7 @@ impl Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Fn,
+    Task,
     Let,
     Mut,
     If,
@@ -28,7 +29,10 @@ pub enum TokenKind {
     Match,
     For,
     In,
+    Forever,
     Return,
+    Exit,
+    Delegate,
     Observe,
     Or,
     True,
@@ -70,6 +74,7 @@ impl TokenKind {
     pub fn tag(&self) -> TokenTag {
         match self {
             Self::Fn => TokenTag::Fn,
+            Self::Task => TokenTag::Task,
             Self::Let => TokenTag::Let,
             Self::Mut => TokenTag::Mut,
             Self::If => TokenTag::If,
@@ -77,7 +82,10 @@ impl TokenKind {
             Self::Match => TokenTag::Match,
             Self::For => TokenTag::For,
             Self::In => TokenTag::In,
+            Self::Forever => TokenTag::Forever,
             Self::Return => TokenTag::Return,
+            Self::Exit => TokenTag::Exit,
+            Self::Delegate => TokenTag::Delegate,
             Self::Observe => TokenTag::Observe,
             Self::Or => TokenTag::Or,
             Self::True => TokenTag::True,
@@ -124,6 +132,7 @@ impl TokenKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenTag {
     Fn,
+    Task,
     Let,
     Mut,
     If,
@@ -131,7 +140,10 @@ pub enum TokenTag {
     Match,
     For,
     In,
+    Forever,
     Return,
+    Exit,
+    Delegate,
     Observe,
     Or,
     True,
@@ -173,6 +185,7 @@ impl TokenTag {
     pub fn describe(self) -> Cow<'static, str> {
         match self {
             Self::Fn => Cow::Borrowed("`fn`"),
+            Self::Task => Cow::Borrowed("`task`"),
             Self::Let => Cow::Borrowed("`let`"),
             Self::Mut => Cow::Borrowed("`mut`"),
             Self::If => Cow::Borrowed("`if`"),
@@ -180,7 +193,10 @@ impl TokenTag {
             Self::Match => Cow::Borrowed("`match`"),
             Self::For => Cow::Borrowed("`for`"),
             Self::In => Cow::Borrowed("`in`"),
+            Self::Forever => Cow::Borrowed("`forever`"),
             Self::Return => Cow::Borrowed("`return`"),
+            Self::Exit => Cow::Borrowed("`exit`"),
+            Self::Delegate => Cow::Borrowed("`delegate`"),
             Self::Observe => Cow::Borrowed("`observe`"),
             Self::Or => Cow::Borrowed("`or`"),
             Self::True => Cow::Borrowed("`true`"),

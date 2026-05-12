@@ -169,13 +169,8 @@ properties that should be enforced structurally rather than by convention:
 ## LLG-SYN-07 Task Orchestration Statements
 
 - A `forever` statement MUST use the form `forever { ... }`.
-- A `forever` statement MUST appear only inside a task body.
-- A nested `forever` statement MUST be rejected.
 - An `exit` statement MUST use the form `exit <expr>;`.
-- An `exit` statement MUST appear only inside a task body.
 - A `delegate` statement MUST use the form `delegate name(args...);`.
-- A `delegate` statement MUST appear only inside a task body.
-- A `return` statement MUST be rejected inside a task body.
 
 ## LLG-TYPE-01 Phase 1 Types
 
@@ -296,6 +291,11 @@ properties that should be enforced structurally rather than by convention:
 ## LLG-SEMA-05 Task Orchestration Semantics
 
 - The semantic phase MUST reject ordinary functions that call task items.
+- A `forever` statement MUST appear only inside a task body.
+- A nested `forever` statement MUST be rejected.
+- An `exit` statement MUST appear only inside a task body.
+- A `delegate` statement MUST appear only inside a task body.
+- A `return` statement MUST be rejected inside a task body.
 - A task body MAY call ordinary functions, and ordinary function calls from a
   task body MUST return to the task normally.
 - A task body MAY transfer to another task only with a terminal `delegate`
@@ -323,6 +323,8 @@ properties that should be enforced structurally rather than by convention:
 
 - The proof phase MUST reject indexing that may go out of bounds unless safety
   is proven.
+- Proof checking MUST traverse task bodies, including `forever` bodies, `exit`
+  values, and `delegate` arguments.
 - Indexing MUST require the proven index upper bound to be strictly less than
   the indexed array length.
 

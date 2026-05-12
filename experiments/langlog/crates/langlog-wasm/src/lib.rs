@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use langlog_sema::{
     CheckedProgram, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind, HirForStmt,
-    HirFunction, HirItemId, HirMatchBody, HirMatchStmt, HirPatternKind, HirProgram, HirStmt,
-    HirType, HostBuiltin,
+    HirFunction, HirFunctionKind, HirItemId, HirMatchBody, HirMatchStmt, HirPatternKind,
+    HirProgram, HirStmt, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp, UnaryOp};
 use langlog_syntax::{Diagnostic, Label, Span};
@@ -64,6 +64,17 @@ impl<'a> Compiler<'a> {
 
     fn compile_program(&mut self) -> String {
         let mut module = String::from("(module\n");
+        if let Some(task) = self
+            .program
+            .functions
+            .iter()
+            .find(|function| function.kind == HirFunctionKind::Task)
+        {
+            self.error(Some(task.span), "tasks are not supported by Wasm v1");
+            module.push_str(")\n");
+            return module;
+        }
+
         let Some(main) = self
             .program
             .functions
@@ -250,6 +261,15 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     self.compile_expr(value);
                 }
                 self.emit("return");
+            }
+            HirStmt::Forever(stmt) => {
+                self.unsupported(stmt.span, "`forever` is not supported by Wasm v1");
+            }
+            HirStmt::Exit(stmt) => {
+                self.unsupported(stmt.span, "`exit` is not supported by Wasm v1");
+            }
+            HirStmt::Delegate(stmt) => {
+                self.unsupported(stmt.span, "`delegate` is not supported by Wasm v1");
             }
             HirStmt::Match(stmt) => self.compile_match_stmt(stmt, return_type),
             HirStmt::For(stmt) => self.compile_for_stmt(stmt, return_type),
@@ -1124,6 +1144,13 @@ fn collect_host_builtins_stmt(statement: &HirStmt, builtins: &mut Vec<HostBuilti
         HirStmt::Return(stmt) => {
             if let Some(value) = &stmt.value {
                 collect_host_builtins_expr(value, builtins);
+            }
+        }
+        HirStmt::Forever(stmt) => collect_host_builtins_block(&stmt.body, builtins),
+        HirStmt::Exit(stmt) => collect_host_builtins_expr(&stmt.value, builtins),
+        HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_host_builtins_expr(arg, builtins);
             }
         }
         HirStmt::Observe(stmt) => {
