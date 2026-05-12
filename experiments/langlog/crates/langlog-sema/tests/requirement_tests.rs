@@ -1858,6 +1858,49 @@ task setup() -> u32 {
     );
 }
 
+//= HIR.md#llg-hir-06-task-runtime-lowering-support
+//= type=test
+//# HIR MUST preserve task item kind, task-local declarations, delegate target identity, and delegate argument values sufficiently for later task-state enum lowering.
+#[test]
+fn requirement_llg_hir_06_preserves_task_state_lowering_inputs() {
+    let checked = analyze_ok(
+        r#"
+task alpha(value: u32) -> u32 {
+    let next = value;
+    delegate beta(next);
+}
+
+task beta(value: u32) -> u32 {
+    exit value;
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let alpha = task(&checked, "alpha");
+    let beta = task(&checked, "beta");
+    let local = match &alpha.body.statements[0] {
+        Stmt::Let(stmt) => stmt,
+        other => panic!("expected task-local let, got {other:?}"),
+    };
+    let hir_alpha = hir_function(&checked, "alpha");
+
+    assert_eq!(hir_alpha.kind, HirFunctionKind::Task);
+    let HirStmt::Let(hir_local) = &hir_alpha.body.statements[0] else {
+        panic!("expected HIR task-local let");
+    };
+    assert_eq!(hir_local.binding.id.declaration_span, local.name.span);
+
+    let HirStmt::Delegate(delegate) = &hir_alpha.body.statements[1] else {
+        panic!("expected HIR delegate statement");
+    };
+    assert_eq!(delegate.target.declaration_span, beta.name.span);
+    let HirExprKind::Binding(arg_id) = delegate.args[0].kind else {
+        panic!("expected HIR delegate argument to resolve to local binding");
+    };
+    assert_eq!(arg_id.declaration_span, local.name.span);
+}
+
 //= SPEC.md#llg-sema-05-task-orchestration-semantics
 //= type=test
 //# A task item MUST NOT be callable through ordinary call expression syntax, including as a subexpression, initializer, call argument, expression statement, or any other non-`delegate` expression.
@@ -1918,9 +1961,9 @@ task delegate_local() -> u32 {
 
 //= SPEC.md#llg-sema-05-task-orchestration-semantics
 //= type=test
-//# Cyclic task delegation MUST be rejected.
+//# Cyclic task delegation MUST be accepted when every delegate in the cycle otherwise type-checks, because repeated delegation is a bounded state transition rather than stack growth.
 #[test]
-fn requirement_llg_sema_05_rejects_cyclic_task_delegation() {
+fn requirement_llg_sema_05_accepts_cyclic_task_delegation() {
     let checked = analyze_ok(
         r#"
 task alpha() -> u32 {
@@ -1933,9 +1976,52 @@ task beta() -> u32 {
 "#,
     );
 
-    assert!(checked.has_errors());
-    assert_diagnostic_message_contains(&checked, "cyclic task delegation is not allowed");
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    assert!(matches!(
+        hir_function(&checked, "alpha").body.statements[0],
+        HirStmt::Delegate(_)
+    ));
+    assert!(matches!(
+        hir_function(&checked, "beta").body.statements[0],
+        HirStmt::Delegate(_)
+    ));
 }
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=todo
+//# A task instance MUST be representable as a finite tagged union of task states.
+#[test]
+fn todo_task_instance_tagged_union_runtime_lowering() {}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=todo
+//# Each task-state variant MUST represent one task item in the reachable delegation set for that task instance.
+#[test]
+fn todo_task_state_variants_for_reachable_tasks() {}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=todo
+//# At runtime, exactly one task-state variant MUST be active per task instance.
+#[test]
+fn todo_task_runtime_has_one_active_state_variant() {}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=todo
+//# A `delegate` statement MUST evaluate its arguments before replacing the current task state with the target task-state variant.
+#[test]
+fn todo_delegate_evaluates_args_before_state_replacement() {}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=todo
+//# A `delegate` statement MUST discard the caller task-local state and MUST NOT create or retain a task stack frame.
+#[test]
+fn todo_delegate_discards_caller_locals_without_stack_frame() {}
+
+//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= type=todo
+//# The static memory bound for task-local state MUST be the maximum storage required by any reachable task-state variant plus tag overhead.
+#[test]
+fn todo_task_state_static_memory_bound_is_largest_variant() {}
 
 //= SPEC.md#llg-sema-05-task-orchestration-semantics
 //= type=test

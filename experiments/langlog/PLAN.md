@@ -154,8 +154,11 @@ VM.
 - [x] Draft the initial task orchestration surface: `task`, `forever`, `exit`,
   `delegate`, `task main() -> u32`, task-only terminal delegation, explicit
   program exit, and no accidental task fallthrough.
-- [ ] Implement parser, AST, HIR, semantic diagnostics, and tests for `task`,
+- [x] Implement parser, AST, HIR, semantic diagnostics, and tests for `task`,
   `forever`, `exit`, and `delegate`.
+- [x] Specify the task memory model: a task instance is one active state enum
+  variant, and `delegate` replaces caller task-local state rather than pushing
+  a task stack frame.
 - [ ] Define the single-event-loop runtime model.
 - [ ] Define I/O programs as task-driven bounded state machines.
 - [ ] Add bounded event handlers and scheduling semantics.

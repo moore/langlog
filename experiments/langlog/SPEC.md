@@ -309,7 +309,20 @@ properties that should be enforced structurally rather than by convention:
 - A task item MUST NOT be callable through ordinary call expression syntax,
   including as a subexpression, initializer, call argument, expression
   statement, or any other non-`delegate` expression.
-- Cyclic task delegation MUST be rejected.
+- A task instance MUST be representable as a finite tagged union of task
+  states.
+- Each task-state variant MUST represent one task item in the reachable
+  delegation set for that task instance.
+- At runtime, exactly one task-state variant MUST be active per task instance.
+- A `delegate` statement MUST evaluate its arguments before replacing the
+  current task state with the target task-state variant.
+- A `delegate` statement MUST discard the caller task-local state and MUST NOT
+  create or retain a task stack frame.
+- Cyclic task delegation MUST be accepted when every delegate in the cycle
+  otherwise type-checks, because repeated delegation is a bounded state
+  transition rather than stack growth.
+- The static memory bound for task-local state MUST be the maximum storage
+  required by any reachable task-state variant plus tag overhead.
 - An `exit` statement MUST type check its expression against the enclosing task
   return type.
 - An `exit` statement MUST exit the program with the checked value.
@@ -318,6 +331,10 @@ properties that should be enforced structurally rather than by convention:
   statement, or a non-nested `forever` statement.
 - A bare `forever { ... }` task body MUST be accepted as a valid crash-only or
   externally terminated task shape.
+
+The task memory model specifies required behavior, not an exact ABI layout.
+Large external resources such as buffers should be represented in task state by
+handles or leases rather than forced inline by this memory model.
 
 ## LLG-PROOF-01 Proof-Required Operations
 

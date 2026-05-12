@@ -316,7 +316,6 @@ struct Analyzer<'a> {
     diagnostics: Vec<Diagnostic>,
     resolutions: Vec<ResolvedName>,
     call_edges: Vec<CallEdge>,
-    delegation_edges: Vec<CallEdge>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -327,7 +326,6 @@ impl<'a> Analyzer<'a> {
             diagnostics: Vec::new(),
             resolutions: Vec::new(),
             call_edges: Vec::new(),
-            delegation_edges: Vec::new(),
         }
     }
 
@@ -359,7 +357,6 @@ impl<'a> Analyzer<'a> {
         }
 
         self.detect_indirect_recursion();
-        self.detect_task_delegation_cycles();
     }
 
     fn analyze_function(&mut self, function: &Function) {
@@ -527,14 +524,7 @@ impl<'a> Analyzer<'a> {
                 if let Some(binding) =
                     self.resolve_name(stmt.target.value.as_str(), stmt.target.span, scopes)
                 {
-                    if binding.kind == BindingKind::TaskItem {
-                        self.delegation_edges.push(CallEdge {
-                            caller_name: context.item.name.to_owned(),
-                            callee_name: stmt.target.value.clone(),
-                            callee_span: stmt.target.span,
-                            call_span: stmt.span,
-                        });
-                    } else {
+                    if binding.kind != BindingKind::TaskItem {
                         self.report_delegate_target_not_task(stmt.target.span);
                     }
                 }
@@ -751,75 +741,6 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn detect_task_delegation_cycles(&mut self) {
-        let mut adjacency: HashMap<String, Vec<CallEdge>> = HashMap::new();
-        for edge in &self.delegation_edges {
-            adjacency
-                .entry(edge.caller_name.clone())
-                .or_default()
-                .push(edge.clone());
-        }
-
-        let mut states = HashMap::new();
-        let mut stack = Vec::new();
-        let mut reported_edges = HashSet::new();
-        let mut task_names: Vec<_> = self
-            .items
-            .iter()
-            .filter(|(_, binding)| binding.kind == BindingKind::TaskItem)
-            .map(|(name, _)| name.clone())
-            .collect();
-        task_names.sort();
-        for task_name in task_names {
-            self.visit_task_delegation_graph(
-                &task_name,
-                &adjacency,
-                &mut states,
-                &mut stack,
-                &mut reported_edges,
-            );
-        }
-    }
-
-    fn visit_task_delegation_graph(
-        &mut self,
-        task_name: &str,
-        adjacency: &HashMap<String, Vec<CallEdge>>,
-        states: &mut HashMap<String, VisitState>,
-        stack: &mut Vec<String>,
-        reported_edges: &mut HashSet<Span>,
-    ) {
-        match states.get(task_name) {
-            Some(VisitState::Visiting | VisitState::Visited) => return,
-            None => {}
-        }
-
-        states.insert(task_name.to_owned(), VisitState::Visiting);
-        stack.push(task_name.to_owned());
-
-        if let Some(edges) = adjacency.get(task_name) {
-            for edge in edges {
-                if stack.contains(&edge.callee_name) {
-                    if reported_edges.insert(edge.call_span) {
-                        self.report_task_delegation_cycle(edge, stack);
-                    }
-                    continue;
-                }
-
-                self.visit_task_delegation_graph(
-                    &edge.callee_name,
-                    adjacency,
-                    states,
-                    stack,
-                    reported_edges,
-                );
-            }
-        }
-
-        stack.pop();
-        states.insert(task_name.to_owned(), VisitState::Visited);
-    }
-
     fn visit_call_graph(
         &mut self,
         function_name: &str,
@@ -869,30 +790,6 @@ impl<'a> Analyzer<'a> {
                     edge.callee_span,
                     "cycle re-enters this function",
                 )),
-        );
-    }
-
-    fn report_task_delegation_cycle(&mut self, edge: &CallEdge, stack: &[String]) {
-        let cycle_start = stack
-            .iter()
-            .position(|task_name| task_name == &edge.callee_name)
-            .expect("callee should appear in the active delegation stack");
-        let mut cycle: Vec<&str> = stack[cycle_start..].iter().map(String::as_str).collect();
-        cycle.push(edge.callee_name.as_str());
-        let cycle_text = cycle.join(" -> ");
-
-        self.diagnostics.push(
-            Diagnostic::error(format!(
-                "cyclic task delegation is not allowed: {cycle_text}"
-            ))
-            .with_label(Label::primary(
-                edge.call_span,
-                "delegation cycle closes here",
-            ))
-            .with_label(Label::secondary(
-                edge.callee_span,
-                "cycle re-enters this task",
-            )),
         );
     }
 

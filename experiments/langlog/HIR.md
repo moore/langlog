@@ -50,6 +50,14 @@ This document complements, but does not replace, the main language spec:
 - HIR lowering MUST reject compound semantic types that contain unknown
   components before constructing any HIR type.
 
+## LLG-HIR-06 Task Runtime Lowering Support
+
+- HIR MUST preserve task item kind, task-local declarations, delegate target
+  identity, and delegate argument values sufficiently for later task-state enum
+  lowering.
+- HIR does not need to be the task-state enum representation; that enum is the
+  required executable task-runtime lowering shape.
+
 ## Non-Normative Notes
 
 The remaining sections are explanatory design notes. They describe the current

@@ -100,7 +100,19 @@ Rules:
 - A `delegate` statement requires the callee return type to exactly match the
   caller task return type.
 - Plain call syntax cannot call a task.
-- Cyclic task delegation is rejected.
+- Cyclic task delegation is valid and memory-bounded because `delegate` does
+  not retain caller state.
+
+Task memory model:
+
+- A running task instance is represented as one active task-state variant.
+- Each variant stores the locals for one reachable task item.
+- `delegate` evaluates its arguments, discards the caller task-local state, and
+  replaces it with the target task-state variant.
+- `delegate` does not create a task stack frame.
+- The task-local memory bound is the size of the largest reachable task-state
+  variant plus tag overhead. Large buffers should normally be represented by
+  handles or leases rather than stored inline.
 
 Examples:
 
@@ -121,6 +133,14 @@ task setup() -> u32 {
 
 task worker() -> u32 {
     exit 0;
+}
+
+task alpha() -> u32 {
+    delegate beta();
+}
+
+task beta() -> u32 {
+    delegate alpha();
 }
 ```
 
@@ -306,7 +326,8 @@ Rules:
 - `delegate` must target a task, not an ordinary function.
 - `delegate` does not return to the current task.
 - The target task return type must exactly match the current task return type.
-- Cyclic task delegation is rejected.
+- Cyclic task delegation is valid and bounded because each `delegate` replaces
+  the active task state instead of pushing a frame.
 
 Future versions may consider using `delegate` for explicit tail calls to
 ordinary functions, but the initial task-orchestration surface limits it to
