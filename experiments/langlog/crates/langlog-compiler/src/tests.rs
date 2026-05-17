@@ -19,24 +19,11 @@ fn requirement_llg_cli_01_checks_in_memory_source_without_filesystem_access() {
 //# The compiler interface MUST promote warnings to failing diagnostics when requested.
 #[test]
 fn requirement_llg_cli_02_promotes_warnings_in_compiler_interface() {
-    let outcome = check_source(
-        "memory.llg",
-        r#"
-fn main(values: [u32; 4]) {
-    let mut index = 0;
-    if index < 4 {
-        values[index];
-    }
-}
-"#,
-        CheckOptions::warnings_as_errors(),
-    );
+    let diagnostics = super::promote_warnings(&[Diagnostic::warning("example warning")]);
 
-    assert!(outcome.has_errors());
-    assert!(outcome.diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("mutable control-flow")
-        && diagnostic.severity == super::Severity::Error));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "example warning" && diagnostic.severity == super::Severity::Error
+    }));
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point

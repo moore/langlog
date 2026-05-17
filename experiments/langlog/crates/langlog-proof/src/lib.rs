@@ -1,27 +1,97 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use langlog_sema::{
     CheckedProgram, HirBinding, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind,
-    HirFunction, HirMatchBody, HirPattern, HirPatternKind, HirProgram, HirStmt, HirType,
+    HirMatchBody, HirPattern, HirPatternKind, HirProgram, HirStmt, HirType,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp};
 use langlog_syntax::{Diagnostic, Label, Severity, Span};
 
-const U32_MAX_U64: u64 = u32::MAX as u64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactSource {
-    Observe,
-    ControlFlow,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlaceId {
+    pub index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProofFact {
-    pub source: FactSource,
+pub struct ProofPlace {
+    pub id: PlaceId,
+    pub kind: PlaceKind,
+    pub ty: HirType,
+    pub span: Span,
+    pub display: String,
+    pub value: Option<PlaceValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceKind {
+    Binding { binding: HirBindingId, version: u32 },
+    Temporary,
+    ConstantU32(u64),
+    ConstantBool(bool),
+    ArrayLength { array: PlaceId, length: u64 },
+    Item,
+    HostBuiltin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceValue {
+    U32(u64),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerPattern {
+    True { value: PlaceId },
+    False { value: PlaceId },
+    Equal { left: PlaceId, right: PlaceId },
+    LessThan { left: PlaceId, right: PlaceId },
+    GreaterThan { left: PlaceId, right: PlaceId },
+    LessOrEqual { left: PlaceId, right: PlaceId },
+    GreaterOrEqual { left: PlaceId, right: PlaceId },
+    MemberOf { key: PlaceId, map: PlaceId },
+    SetMember { element_type: HirType },
+    Event,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerFactSource {
+    Observe,
+    ControlFlowTruth,
+    ControlFlowFalse,
+    CompanionRule,
+    AssignmentIdentity,
+    ImmutableCarryForward,
+    TrustedBuiltin,
+    UnsafeConstruction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerFact {
+    pub target: PlaceId,
+    pub marker: MarkerPattern,
+    pub source: MarkerFactSource,
     pub origin_span: Span,
-    pub left_span: Span,
-    pub op: ObserveOp,
-    pub right_span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerObligation {
+    pub target: ObligationTarget,
+    pub required: MarkerPattern,
+    pub source: ObligationSource,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObligationTarget {
+    Place(PlaceId),
+    StateCycle { span: Span },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObligationSource {
+    Index { array: PlaceId, index: PlaceId },
+    MapLookup { map: PlaceId, key: PlaceId },
+    EventCycle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +99,7 @@ pub struct CheckedProof {
     pub obligations: usize,
     pub observations: usize,
     pub diagnostics: Vec<Diagnostic>,
-    pub facts: Vec<ProofFact>,
+    pub facts: Vec<MarkerFact>,
     pub proof_ir: Option<ProofProgram>,
 }
 
@@ -59,16 +129,14 @@ pub fn check(program: &CheckedProgram) -> CheckedProof {
     };
 
     let proof_ir = lower_to_proof_ir(hir);
-    let (obligations, diagnostics, facts) = {
-        let mut checker = Checker::new(hir);
-        checker.check_module();
-        (checker.obligations, checker.diagnostics, checker.facts)
-    };
+    let mut checker = Checker::new(&proof_ir);
+    checker.check_program();
 
+    let facts = checker.facts;
     CheckedProof {
-        obligations,
+        obligations: checker.obligations,
         observations: facts.len(),
-        diagnostics,
+        diagnostics: checker.diagnostics,
         facts,
         proof_ir: Some(proof_ir),
     }
@@ -76,6 +144,7 @@ pub fn check(program: &CheckedProgram) -> CheckedProof {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofProgram {
+    pub places: Vec<ProofPlace>,
     pub functions: Vec<ProofFunction>,
 }
 
@@ -93,10 +162,23 @@ pub struct ProofBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofEntry {
+    Let {
+        binding: HirBindingId,
+        place: PlaceId,
+        value: Option<PlaceId>,
+        span: Span,
+    },
+    Assign {
+        binding: HirBindingId,
+        old_place: PlaceId,
+        new_place: PlaceId,
+        value: PlaceId,
+        span: Span,
+    },
     Branch {
         condition: ProofExpr,
-        facts: Vec<ProofRelation>,
-        mutable_hints: Vec<ProofRelation>,
+        then_facts: Vec<MarkerFact>,
+        else_facts: Vec<MarkerFact>,
         then_block: ProofBlock,
         else_block: Option<ProofBlock>,
         span: Span,
@@ -105,7 +187,7 @@ pub enum ProofEntry {
         left: ProofExpr,
         op: ObserveOp,
         right: ProofExpr,
-        fact: ProofRelation,
+        facts: Vec<MarkerFact>,
         else_block: ProofBlock,
         span: Span,
     },
@@ -116,7 +198,7 @@ pub enum ProofEntry {
         span: Span,
     },
     Obligation {
-        kind: ProofObligationKind,
+        obligation: MarkerObligation,
         span: Span,
     },
     Eval {
@@ -132,7 +214,9 @@ pub enum ProofEntry {
 impl ProofEntry {
     pub fn span(&self) -> Span {
         match self {
-            Self::Branch { span, .. }
+            Self::Let { span, .. }
+            | Self::Assign { span, .. }
+            | Self::Branch { span, .. }
             | Self::Observe { span, .. }
             | Self::For { span, .. }
             | Self::Obligation { span, .. }
@@ -143,33 +227,8 @@ impl ProofEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProofObligationKind {
-    InBounds {
-        target: ProofExpr,
-        index: ProofExpr,
-        length: u64,
-    },
-    MapPresence {
-        target: ProofExpr,
-        key: ProofExpr,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProofRelation {
-    pub source: FactSource,
-    pub origin_span: Span,
-    pub left_span: Span,
-    pub subject: Option<HirBindingId>,
-    pub op: ObserveOp,
-    pub right: ProofExpr,
-    pub right_span: Span,
-    pub stable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofSetMembership {
-    pub member: HirBindingId,
+    pub member: PlaceId,
     pub element_type: HirType,
     pub span: Span,
 }
@@ -179,6 +238,7 @@ pub struct ProofExpr {
     pub kind: ProofExprKind,
     pub ty: HirType,
     pub span: Span,
+    pub place: PlaceId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,28 +273,47 @@ pub fn lower_to_proof_ir(hir: &HirProgram) -> ProofProgram {
 }
 
 struct ProofLowerer {
-    bindings: HashMap<HirBindingId, BindingInfo>,
+    binding_info: HashMap<HirBindingId, BindingInfo>,
+    binding_places: BindingPlaceMap,
+    binding_versions: BindingVersionMap,
+    places: Vec<ProofPlace>,
 }
 
-impl ProofLowerer {
-    fn new(bindings: HashMap<HirBindingId, BindingInfo>) -> Self {
-        Self { bindings }
-    }
+type BindingPlaceMap = HashMap<HirBindingId, PlaceId>;
+type BindingVersionMap = HashMap<HirBindingId, u32>;
+type BranchStateRef<'a> = (&'a BindingPlaceMap, &'a BindingVersionMap);
 
-    fn lower_program(&self, hir: &HirProgram) -> ProofProgram {
-        ProofProgram {
-            functions: hir
-                .functions
-                .iter()
-                .map(|function| ProofFunction {
-                    body: self.lower_block(&function.body),
-                    span: function.span,
-                })
-                .collect(),
+impl ProofLowerer {
+    fn new(binding_info: HashMap<HirBindingId, BindingInfo>) -> Self {
+        Self {
+            binding_info,
+            binding_places: HashMap::new(),
+            binding_versions: HashMap::new(),
+            places: Vec::new(),
         }
     }
 
-    fn lower_block(&self, block: &HirBlock) -> ProofBlock {
+    fn lower_program(mut self, hir: &HirProgram) -> ProofProgram {
+        let mut functions = Vec::new();
+        for function in &hir.functions {
+            self.binding_places.clear();
+            self.binding_versions.clear();
+            for param in &function.params {
+                self.bind_initial_place(param, None);
+            }
+            functions.push(ProofFunction {
+                body: self.lower_block(&function.body),
+                span: function.span,
+            });
+        }
+
+        ProofProgram {
+            places: self.places,
+            functions,
+        }
+    }
+
+    fn lower_block(&mut self, block: &HirBlock) -> ProofBlock {
         let mut entries = Vec::new();
         for statement in &block.statements {
             self.lower_statement(statement, &mut entries);
@@ -253,16 +332,50 @@ impl ProofLowerer {
         }
     }
 
-    fn lower_statement(&self, statement: &HirStmt, entries: &mut Vec<ProofEntry>) {
+    fn lower_statement(&mut self, statement: &HirStmt, entries: &mut Vec<ProofEntry>) {
         match statement {
             HirStmt::Let(stmt) => {
-                if let Some(value) = &stmt.value {
-                    self.lower_expr(value, entries);
-                }
+                let value = stmt
+                    .value
+                    .as_ref()
+                    .and_then(|value| self.lower_expr(value, entries));
+                let value_place = value.as_ref().map(|value| value.place);
+                let place = self.bind_initial_place(
+                    &stmt.binding,
+                    value_place.and_then(|place| self.place_value(place)),
+                );
+                entries.push(ProofEntry::Let {
+                    binding: stmt.binding.id,
+                    place,
+                    value: value_place,
+                    span: stmt.span,
+                });
             }
             HirStmt::Assign(stmt) => {
-                self.lower_expr(&stmt.target, entries);
-                self.lower_expr(&stmt.value, entries);
+                let value = self.lower_expr(&stmt.value, entries);
+                let target = self.lower_expr(&stmt.target, entries);
+                if let (
+                    Some(value),
+                    Some(ProofExpr {
+                        kind: ProofExprKind::Binding(binding),
+                        place: old_place,
+                        ..
+                    }),
+                ) = (value, target)
+                {
+                    let new_place = self.advance_binding_place(
+                        binding,
+                        stmt.target.span,
+                        self.place_value(value.place),
+                    );
+                    entries.push(ProofEntry::Assign {
+                        binding,
+                        old_place,
+                        new_place,
+                        value: value.place,
+                        span: stmt.span,
+                    });
+                }
             }
             HirStmt::Expr(stmt) => {
                 if let Some(expr) = self.lower_expr(&stmt.expr, entries) {
@@ -276,22 +389,52 @@ impl ProofLowerer {
                 let Some(condition) = self.lower_expr(&stmt.condition, entries) else {
                     return;
                 };
-                let (facts, mutable_hints) = self.control_flow_relations(&stmt.condition);
+                let then_facts = self.condition_facts(&condition, true, stmt.condition.span);
+                let else_facts = self.condition_facts(&condition, false, stmt.condition.span);
+
+                let saved_places = self.binding_places.clone();
+                let saved_versions = self.binding_versions.clone();
+
+                self.binding_places = saved_places.clone();
+                self.binding_versions = saved_versions.clone();
+                let then_block = self.lower_block(&stmt.then_block);
+                let then_places = self.binding_places.clone();
+                let then_versions = self.binding_versions.clone();
+
+                self.binding_places = saved_places.clone();
+                self.binding_versions = saved_versions.clone();
+                let else_block = stmt
+                    .else_branch
+                    .as_ref()
+                    .map(|branch| self.lower_else_branch(branch));
+                let else_places = self.binding_places.clone();
+                let else_versions = self.binding_versions.clone();
+
+                self.binding_places = saved_places;
+                self.binding_versions = saved_versions;
+                self.merge_branch_state(
+                    &then_places,
+                    &then_versions,
+                    else_block.as_ref().map(|_| (&else_places, &else_versions)),
+                );
+
                 entries.push(ProofEntry::Branch {
                     condition,
-                    facts,
-                    mutable_hints,
-                    then_block: self.lower_block(&stmt.then_block),
-                    else_block: stmt
-                        .else_branch
-                        .as_ref()
-                        .map(|branch| self.lower_else_branch(branch)),
+                    then_facts,
+                    else_facts,
+                    then_block,
+                    else_block,
                     span: stmt.span,
                 });
             }
             HirStmt::Match(stmt) => {
                 self.lower_expr(&stmt.expr, entries);
+                let saved_places = self.binding_places.clone();
+                let saved_versions = self.binding_versions.clone();
                 for arm in &stmt.arms {
+                    self.binding_places = saved_places.clone();
+                    self.binding_versions = saved_versions.clone();
+                    self.bind_pattern(&arm.pattern);
                     match &arm.body {
                         HirMatchBody::Block(block) => entries.push(ProofEntry::Scope {
                             block: self.lower_block(block),
@@ -307,16 +450,19 @@ impl ProofLowerer {
                         }
                     }
                 }
+                self.binding_places = saved_places;
+                self.binding_versions = saved_versions;
             }
             HirStmt::For(stmt) => {
                 let Some(iterable) = self.lower_expr(&stmt.iterable, entries) else {
                     return;
                 };
+                let membership = self.bind_for_membership(stmt);
                 entries.push(ProofEntry::For {
-                    membership: proof_set_membership_for_loop(stmt),
+                    iterable,
+                    membership,
                     body: self.lower_block(&stmt.body),
                     span: stmt.span,
-                    iterable,
                 });
             }
             HirStmt::Return(stmt) => {
@@ -343,18 +489,12 @@ impl ProofLowerer {
                 ) else {
                     return;
                 };
-                let fact = self.relation(
-                    FactSource::Observe,
-                    stmt.span,
-                    &stmt.left,
-                    stmt.op,
-                    &stmt.right,
-                );
+                let facts = self.observe_facts(&left, stmt.op, &right, stmt.span);
                 entries.push(ProofEntry::Observe {
                     left,
                     op: stmt.op,
                     right,
-                    fact,
+                    facts,
                     else_block: self.lower_block(&stmt.else_block),
                     span: stmt.span,
                 });
@@ -362,7 +502,7 @@ impl ProofLowerer {
         }
     }
 
-    fn lower_else_branch(&self, branch: &HirElseBranch) -> ProofBlock {
+    fn lower_else_branch(&mut self, branch: &HirElseBranch) -> ProofBlock {
         match branch {
             HirElseBranch::Block(block) => self.lower_block(block),
             HirElseBranch::If(stmt) => {
@@ -376,25 +516,51 @@ impl ProofLowerer {
         }
     }
 
-    fn lower_expr(&self, expr: &HirExpr, entries: &mut Vec<ProofEntry>) -> Option<ProofExpr> {
-        let kind = match &expr.kind {
-            HirExprKind::Binding(id) => ProofExprKind::Binding(*id),
-            HirExprKind::Item(_) => ProofExprKind::Item,
-            HirExprKind::HostBuiltin(_) => ProofExprKind::HostBuiltin,
-            HirExprKind::Int(value) => ProofExprKind::Int(*value),
-            HirExprKind::Bool(value) => ProofExprKind::Bool(*value),
-            HirExprKind::Tuple(elements) => ProofExprKind::Tuple(
-                elements
+    fn lower_expr(&mut self, expr: &HirExpr, entries: &mut Vec<ProofEntry>) -> Option<ProofExpr> {
+        let (kind, place) = match &expr.kind {
+            HirExprKind::Binding(id) => {
+                let place = self.binding_place(*id);
+                (ProofExprKind::Binding(*id), place)
+            }
+            HirExprKind::Item(_) => {
+                let place =
+                    self.new_place(PlaceKind::Item, expr.ty.clone(), expr.span, "item", None);
+                (ProofExprKind::Item, place)
+            }
+            HirExprKind::HostBuiltin(_) => {
+                let place = self.new_place(
+                    PlaceKind::HostBuiltin,
+                    expr.ty.clone(),
+                    expr.span,
+                    "host builtin",
+                    None,
+                );
+                (ProofExprKind::HostBuiltin, place)
+            }
+            HirExprKind::Int(value) => {
+                let place = self.u32_place(*value, expr.span);
+                (ProofExprKind::Int(*value), place)
+            }
+            HirExprKind::Bool(value) => {
+                let place = self.bool_place(*value, expr.span);
+                (ProofExprKind::Bool(*value), place)
+            }
+            HirExprKind::Tuple(elements) => {
+                let elements = elements
                     .iter()
                     .filter_map(|element| self.lower_expr(element, entries))
-                    .collect(),
-            ),
-            HirExprKind::Array(elements) => ProofExprKind::Array(
-                elements
+                    .collect();
+                let place = self.new_temp(expr.ty.clone(), expr.span, None);
+                (ProofExprKind::Tuple(elements), place)
+            }
+            HirExprKind::Array(elements) => {
+                let elements = elements
                     .iter()
                     .filter_map(|element| self.lower_expr(element, entries))
-                    .collect(),
-            ),
+                    .collect();
+                let place = self.new_temp(expr.ty.clone(), expr.span, None);
+                (ProofExprKind::Array(elements), place)
+            }
             HirExprKind::Block(block) => {
                 entries.push(ProofEntry::Scope {
                     block: self.lower_block(block),
@@ -402,39 +568,67 @@ impl ProofLowerer {
                 });
                 return None;
             }
-            HirExprKind::Unary { expr, .. } => ProofExprKind::Unary {
-                expr: Box::new(self.lower_expr(expr, entries)?),
-            },
-            HirExprKind::Binary { op, left, right } => ProofExprKind::Binary {
-                op: *op,
-                left: Box::new(self.lower_expr(left, entries)?),
-                right: Box::new(self.lower_expr(right, entries)?),
-            },
+            HirExprKind::Unary { expr: inner, .. } => {
+                let inner = self.lower_expr(inner, entries)?;
+                let place = self.new_temp(expr.ty.clone(), expr.span, None);
+                (
+                    ProofExprKind::Unary {
+                        expr: Box::new(inner),
+                    },
+                    place,
+                )
+            }
+            HirExprKind::Binary { op, left, right } => {
+                let left = self.lower_expr(left, entries)?;
+                let right = self.lower_expr(right, entries)?;
+                let value = eval_binary_value(*op, left.value(self), right.value(self));
+                let place = self.new_temp(expr.ty.clone(), expr.span, value);
+                (
+                    ProofExprKind::Binary {
+                        op: *op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                    place,
+                )
+            }
             HirExprKind::Recover { expr, fallback, .. } => {
                 self.lower_expr(expr, entries);
                 self.lower_expr(fallback, entries);
                 return None;
             }
-            HirExprKind::Call { callee, args } => ProofExprKind::Call {
-                callee: Box::new(self.lower_expr(callee, entries)?),
-                args: args
+            HirExprKind::Call { callee, args } => {
+                let callee = self.lower_expr(callee, entries)?;
+                let args = args
                     .iter()
                     .filter_map(|arg| self.lower_expr(arg, entries))
-                    .collect(),
-            },
+                    .collect();
+                let place = self.new_temp(expr.ty.clone(), expr.span, None);
+                (
+                    ProofExprKind::Call {
+                        callee: Box::new(callee),
+                        args,
+                    },
+                    place,
+                )
+            }
             HirExprKind::Index { target, index } => {
                 let target = self.lower_expr(target, entries)?;
                 let index = self.lower_expr(index, entries)?;
-                if let Some(kind) = proof_obligation_for_index(&target, &index) {
+                if let Some(obligation) = self.proof_obligation_for_index(&target, &index) {
                     entries.push(ProofEntry::Obligation {
                         span: index.span,
-                        kind,
+                        obligation,
                     });
                 }
-                ProofExprKind::Index {
-                    target: Box::new(target),
-                    index: Box::new(index),
-                }
+                let place = self.new_temp(expr.ty.clone(), expr.span, None);
+                (
+                    ProofExprKind::Index {
+                        target: Box::new(target),
+                        index: Box::new(index),
+                    },
+                    place,
+                )
             }
         };
 
@@ -442,481 +636,1068 @@ impl ProofLowerer {
             kind,
             ty: expr.ty.clone(),
             span: expr.span,
+            place,
         })
     }
 
-    fn control_flow_relations(
-        &self,
-        condition: &HirExpr,
-    ) -> (Vec<ProofRelation>, Vec<ProofRelation>) {
+    fn proof_obligation_for_index(
+        &mut self,
+        target: &ProofExpr,
+        index: &ProofExpr,
+    ) -> Option<MarkerObligation> {
+        match &target.ty {
+            HirType::Array { length, .. } => {
+                let length_place = self.array_length_place(target.place, *length, target.span);
+                Some(MarkerObligation {
+                    target: ObligationTarget::Place(index.place),
+                    required: MarkerPattern::LessThan {
+                        left: index.place,
+                        right: length_place,
+                    },
+                    source: ObligationSource::Index {
+                        array: target.place,
+                        index: index.place,
+                    },
+                    span: index.span,
+                })
+            }
+            HirType::Map { .. } => Some(MarkerObligation {
+                target: ObligationTarget::Place(index.place),
+                required: MarkerPattern::MemberOf {
+                    key: index.place,
+                    map: target.place,
+                },
+                source: ObligationSource::MapLookup {
+                    map: target.place,
+                    key: index.place,
+                },
+                span: index.span,
+            }),
+            _ => None,
+        }
+    }
+
+    fn bind_initial_place(&mut self, binding: &HirBinding, value: Option<PlaceValue>) -> PlaceId {
+        self.binding_versions.insert(binding.id, 0);
+        let place = self.new_place(
+            PlaceKind::Binding {
+                binding: binding.id,
+                version: 0,
+            },
+            binding.ty.clone(),
+            binding.span,
+            binding.name.clone(),
+            value,
+        );
+        self.binding_places.insert(binding.id, place);
+        place
+    }
+
+    fn advance_binding_place(
+        &mut self,
+        binding: HirBindingId,
+        span: Span,
+        value: Option<PlaceValue>,
+    ) -> PlaceId {
+        let next_version = self.binding_versions.get(&binding).copied().unwrap_or(0) + 1;
+        self.binding_versions.insert(binding, next_version);
+        let info = self
+            .binding_info
+            .get(&binding)
+            .cloned()
+            .unwrap_or_else(|| BindingInfo {
+                name: "binding".to_owned(),
+                mutable: false,
+                ty: HirType::Unit,
+                span,
+            });
+        let place = self.new_place(
+            PlaceKind::Binding {
+                binding,
+                version: next_version,
+            },
+            info.ty,
+            span,
+            info.name,
+            value,
+        );
+        self.binding_places.insert(binding, place);
+        place
+    }
+
+    fn binding_place(&mut self, binding: HirBindingId) -> PlaceId {
+        if let Some(place) = self.binding_places.get(&binding).copied() {
+            return place;
+        }
+
+        let info = self
+            .binding_info
+            .get(&binding)
+            .cloned()
+            .unwrap_or_else(|| BindingInfo {
+                name: "binding".to_owned(),
+                mutable: false,
+                ty: HirType::Unit,
+                span: binding.declaration_span,
+            });
+        let binding = HirBinding {
+            id: binding,
+            name: info.name,
+            kind: langlog_sema::BindingKind::Local,
+            mutable: info.mutable,
+            ty: info.ty,
+            span: info.span,
+        };
+        self.bind_initial_place(&binding, None)
+    }
+
+    fn bind_pattern(&mut self, pattern: &HirPattern) -> Option<PlaceId> {
+        match &pattern.kind {
+            HirPatternKind::Binding(binding) => Some(self.bind_initial_place(binding, None)),
+            HirPatternKind::Wildcard | HirPatternKind::Int(_) | HirPatternKind::Bool(_) => None,
+        }
+    }
+
+    fn bind_for_membership(
+        &mut self,
+        stmt: &langlog_sema::HirForStmt,
+    ) -> Option<ProofSetMembership> {
+        let member = self.bind_pattern(&stmt.binding)?;
+        let HirType::Set { element, .. } = &stmt.iterable.ty else {
+            return None;
+        };
+
+        Some(ProofSetMembership {
+            member,
+            element_type: (**element).clone(),
+            span: stmt.iterable.span,
+        })
+    }
+
+    fn merge_branch_state(
+        &mut self,
+        then_places: &BindingPlaceMap,
+        then_versions: &BindingVersionMap,
+        else_state: Option<BranchStateRef<'_>>,
+    ) {
+        let original = self.binding_places.clone();
+        for (binding, original_place) in original {
+            let then_changed = then_places
+                .get(&binding)
+                .map(|place| *place != original_place)
+                .unwrap_or(false);
+            let else_changed = else_state
+                .and_then(|(places, _)| places.get(&binding))
+                .map(|place| *place != original_place)
+                .unwrap_or(false);
+            if !then_changed && !else_changed {
+                continue;
+            }
+
+            let mut merged_version = self.binding_versions.get(&binding).copied().unwrap_or(0);
+            merged_version = merged_version.max(then_versions.get(&binding).copied().unwrap_or(0));
+            if let Some((_, else_versions)) = else_state {
+                merged_version =
+                    merged_version.max(else_versions.get(&binding).copied().unwrap_or(0));
+            }
+            self.binding_versions.insert(binding, merged_version);
+            self.advance_binding_place(binding, binding.declaration_span, None);
+        }
+    }
+
+    fn condition_facts(
+        &mut self,
+        condition: &ProofExpr,
+        truth: bool,
+        origin_span: Span,
+    ) -> Vec<MarkerFact> {
+        let source = if truth {
+            MarkerFactSource::ControlFlowTruth
+        } else {
+            MarkerFactSource::ControlFlowFalse
+        };
+        let mut facts = vec![MarkerFact {
+            target: condition.place,
+            marker: if truth {
+                MarkerPattern::True {
+                    value: condition.place,
+                }
+            } else {
+                MarkerPattern::False {
+                    value: condition.place,
+                }
+            },
+            source,
+            origin_span,
+        }];
+
         match &condition.kind {
-            HirExprKind::Binary {
+            ProofExprKind::Binary {
                 op: BinaryOp::And,
                 left,
                 right,
-            } => {
-                let (mut facts, mut hints) = self.control_flow_relations(left);
-                let (right_facts, right_hints) = self.control_flow_relations(right);
-                facts.extend(right_facts);
-                hints.extend(right_hints);
-                (facts, hints)
+            } if truth => {
+                facts.extend(self.condition_facts(left, true, left.span));
+                facts.extend(self.condition_facts(right, true, right.span));
             }
-            HirExprKind::Binary { op, left, right } => {
-                let Some(op) = comparison_to_observe_op(*op) else {
-                    return (Vec::new(), Vec::new());
-                };
-                let relation =
-                    self.relation(FactSource::ControlFlow, condition.span, left, op, right);
-                if relation.stable {
-                    (vec![relation], Vec::new())
-                } else {
-                    (Vec::new(), vec![relation])
+            ProofExprKind::Binary {
+                op: BinaryOp::Or, ..
+            } => {}
+            ProofExprKind::Binary { op, left, right } => {
+                facts.extend(self.binary_relation_facts(
+                    *op,
+                    left,
+                    right,
+                    truth,
+                    source,
+                    origin_span,
+                ));
+            }
+            _ => {}
+        }
+
+        facts
+    }
+
+    fn observe_facts(
+        &mut self,
+        left: &ProofExpr,
+        op: ObserveOp,
+        right: &ProofExpr,
+        origin_span: Span,
+    ) -> Vec<MarkerFact> {
+        self.observe_relation_facts(
+            left,
+            op,
+            right,
+            true,
+            MarkerFactSource::Observe,
+            origin_span,
+        )
+    }
+
+    fn binary_relation_facts(
+        &mut self,
+        op: BinaryOp,
+        left: &ProofExpr,
+        right: &ProofExpr,
+        truth: bool,
+        source: MarkerFactSource,
+        origin_span: Span,
+    ) -> Vec<MarkerFact> {
+        let Some(op) = binary_to_observe_op(op) else {
+            return Vec::new();
+        };
+        self.observe_relation_facts(left, op, right, truth, source, origin_span)
+    }
+
+    fn observe_relation_facts(
+        &mut self,
+        left: &ProofExpr,
+        op: ObserveOp,
+        right: &ProofExpr,
+        truth: bool,
+        source: MarkerFactSource,
+        origin_span: Span,
+    ) -> Vec<MarkerFact> {
+        let mut facts = Vec::new();
+        match (op, truth) {
+            (ObserveOp::Eq, true) | (ObserveOp::NotEq, false) => {
+                facts.push(self.fact(
+                    left.place,
+                    MarkerPattern::Equal {
+                        left: left.place,
+                        right: right.place,
+                    },
+                    source,
+                    origin_span,
+                ));
+                facts.push(self.fact(
+                    right.place,
+                    MarkerPattern::Equal {
+                        left: right.place,
+                        right: left.place,
+                    },
+                    source,
+                    origin_span,
+                ));
+            }
+            (ObserveOp::Lt, true) | (ObserveOp::GtEq, false) => {
+                self.push_less_than_pair(&mut facts, left.place, right.place, source, origin_span);
+            }
+            (ObserveOp::LtEq, true) | (ObserveOp::Gt, false) => {
+                facts.push(self.fact(
+                    left.place,
+                    MarkerPattern::LessOrEqual {
+                        left: left.place,
+                        right: right.place,
+                    },
+                    source,
+                    origin_span,
+                ));
+                facts.push(self.fact(
+                    right.place,
+                    MarkerPattern::GreaterOrEqual {
+                        left: right.place,
+                        right: left.place,
+                    },
+                    source,
+                    origin_span,
+                ));
+                if let Some(bound) = self.successor_u32_place(right.place, right.span) {
+                    self.push_less_than_pair(&mut facts, left.place, bound, source, origin_span);
                 }
             }
-            _ => (Vec::new(), Vec::new()),
+            (ObserveOp::Gt, true) | (ObserveOp::LtEq, false) => {
+                self.push_less_than_pair(&mut facts, right.place, left.place, source, origin_span);
+            }
+            (ObserveOp::GtEq, true) | (ObserveOp::Lt, false) => {
+                facts.push(self.fact(
+                    left.place,
+                    MarkerPattern::GreaterOrEqual {
+                        left: left.place,
+                        right: right.place,
+                    },
+                    source,
+                    origin_span,
+                ));
+                facts.push(self.fact(
+                    right.place,
+                    MarkerPattern::LessOrEqual {
+                        left: right.place,
+                        right: left.place,
+                    },
+                    source,
+                    origin_span,
+                ));
+            }
+            (ObserveOp::NotEq, true) | (ObserveOp::Eq, false) => {}
         }
+        facts
     }
 
-    fn relation(
-        &self,
-        source: FactSource,
+    fn push_less_than_pair(
+        &mut self,
+        facts: &mut Vec<MarkerFact>,
+        left: PlaceId,
+        right: PlaceId,
+        source: MarkerFactSource,
         origin_span: Span,
-        left: &HirExpr,
-        op: ObserveOp,
-        right: &HirExpr,
-    ) -> ProofRelation {
-        let subject = binding_id(left);
-        let stable = subject
-            .and_then(|subject| self.bindings.get(&subject))
-            .map(|binding| !binding.mutable)
-            .unwrap_or(true);
-        let mut nested_entries = Vec::new();
-        let right = self
-            .lower_expr(right, &mut nested_entries)
-            .unwrap_or_else(|| ProofExpr {
-                kind: ProofExprKind::Tuple(Vec::new()),
-                ty: right.ty.clone(),
-                span: right.span,
-            });
-        ProofRelation {
+    ) {
+        facts.push(self.fact(
+            left,
+            MarkerPattern::LessThan { left, right },
             source,
             origin_span,
-            left_span: left.span,
-            subject,
-            op,
-            right_span: right.span,
+        ));
+        facts.push(self.fact(
             right,
-            stable,
+            MarkerPattern::GreaterThan {
+                left: right,
+                right: left,
+            },
+            source,
+            origin_span,
+        ));
+    }
+
+    fn successor_u32_place(&mut self, place: PlaceId, span: Span) -> Option<PlaceId> {
+        let value = match self.place_value(place)? {
+            PlaceValue::U32(value) if value < u32::MAX as u64 => value + 1,
+            _ => return None,
+        };
+        Some(self.u32_place(value, span))
+    }
+
+    fn fact(
+        &self,
+        target: PlaceId,
+        marker: MarkerPattern,
+        source: MarkerFactSource,
+        origin_span: Span,
+    ) -> MarkerFact {
+        MarkerFact {
+            target,
+            marker,
+            source,
+            origin_span,
         }
     }
-}
 
-fn proof_obligation_for_index(
-    target: &ProofExpr,
-    index: &ProofExpr,
-) -> Option<ProofObligationKind> {
-    match &target.ty {
-        HirType::Array { length, .. } => Some(ProofObligationKind::InBounds {
-            target: target.clone(),
-            index: index.clone(),
-            length: *length,
-        }),
-        HirType::Map { .. } => Some(ProofObligationKind::MapPresence {
-            target: target.clone(),
-            key: index.clone(),
-        }),
-        _ => None,
+    fn new_temp(&mut self, ty: HirType, span: Span, value: Option<PlaceValue>) -> PlaceId {
+        self.new_place(PlaceKind::Temporary, ty, span, "temporary", value)
+    }
+
+    fn u32_place(&mut self, value: u64, span: Span) -> PlaceId {
+        self.new_place(
+            PlaceKind::ConstantU32(value),
+            HirType::U32,
+            span,
+            value.to_string(),
+            Some(PlaceValue::U32(value)),
+        )
+    }
+
+    fn bool_place(&mut self, value: bool, span: Span) -> PlaceId {
+        self.new_place(
+            PlaceKind::ConstantBool(value),
+            HirType::Bool,
+            span,
+            value.to_string(),
+            Some(PlaceValue::Bool(value)),
+        )
+    }
+
+    fn array_length_place(&mut self, array: PlaceId, length: u64, span: Span) -> PlaceId {
+        let display = format!("{}.length", self.place_display(array));
+        self.new_place(
+            PlaceKind::ArrayLength { array, length },
+            HirType::U32,
+            span,
+            display,
+            Some(PlaceValue::U32(length)),
+        )
+    }
+
+    fn new_place(
+        &mut self,
+        kind: PlaceKind,
+        ty: HirType,
+        span: Span,
+        display: impl Into<String>,
+        value: Option<PlaceValue>,
+    ) -> PlaceId {
+        let id = PlaceId {
+            index: self.places.len(),
+        };
+        self.places.push(ProofPlace {
+            id,
+            kind,
+            ty,
+            span,
+            display: display.into(),
+            value,
+        });
+        id
+    }
+
+    fn place_value(&self, place: PlaceId) -> Option<PlaceValue> {
+        self.places.get(place.index).and_then(|place| place.value)
+    }
+
+    fn place_display(&self, place: PlaceId) -> String {
+        self.places
+            .get(place.index)
+            .map(|place| place.display.clone())
+            .unwrap_or_else(|| format!("place#{}", place.index))
     }
 }
 
-fn proof_set_membership_for_loop(stmt: &langlog_sema::HirForStmt) -> Option<ProofSetMembership> {
-    let HirType::Set { element, .. } = &stmt.iterable.ty else {
-        return None;
-    };
-    let HirPatternKind::Binding(binding) = &stmt.binding.kind else {
-        return None;
-    };
-
-    Some(ProofSetMembership {
-        member: binding.id,
-        element_type: (**element).clone(),
-        span: stmt.iterable.span,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct KnownFact {
-    subject: HirBindingId,
-    op: ObserveOp,
-    value: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BindingInfo {
-    mutable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedFact {
-    fact: KnownFact,
-    binding_span: Span,
-    mutable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MutableControlFlowHint {
-    fact: KnownFact,
-    origin_span: Span,
-    binding_span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct KnownSetMembership {
-    member: HirBindingId,
-    element_type: HirType,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RecordedControlFlow {
-    stable_facts: Vec<KnownFact>,
-    mutable_hints: Vec<MutableControlFlowHint>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct FlowState {
-    stable_facts: Vec<KnownFact>,
-    mutable_hints: Vec<MutableControlFlowHint>,
-    set_memberships: Vec<KnownSetMembership>,
+impl ProofExpr {
+    fn value(&self, lowerer: &ProofLowerer) -> Option<PlaceValue> {
+        lowerer.place_value(self.place)
+    }
 }
 
 struct Checker<'a> {
-    hir: &'a HirProgram,
-    bindings: HashMap<HirBindingId, BindingInfo>,
+    program: &'a ProofProgram,
     obligations: usize,
     diagnostics: Vec<Diagnostic>,
-    facts: Vec<ProofFact>,
-    warned_obligations: HashSet<(Span, Span)>,
+    facts: Vec<MarkerFact>,
 }
 
 impl<'a> Checker<'a> {
-    fn new(hir: &'a HirProgram) -> Self {
+    fn new(program: &'a ProofProgram) -> Self {
         Self {
-            hir,
-            bindings: collect_bindings(hir),
+            program,
             obligations: 0,
             diagnostics: Vec::new(),
             facts: Vec::new(),
-            warned_obligations: HashSet::new(),
         }
     }
 
-    fn check_module(&mut self) {
-        let hir = self.hir;
-        for function in &hir.functions {
-            self.check_function(function);
+    fn check_program(&mut self) {
+        for function in &self.program.functions {
+            let mut env = MarkerEnv::default();
+            self.check_block(&function.body, &mut env);
         }
     }
 
-    fn check_function(&mut self, function: &HirFunction) {
-        let mut state = FlowState::default();
-        self.check_block(&function.body, &mut state);
+    fn check_block(&mut self, block: &ProofBlock, env: &mut MarkerEnv) {
+        let snapshot = env.facts.len();
+        for entry in &block.entries {
+            self.check_entry(entry, env);
+        }
+        env.facts.truncate(snapshot);
     }
 
-    fn check_block(&mut self, block: &HirBlock, state: &mut FlowState) {
-        let stable_fact_len = state.stable_facts.len();
-        let hint_len = state.mutable_hints.len();
-        for statement in &block.statements {
-            self.check_statement(statement, state);
-        }
-        if let Some(expr) = &block.result {
-            self.check_expr(expr, state);
-        }
-        state.stable_facts.truncate(stable_fact_len);
-        state.mutable_hints.truncate(hint_len);
-    }
-
-    fn check_statement(&mut self, statement: &HirStmt, state: &mut FlowState) {
-        match statement {
-            HirStmt::Let(stmt) => {
-                if let Some(value) = &stmt.value {
-                    self.check_expr(value, state);
-                }
-            }
-            HirStmt::Assign(stmt) => {
-                self.check_expr(&stmt.target, state);
-                self.check_expr(&stmt.value, state);
-            }
-            HirStmt::Expr(stmt) => {
-                self.check_expr(&stmt.expr, state);
-            }
-            HirStmt::If(stmt) => {
-                let branch_facts = self.record_control_flow_facts(&stmt.condition);
-                self.check_expr(&stmt.condition, state);
-
-                let stable_snapshot = state.stable_facts.len();
-                let hint_snapshot = state.mutable_hints.len();
-                state.stable_facts.extend(branch_facts.stable_facts);
-                state.mutable_hints.extend(branch_facts.mutable_hints);
-                self.check_block(&stmt.then_block, state);
-                state.stable_facts.truncate(stable_snapshot);
-                state.mutable_hints.truncate(hint_snapshot);
-
-                if let Some(else_branch) = &stmt.else_branch {
-                    self.check_else_branch(else_branch, state);
-                }
-            }
-            HirStmt::Match(stmt) => {
-                self.check_expr(&stmt.expr, state);
-                for arm in &stmt.arms {
-                    match &arm.body {
-                        HirMatchBody::Block(block) => self.check_block(block, state),
-                        HirMatchBody::Expr(expr) => self.check_expr(expr, state),
-                    }
-                }
-            }
-            HirStmt::For(stmt) => {
-                self.check_expr(&stmt.iterable, state);
-                let membership_snapshot = state.set_memberships.len();
-                if let Some(membership) = set_membership_for_loop(stmt) {
-                    state.set_memberships.push(membership);
-                }
-                self.check_block(&stmt.body, state);
-                state.set_memberships.truncate(membership_snapshot);
-            }
-            HirStmt::Return(stmt) => {
-                if let Some(value) = &stmt.value {
-                    self.check_expr(value, state);
-                }
-            }
-            HirStmt::Forever(stmt) => {
-                self.check_block(&stmt.body, state);
-            }
-            HirStmt::Exit(stmt) => {
-                self.check_expr(&stmt.value, state);
-            }
-            HirStmt::Delegate(stmt) => {
-                for arg in &stmt.args {
-                    self.check_expr(arg, state);
-                }
-            }
-            HirStmt::Observe(stmt) => {
-                self.check_expr(&stmt.left, state);
-                self.check_expr(&stmt.right, state);
-                self.check_block(&stmt.else_block, state);
-                self.facts.push(ProofFact {
-                    source: FactSource::Observe,
-                    origin_span: stmt.span,
-                    left_span: stmt.left.span,
-                    op: stmt.op,
-                    right_span: stmt.right.span,
-                });
-                if let Some(fact) = self.known_fact(&stmt.left, stmt.op, &stmt.right) {
-                    if !fact.mutable {
-                        state.stable_facts.push(fact.fact);
-                    }
-                }
-            }
-        }
-    }
-
-    fn check_else_branch(&mut self, branch: &HirElseBranch, state: &mut FlowState) {
-        match branch {
-            HirElseBranch::Block(block) => self.check_block(block, state),
-            HirElseBranch::If(stmt) => {
-                self.check_statement(&HirStmt::If(*stmt.clone()), state);
-            }
-        }
-    }
-
-    fn check_expr(&mut self, expr: &HirExpr, state: &mut FlowState) {
-        match &expr.kind {
-            HirExprKind::Binding(_)
-            | HirExprKind::Item(_)
-            | HirExprKind::HostBuiltin(_)
-            | HirExprKind::Int(_)
-            | HirExprKind::Bool(_) => {}
-            HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
-                for element in elements {
-                    self.check_expr(element, state);
-                }
-            }
-            HirExprKind::Block(block) => {
-                self.check_block(block, state);
-            }
-            HirExprKind::Unary { expr, .. } => {
-                self.check_expr(expr, state);
-            }
-            HirExprKind::Binary { left, right, .. } => {
-                self.check_expr(left, state);
-                self.check_expr(right, state);
-            }
-            HirExprKind::Recover { expr, fallback, .. } => {
-                self.check_expr(expr, state);
-                self.check_expr(fallback, state);
-            }
-            HirExprKind::Call { callee, args } => {
-                self.check_expr(callee, state);
-                for arg in args {
-                    self.check_expr(arg, state);
-                }
-            }
-            HirExprKind::Index { target, index } => {
-                self.check_expr(target, state);
-                self.check_expr(index, state);
-
-                self.obligations += 1;
-                match &target.ty {
-                    HirType::Array { .. } => {
-                        if !index_is_proven_in_bounds(target, index, &state.stable_facts) {
-                            self.report_mutable_hint_warning_if_needed(
-                                index.span,
-                                state,
-                                |facts| index_is_proven_in_bounds(target, index, facts),
-                            );
-                            self.report_out_of_bounds_index(index.span);
-                        }
-                    }
-                    HirType::Map { .. } => {
-                        if !map_key_is_proven_present(target, index, &state.set_memberships) {
-                            self.report_missing_map_key(index.span);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn record_control_flow_facts(&mut self, condition: &HirExpr) -> RecordedControlFlow {
-        match &condition.kind {
-            HirExprKind::Binary {
-                op: BinaryOp::And,
-                left,
-                right,
+    fn check_entry(&mut self, entry: &ProofEntry, env: &mut MarkerEnv) {
+        match entry {
+            ProofEntry::Let {
+                place, value, span, ..
             } => {
-                let mut facts = self.record_control_flow_facts(left);
-                let right_facts = self.record_control_flow_facts(right);
-                facts.stable_facts.extend(right_facts.stable_facts);
-                facts.mutable_hints.extend(right_facts.mutable_hints);
-                facts
-            }
-            HirExprKind::Binary { op, left, right } => {
-                let Some(op) = comparison_to_observe_op(*op) else {
-                    return RecordedControlFlow::default();
-                };
-                let proof_fact = ProofFact {
-                    source: FactSource::ControlFlow,
-                    origin_span: condition.span,
-                    left_span: left.span,
-                    op,
-                    right_span: right.span,
-                };
-                self.facts.push(proof_fact.clone());
-
-                let Some(fact) = self.known_fact(left, op, right) else {
-                    return RecordedControlFlow::default();
-                };
-
-                if fact.mutable {
-                    RecordedControlFlow {
-                        stable_facts: Vec::new(),
-                        mutable_hints: vec![MutableControlFlowHint {
-                            fact: fact.fact,
-                            origin_span: proof_fact.origin_span,
-                            binding_span: fact.binding_span,
-                        }],
-                    }
-                } else {
-                    RecordedControlFlow {
-                        stable_facts: vec![fact.fact],
-                        mutable_hints: Vec::new(),
-                    }
+                if let Some(value) = value {
+                    self.copy_marker_facts(env, *value, *place, *span);
                 }
             }
-            _ => RecordedControlFlow::default(),
+            ProofEntry::Assign {
+                new_place,
+                value,
+                span,
+                ..
+            } => {
+                self.copy_marker_facts(env, *value, *new_place, *span);
+            }
+            ProofEntry::Branch {
+                then_facts,
+                else_facts,
+                then_block,
+                else_block,
+                ..
+            } => {
+                let snapshot = env.facts.len();
+                self.add_facts(env, then_facts);
+                self.check_block(then_block, env);
+                env.facts.truncate(snapshot);
+
+                if let Some(else_block) = else_block {
+                    let snapshot = env.facts.len();
+                    self.add_facts(env, else_facts);
+                    self.check_block(else_block, env);
+                    env.facts.truncate(snapshot);
+                }
+            }
+            ProofEntry::Observe {
+                facts, else_block, ..
+            } => {
+                let snapshot = env.facts.len();
+                self.check_block(else_block, env);
+                env.facts.truncate(snapshot);
+                self.add_facts(env, facts);
+            }
+            ProofEntry::For {
+                membership, body, ..
+            } => {
+                let snapshot = env.facts.len();
+                if let Some(membership) = membership {
+                    let fact = MarkerFact {
+                        target: membership.member,
+                        marker: MarkerPattern::SetMember {
+                            element_type: membership.element_type.clone(),
+                        },
+                        source: MarkerFactSource::TrustedBuiltin,
+                        origin_span: membership.span,
+                    };
+                    self.add_fact(env, fact);
+                }
+                self.check_block(body, env);
+                env.facts.truncate(snapshot);
+            }
+            ProofEntry::Obligation { obligation, .. } => {
+                self.obligations += 1;
+                if !self.obligation_is_satisfied(env, obligation) {
+                    self.report_marker_obligation(env, obligation);
+                }
+            }
+            ProofEntry::Eval { .. } => {}
+            ProofEntry::Scope { block, .. } => self.check_block(block, env),
         }
     }
 
-    fn known_fact(&self, left: &HirExpr, op: ObserveOp, right: &HirExpr) -> Option<ResolvedFact> {
-        let subject = binding_id(left)?;
-        let binding = self.bindings.get(&subject)?;
-        let value = eval_const_u64(right)?;
-        Some(ResolvedFact {
-            fact: KnownFact { subject, op, value },
-            binding_span: subject.declaration_span,
-            mutable: binding.mutable,
-        })
+    fn add_facts(&mut self, env: &mut MarkerEnv, facts: &[MarkerFact]) {
+        for fact in facts {
+            self.add_fact(env, fact.clone());
+        }
     }
 
-    fn report_mutable_hint_warning_if_needed<F>(
+    fn add_fact(&mut self, env: &mut MarkerEnv, fact: MarkerFact) {
+        env.facts.push(fact.clone());
+        self.facts.push(fact);
+    }
+
+    fn copy_marker_facts(
         &mut self,
-        obligation_span: Span,
-        state: &FlowState,
-        is_proven: F,
-    ) where
-        F: Fn(&[KnownFact]) -> bool,
-    {
-        if state.mutable_hints.is_empty() {
-            return;
+        env: &mut MarkerEnv,
+        source: PlaceId,
+        destination: PlaceId,
+        origin_span: Span,
+    ) {
+        let copied: Vec<_> = env
+            .facts
+            .iter()
+            .filter(|fact| fact.target == source)
+            .filter_map(|fact| {
+                substitute_marker_place(&fact.marker, source, destination).map(|marker| {
+                    MarkerFact {
+                        target: destination,
+                        marker,
+                        source: MarkerFactSource::AssignmentIdentity,
+                        origin_span,
+                    }
+                })
+            })
+            .collect();
+        self.add_facts(env, &copied);
+    }
+
+    fn obligation_is_satisfied(
+        &mut self,
+        env: &mut MarkerEnv,
+        obligation: &MarkerObligation,
+    ) -> bool {
+        if env
+            .facts
+            .iter()
+            .any(|fact| self.marker_matches(&fact.marker, &obligation.required))
+        {
+            return true;
         }
 
-        let combined_facts = stable_and_mutable_facts(state, None);
-        if !is_proven(&combined_facts) {
-            return;
+        if self.constant_relation_satisfies(&obligation.required) {
+            return true;
         }
 
-        for (index, hint) in state.mutable_hints.iter().enumerate() {
-            let facts_without_hint = stable_and_mutable_facts(state, Some(index));
-            if !is_proven(&facts_without_hint)
-                && self
-                    .warned_obligations
-                    .insert((hint.origin_span, obligation_span))
-            {
-                self.report_mutable_control_flow_hint(hint, obligation_span);
+        if let MarkerPattern::MemberOf { key, map } = obligation.required {
+            if self.trusted_set_to_map_transfer(env, key, map, obligation.span) {
+                return true;
             }
         }
+
+        false
     }
 
-    fn report_out_of_bounds_index(&mut self, span: Span) {
-        self.diagnostics.push(
-            Diagnostic::error("possible out-of-bounds indexing is not proven safe")
-                .with_label(Label::primary(span, "prove this index stays within bounds")),
-        );
-    }
-
-    fn report_missing_map_key(&mut self, span: Span) {
-        self.diagnostics.push(
-            Diagnostic::error("possible missing map key is not proven present")
-                .with_label(Label::primary(span, "prove this key is present in the map")),
-        );
-    }
-
-    fn report_mutable_control_flow_hint(
+    fn trusted_set_to_map_transfer(
         &mut self,
-        hint: &MutableControlFlowHint,
-        obligation_span: Span,
-    ) {
-        self.diagnostics.push(
-            Diagnostic::warning(
-                "mutable control-flow comparison cannot discharge this proof obligation",
+        env: &mut MarkerEnv,
+        key: PlaceId,
+        map: PlaceId,
+        origin_span: Span,
+    ) -> bool {
+        let Some(HirType::Map { key: map_key, .. }) =
+            self.program.places.get(map.index).map(|place| &place.ty)
+        else {
+            return false;
+        };
+
+        let has_set_member = env.facts.iter().any(|fact| {
+            fact.target == key
+                && matches!(
+                    &fact.marker,
+                    MarkerPattern::SetMember { element_type } if element_type == map_key.as_ref()
+                )
+        });
+        if !has_set_member {
+            return false;
+        }
+
+        let fact = MarkerFact {
+            target: key,
+            marker: MarkerPattern::MemberOf { key, map },
+            source: MarkerFactSource::TrustedBuiltin,
+            origin_span,
+        };
+        self.add_fact(env, fact);
+        true
+    }
+
+    fn marker_matches(&self, actual: &MarkerPattern, required: &MarkerPattern) -> bool {
+        match (actual, required) {
+            (MarkerPattern::True { value: a }, MarkerPattern::True { value: b })
+            | (MarkerPattern::False { value: a }, MarkerPattern::False { value: b }) => {
+                self.same_place(*a, *b)
+            }
+            (
+                MarkerPattern::Equal {
+                    left: actual_left,
+                    right: actual_right,
+                },
+                MarkerPattern::Equal {
+                    left: required_left,
+                    right: required_right,
+                },
             )
-            .with_label(Label::primary(
-                hint.origin_span,
-                "comparison was observed here",
-            ))
-            .with_label(Label::secondary(
-                hint.binding_span,
-                "this binding is declared `mut`",
-            ))
-            .with_label(Label::secondary(
-                obligation_span,
-                "this operation still needs a stable proof",
+            | (
+                MarkerPattern::LessThan {
+                    left: actual_left,
+                    right: actual_right,
+                },
+                MarkerPattern::LessThan {
+                    left: required_left,
+                    right: required_right,
+                },
+            )
+            | (
+                MarkerPattern::GreaterThan {
+                    left: actual_left,
+                    right: actual_right,
+                },
+                MarkerPattern::GreaterThan {
+                    left: required_left,
+                    right: required_right,
+                },
+            )
+            | (
+                MarkerPattern::LessOrEqual {
+                    left: actual_left,
+                    right: actual_right,
+                },
+                MarkerPattern::LessOrEqual {
+                    left: required_left,
+                    right: required_right,
+                },
+            )
+            | (
+                MarkerPattern::GreaterOrEqual {
+                    left: actual_left,
+                    right: actual_right,
+                },
+                MarkerPattern::GreaterOrEqual {
+                    left: required_left,
+                    right: required_right,
+                },
+            ) => {
+                self.same_place(*actual_left, *required_left)
+                    && self.same_place_or_literal(*actual_right, *required_right)
+            }
+            (
+                MarkerPattern::MemberOf {
+                    key: actual_key,
+                    map: actual_map,
+                },
+                MarkerPattern::MemberOf {
+                    key: required_key,
+                    map: required_map,
+                },
+            ) => {
+                self.same_place(*actual_key, *required_key)
+                    && self.same_place(*actual_map, *required_map)
+            }
+            (
+                MarkerPattern::SetMember {
+                    element_type: actual_type,
+                },
+                MarkerPattern::SetMember {
+                    element_type: required_type,
+                },
+            ) => actual_type == required_type,
+            (MarkerPattern::Event, MarkerPattern::Event) => true,
+            _ => false,
+        }
+    }
+
+    fn constant_relation_satisfies(&self, required: &MarkerPattern) -> bool {
+        match required {
+            MarkerPattern::LessThan { left, right } => {
+                match (self.place_value(*left), self.place_value(*right)) {
+                    (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => left < right,
+                    _ => false,
+                }
+            }
+            MarkerPattern::LessOrEqual { left, right } => {
+                match (self.place_value(*left), self.place_value(*right)) {
+                    (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => left <= right,
+                    _ => false,
+                }
+            }
+            MarkerPattern::GreaterThan { left, right } => {
+                match (self.place_value(*left), self.place_value(*right)) {
+                    (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => left > right,
+                    _ => false,
+                }
+            }
+            MarkerPattern::GreaterOrEqual { left, right } => {
+                match (self.place_value(*left), self.place_value(*right)) {
+                    (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => left >= right,
+                    _ => false,
+                }
+            }
+            MarkerPattern::Equal { left, right } => {
+                self.place_value(*left).is_some()
+                    && self.place_value(*left) == self.place_value(*right)
+            }
+            MarkerPattern::True { value } => {
+                self.place_value(*value) == Some(PlaceValue::Bool(true))
+            }
+            MarkerPattern::False { value } => {
+                self.place_value(*value) == Some(PlaceValue::Bool(false))
+            }
+            MarkerPattern::MemberOf { .. }
+            | MarkerPattern::SetMember { .. }
+            | MarkerPattern::Event => false,
+        }
+    }
+
+    fn report_marker_obligation(&mut self, env: &MarkerEnv, obligation: &MarkerObligation) {
+        let message = match obligation.source {
+            ObligationSource::Index { .. } => "possible out-of-bounds indexing is not proven safe",
+            ObligationSource::MapLookup { .. } => "possible missing map key is not proven present",
+            ObligationSource::EventCycle => "task cycle is not proven productive",
+        };
+        let label = match obligation.source {
+            ObligationSource::Index { .. } => "prove this index stays within bounds",
+            ObligationSource::MapLookup { .. } => "prove this key is present in the map",
+            ObligationSource::EventCycle => "introduce an Event marker on every cyclic path",
+        };
+
+        let target = match obligation.target {
+            ObligationTarget::Place(place) => self.place_display(place),
+            ObligationTarget::StateCycle { .. } => "state cycle".to_owned(),
+        };
+        let required = self.marker_display(&obligation.required);
+
+        let mut diagnostic = Diagnostic::error(message)
+            .with_label(Label::primary(obligation.span, label))
+            .with_note(format!("required marker: {required}"))
+            .with_note(format!("target place: {target}"));
+
+        if let Some(near_miss) = self.near_miss_marker(env, &obligation.required) {
+            diagnostic = diagnostic.with_note(format!("known near-miss marker: {near_miss}"));
+        } else if let Some(known) = self.known_markers_for_target(env, obligation.target.clone()) {
+            diagnostic = diagnostic.with_note(format!("known marker facts for target: {known}"));
+        }
+
+        if let Some(suggestion) = self.guard_suggestion(&obligation.required) {
+            diagnostic = diagnostic.with_note(suggestion);
+        }
+
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn near_miss_marker(&self, env: &MarkerEnv, required: &MarkerPattern) -> Option<String> {
+        env.facts
+            .iter()
+            .find(|fact| self.marker_is_near_miss(&fact.marker, required))
+            .map(|fact| self.marker_display(&fact.marker))
+    }
+
+    fn marker_is_near_miss(&self, actual: &MarkerPattern, required: &MarkerPattern) -> bool {
+        match (actual, required) {
+            (
+                MarkerPattern::LessThan {
+                    left: actual_left,
+                    right: actual_right,
+                },
+                MarkerPattern::LessThan {
+                    left: required_left,
+                    right: required_right,
+                },
+            ) => {
+                !self.same_place(*actual_left, *required_left)
+                    && self.same_binding_name(*actual_left, *required_left)
+                    && self.same_place_or_literal(*actual_right, *required_right)
+            }
+            (
+                MarkerPattern::MemberOf {
+                    key: actual_key,
+                    map: actual_map,
+                },
+                MarkerPattern::MemberOf {
+                    key: required_key,
+                    map: required_map,
+                },
+            ) => {
+                !self.same_place(*actual_key, *required_key)
+                    && self.same_binding_name(*actual_key, *required_key)
+                    && self.same_place(*actual_map, *required_map)
+            }
+            _ => false,
+        }
+    }
+
+    fn known_markers_for_target(
+        &self,
+        env: &MarkerEnv,
+        target: ObligationTarget,
+    ) -> Option<String> {
+        let ObligationTarget::Place(target) = target else {
+            return None;
+        };
+        let markers: Vec<_> = env
+            .facts
+            .iter()
+            .filter(|fact| fact.target == target)
+            .map(|fact| self.marker_display(&fact.marker))
+            .collect();
+        (!markers.is_empty()).then(|| markers.join(", "))
+    }
+
+    fn guard_suggestion(&self, required: &MarkerPattern) -> Option<String> {
+        match required {
+            MarkerPattern::LessThan { left, right } => Some(format!(
+                "add a guard such as `if {} < {} {{ ... }}` or an `observe` before the operation",
+                self.place_display(*left),
+                self.place_display(*right)
             )),
-        );
+            MarkerPattern::MemberOf { key, map } => Some(format!(
+                "iterate a matching key set or add a checked map-presence guard for `{}` in `{}`",
+                self.place_display(*key),
+                self.place_display(*map)
+            )),
+            MarkerPattern::Event => Some(
+                "receive fresh external input or an externally scheduled occurrence before the next `go`".to_owned(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn same_place(&self, left: PlaceId, right: PlaceId) -> bool {
+        left == right
+    }
+
+    fn same_place_or_literal(&self, left: PlaceId, right: PlaceId) -> bool {
+        left == right
+            || self.literal_value(left).is_some()
+                && self.literal_value(left) == self.literal_value(right)
+    }
+
+    fn same_binding_name(&self, left: PlaceId, right: PlaceId) -> bool {
+        let Some(left) = self.program.places.get(left.index) else {
+            return false;
+        };
+        let Some(right) = self.program.places.get(right.index) else {
+            return false;
+        };
+        matches!(
+            (&left.kind, &right.kind),
+            (
+                PlaceKind::Binding {
+                    binding: left_binding,
+                    ..
+                },
+                PlaceKind::Binding {
+                    binding: right_binding,
+                    ..
+                }
+            ) if left_binding == right_binding
+        )
+    }
+
+    fn literal_value(&self, place: PlaceId) -> Option<PlaceValue> {
+        match self.program.places.get(place.index)?.kind {
+            PlaceKind::ConstantU32(_)
+            | PlaceKind::ConstantBool(_)
+            | PlaceKind::ArrayLength { .. } => self.place_value(place),
+            PlaceKind::Binding { .. }
+            | PlaceKind::Temporary
+            | PlaceKind::Item
+            | PlaceKind::HostBuiltin => None,
+        }
+    }
+
+    fn place_value(&self, place: PlaceId) -> Option<PlaceValue> {
+        self.program
+            .places
+            .get(place.index)
+            .and_then(|place| place.value)
+    }
+
+    fn place_display(&self, place: PlaceId) -> String {
+        self.program
+            .places
+            .get(place.index)
+            .map(|place| match place.kind {
+                PlaceKind::Binding { version, .. } if version > 0 => {
+                    format!("{}#{}", place.display, version)
+                }
+                _ => place.display.clone(),
+            })
+            .unwrap_or_else(|| format!("place#{}", place.index))
+    }
+
+    fn marker_display(&self, marker: &MarkerPattern) -> String {
+        match marker {
+            MarkerPattern::True { value } => format!("True({})", self.place_display(*value)),
+            MarkerPattern::False { value } => format!("False({})", self.place_display(*value)),
+            MarkerPattern::Equal { left, right } => {
+                format!(
+                    "Equal({}, {})",
+                    self.place_display(*left),
+                    self.place_display(*right)
+                )
+            }
+            MarkerPattern::LessThan { left, right } => format!(
+                "LessThan({}, {})",
+                self.place_display(*left),
+                self.place_display(*right)
+            ),
+            MarkerPattern::GreaterThan { left, right } => format!(
+                "GreaterThan({}, {})",
+                self.place_display(*left),
+                self.place_display(*right)
+            ),
+            MarkerPattern::LessOrEqual { left, right } => format!(
+                "LessOrEqual({}, {})",
+                self.place_display(*left),
+                self.place_display(*right)
+            ),
+            MarkerPattern::GreaterOrEqual { left, right } => format!(
+                "GreaterOrEqual({}, {})",
+                self.place_display(*left),
+                self.place_display(*right)
+            ),
+            MarkerPattern::MemberOf { key, map } => format!(
+                "MemberOf({}, {})",
+                self.place_display(*key),
+                self.place_display(*map)
+            ),
+            MarkerPattern::SetMember { element_type } => {
+                format!("SetMember({})", format_hir_type(element_type))
+            }
+            MarkerPattern::Event => "Event".to_owned(),
+        }
     }
 }
 
-fn comparison_to_observe_op(op: BinaryOp) -> Option<ObserveOp> {
+#[derive(Debug, Clone, Default)]
+struct MarkerEnv {
+    facts: Vec<MarkerFact>,
+}
+
+fn substitute_marker_place(
+    marker: &MarkerPattern,
+    source: PlaceId,
+    destination: PlaceId,
+) -> Option<MarkerPattern> {
+    let replace = |place: PlaceId| if place == source { destination } else { place };
+    Some(match marker {
+        MarkerPattern::True { value } => MarkerPattern::True {
+            value: replace(*value),
+        },
+        MarkerPattern::False { value } => MarkerPattern::False {
+            value: replace(*value),
+        },
+        MarkerPattern::Equal { left, right } => MarkerPattern::Equal {
+            left: replace(*left),
+            right: replace(*right),
+        },
+        MarkerPattern::LessThan { left, right } => MarkerPattern::LessThan {
+            left: replace(*left),
+            right: replace(*right),
+        },
+        MarkerPattern::GreaterThan { left, right } => MarkerPattern::GreaterThan {
+            left: replace(*left),
+            right: replace(*right),
+        },
+        MarkerPattern::LessOrEqual { left, right } => MarkerPattern::LessOrEqual {
+            left: replace(*left),
+            right: replace(*right),
+        },
+        MarkerPattern::GreaterOrEqual { left, right } => MarkerPattern::GreaterOrEqual {
+            left: replace(*left),
+            right: replace(*right),
+        },
+        MarkerPattern::MemberOf { key, map } => MarkerPattern::MemberOf {
+            key: replace(*key),
+            map: replace(*map),
+        },
+        MarkerPattern::SetMember { element_type } => MarkerPattern::SetMember {
+            element_type: element_type.clone(),
+        },
+        MarkerPattern::Event => MarkerPattern::Event,
+    })
+}
+
+fn binary_to_observe_op(op: BinaryOp) -> Option<ObserveOp> {
     match op {
         BinaryOp::EqEq => Some(ObserveOp::Eq),
         BinaryOp::NotEq => Some(ObserveOp::NotEq),
@@ -928,138 +1709,36 @@ fn comparison_to_observe_op(op: BinaryOp) -> Option<ObserveOp> {
     }
 }
 
-fn stable_and_mutable_facts(state: &FlowState, skip_hint: Option<usize>) -> Vec<KnownFact> {
-    let mut facts = state.stable_facts.clone();
-    for (index, hint) in state.mutable_hints.iter().enumerate() {
-        if Some(index) != skip_hint {
-            facts.push(hint.fact.clone());
+fn eval_binary_value(
+    op: BinaryOp,
+    left: Option<PlaceValue>,
+    right: Option<PlaceValue>,
+) -> Option<PlaceValue> {
+    match (op, left, right) {
+        (BinaryOp::EqEq, Some(left), Some(right)) => Some(PlaceValue::Bool(left == right)),
+        (BinaryOp::NotEq, Some(left), Some(right)) => Some(PlaceValue::Bool(left != right)),
+        (BinaryOp::Lt, Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => {
+            Some(PlaceValue::Bool(left < right))
         }
-    }
-    facts
-}
-
-fn proven_u32_range(expr: &HirExpr, facts: &[KnownFact]) -> Option<(u64, u64)> {
-    match &expr.kind {
-        HirExprKind::Binding(subject) => bounds_for_binding(*subject, facts),
-        HirExprKind::Int(_)
-        | HirExprKind::Binary { .. }
-        | HirExprKind::Unary { .. }
-        | HirExprKind::Item(_)
-        | HirExprKind::HostBuiltin(_)
-        | HirExprKind::Bool(_)
-        | HirExprKind::Tuple(_)
-        | HirExprKind::Array(_)
-        | HirExprKind::Block(_)
-        | HirExprKind::Recover { .. }
-        | HirExprKind::Call { .. }
-        | HirExprKind::Index { .. } => None,
-    }
-}
-
-fn binding_id(expr: &HirExpr) -> Option<HirBindingId> {
-    match expr.kind {
-        HirExprKind::Binding(id) => Some(id),
+        (BinaryOp::LtEq, Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => {
+            Some(PlaceValue::Bool(left <= right))
+        }
+        (BinaryOp::Gt, Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => {
+            Some(PlaceValue::Bool(left > right))
+        }
+        (BinaryOp::GtEq, Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => {
+            Some(PlaceValue::Bool(left >= right))
+        }
         _ => None,
     }
 }
 
-fn bounds_for_binding(subject: HirBindingId, facts: &[KnownFact]) -> Option<(u64, u64)> {
-    let mut lower = 0;
-    let mut upper = U32_MAX_U64;
-
-    for fact in facts.iter().filter(|fact| fact.subject == subject) {
-        match fact.op {
-            ObserveOp::Eq => {
-                lower = lower.max(fact.value);
-                upper = upper.min(fact.value);
-            }
-            ObserveOp::NotEq => {}
-            ObserveOp::Lt => {
-                upper = upper.min(fact.value.saturating_sub(1));
-            }
-            ObserveOp::LtEq => {
-                upper = upper.min(fact.value);
-            }
-            ObserveOp::Gt => {
-                lower = lower.max(fact.value.saturating_add(1));
-            }
-            ObserveOp::GtEq => {
-                lower = lower.max(fact.value);
-            }
-        }
-    }
-
-    (lower <= upper).then_some((lower, upper))
-}
-
-fn eval_const_u64(expr: &HirExpr) -> Option<u64> {
-    match &expr.kind {
-        HirExprKind::Int(value) => Some(*value),
-        HirExprKind::Unary { .. }
-        | HirExprKind::Binding(_)
-        | HirExprKind::Item(_)
-        | HirExprKind::HostBuiltin(_)
-        | HirExprKind::Bool(_)
-        | HirExprKind::Tuple(_)
-        | HirExprKind::Array(_)
-        | HirExprKind::Block(_)
-        | HirExprKind::Recover { .. }
-        | HirExprKind::Call { .. }
-        | HirExprKind::Index { .. }
-        | HirExprKind::Binary { .. } => None,
-    }
-}
-
-fn index_is_proven_in_bounds(target: &HirExpr, index: &HirExpr, facts: &[KnownFact]) -> bool {
-    let Some(length) = array_length(target) else {
-        return false;
-    };
-
-    if let Some(value) = eval_const_u64(index) {
-        return value < length;
-    }
-
-    proven_u32_range(index, facts)
-        .map(|(_, upper)| upper < length)
-        .unwrap_or(false)
-}
-
-fn map_key_is_proven_present(
-    target: &HirExpr,
-    index: &HirExpr,
-    memberships: &[KnownSetMembership],
-) -> bool {
-    let HirType::Map { key, .. } = &target.ty else {
-        return false;
-    };
-    let Some(member) = binding_id(index) else {
-        return false;
-    };
-
-    memberships
-        .iter()
-        .any(|membership| membership.member == member && membership.element_type == **key)
-}
-
-fn set_membership_for_loop(stmt: &langlog_sema::HirForStmt) -> Option<KnownSetMembership> {
-    let HirType::Set { element, .. } = &stmt.iterable.ty else {
-        return None;
-    };
-    let HirPatternKind::Binding(binding) = &stmt.binding.kind else {
-        return None;
-    };
-
-    Some(KnownSetMembership {
-        member: binding.id,
-        element_type: (**element).clone(),
-    })
-}
-
-fn array_length(expr: &HirExpr) -> Option<u64> {
-    match &expr.ty {
-        HirType::Array { length, .. } => Some(*length),
-        _ => None,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingInfo {
+    name: String,
+    mutable: bool,
+    ty: HirType,
+    span: Span,
 }
 
 fn collect_bindings(hir: &HirProgram) -> HashMap<HirBindingId, BindingInfo> {
@@ -1077,7 +1756,10 @@ fn collect_binding(bindings: &mut HashMap<HirBindingId, BindingInfo>, binding: &
     bindings.insert(
         binding.id,
         BindingInfo {
+            name: binding.name.clone(),
             mutable: binding.mutable,
+            ty: binding.ty.clone(),
+            span: binding.span,
         },
     );
 }
@@ -1103,9 +1785,7 @@ fn collect_statement_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>,
             collect_expr_bindings(bindings, &stmt.target);
             collect_expr_bindings(bindings, &stmt.value);
         }
-        HirStmt::Expr(stmt) => {
-            collect_expr_bindings(bindings, &stmt.expr);
-        }
+        HirStmt::Expr(stmt) => collect_expr_bindings(bindings, &stmt.expr),
         HirStmt::If(stmt) => {
             collect_expr_bindings(bindings, &stmt.condition);
             collect_block_bindings(bindings, &stmt.then_block);
@@ -1133,12 +1813,8 @@ fn collect_statement_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>,
                 collect_expr_bindings(bindings, value);
             }
         }
-        HirStmt::Forever(stmt) => {
-            collect_block_bindings(bindings, &stmt.body);
-        }
-        HirStmt::Exit(stmt) => {
-            collect_expr_bindings(bindings, &stmt.value);
-        }
+        HirStmt::Forever(stmt) => collect_block_bindings(bindings, &stmt.body),
+        HirStmt::Exit(stmt) => collect_expr_bindings(bindings, &stmt.value),
         HirStmt::Delegate(stmt) => {
             for arg in &stmt.args {
                 collect_expr_bindings(bindings, arg);
@@ -1211,6 +1887,53 @@ fn collect_expr_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>, expr
         HirExprKind::Index { target, index } => {
             collect_expr_bindings(bindings, target);
             collect_expr_bindings(bindings, index);
+        }
+    }
+}
+
+fn format_hir_type(ty: &HirType) -> String {
+    match ty {
+        HirType::Unit => "()".to_owned(),
+        HirType::Bool => "bool".to_owned(),
+        HirType::U32 => "u32".to_owned(),
+        HirType::ArithmeticError => "ArithmeticError".to_owned(),
+        HirType::Tuple(elements) => {
+            let elements = elements
+                .iter()
+                .map(format_hir_type)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({elements})")
+        }
+        HirType::Array { element, length } => {
+            format!("[{}; {length}]", format_hir_type(element))
+        }
+        HirType::Option(element) => format!("Option<{}>", format_hir_type(element)),
+        HirType::Result { ok, err } => {
+            format!("Result<{}, {}>", format_hir_type(ok), format_hir_type(err))
+        }
+        HirType::Set { element, capacity } => {
+            format!("Set<{}, {capacity}>", format_hir_type(element))
+        }
+        HirType::Map {
+            key,
+            value,
+            capacity,
+        } => format!(
+            "Map<{}, {}, {capacity}>",
+            format_hir_type(key),
+            format_hir_type(value)
+        ),
+        HirType::Range(element) => format!("Range<{}>", format_hir_type(element)),
+        HirType::Named(name) => name.clone(),
+        HirType::Function(function) => {
+            let params = function
+                .params
+                .iter()
+                .map(format_hir_type)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn({params}) -> {}", format_hir_type(&function.return_type))
         }
     }
 }
