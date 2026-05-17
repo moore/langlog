@@ -561,16 +561,38 @@ be treated as bounds over representable values. In that model, `Input: String
 with Event` means that `Input` has the shape of a string and carries the
 `Event` marker.
 
-Using the same generic name also gives a compact way to preserve markers:
+Function calls should be able to elide unmentioned markers on arguments. A
+value with extra markers can be passed to a parameter that does not require
+them:
 
 ```llg
-fn trim<T>(input: T) -> T
-where
-    T: String;
+fn len(input: String) -> u32;
+
+let line: String with Event = stdin.read();
+let length = len(line);
 ```
 
-If `T` is `String with Event`, the result is also `String with Event` because
-the marker is part of the named generic type.
+The call is allowed because `len` does not require the `Event` marker. The
+marker is ignored at the call boundary.
+
+Return values should be stricter. A function returns only the markers stated in
+its signature. Markers should not be preserved through a function merely because
+the argument had them, even when generics are involved. The function body may
+not preserve the marker's contract, and the caller should only rely on the
+contract written in the signature.
+
+```llg
+fn trim(input: String) -> String;
+
+let line: String with Event = stdin.read();
+let trimmed = trim(line); // String, not String with Event
+```
+
+If a function preserves or creates a marker, it must say so explicitly:
+
+```llg
+fn trim_event(input: String with Event) -> String with Event;
+```
 
 User code should be able to define and use markers, but creating a marker needs
 to carry a contract. An operation such as `Event::mark(value)` could be the
@@ -585,6 +607,288 @@ fn read_line(stdin: Stdin) -> String with Event {
 ```
 
 The contract of `Event::mark` is that the marked value represents fresh external
-input or a fresh externally scheduled occurrence. Safe code can carry, require,
-and preserve markers, but introducing one is an explicit assertion that the
+input or a fresh externally scheduled occurrence. Safe code can carry and
+require markers, and it can preserve them across a function boundary only when
+the signature says so. Introducing one is an explicit assertion that the
 programmer must uphold.
+
+## Markers
+
+Markers may be the general mechanism for carrying observations through the
+program. An operation can create an obligation, and a marker can be the
+compile-time fact that discharges that obligation.
+
+For example, indexing into a buffer creates an obligation that the index is in
+bounds. Looking up a key in a map creates an obligation that the key is known to
+be present in that map. A cyclic path through `go` transitions creates an
+obligation that some state body in the cycle receives fresh event-marked input.
+
+Those facts could be represented as markers:
+
+```llg
+let index: u32 with InBounds(buffer) = check_index(raw_index, buffer);
+let key: UserId with MemberOf(users) = users.require_key(raw_id);
+let line: String with Event = stdin.read();
+```
+
+Markers are compile-time information attached to values. They are not runtime
+fields and should be erased during lowering once all obligations have been
+checked. This makes them a possible surface syntax for the earlier
+"obligations and observations" idea.
+
+The useful shape is probably relational. A marker may need to mention another
+value, such as `InBounds(buffer)` or `MemberOf(users)`, rather than being only a
+simple property of one value. That means the marker is tied to the specific
+value that was observed.
+
+Lowering to SSA gives a natural invalidation rule. A marker refers to a specific
+SSA value. If that value is changed, the changed value is a new SSA value, and
+old observations do not automatically apply to it.
+
+For example:
+
+```llg
+let key: UserId with MemberOf(users) = users.require_key(id);
+users.remove(id);
+users[key];
+```
+
+Conceptually lowers to:
+
+```llg
+let key: UserId with MemberOf(users0) = users0.require_key(id);
+let users1 = users0.remove(id);
+users1[key]; // rejected: key proves MemberOf(users0), not MemberOf(users1)
+```
+
+This depends on mutation being explicit. Methods that can mutate `self` should
+take an explicit `&mut self`, and any call through `&mut self` creates a new SSA
+value for `self`. Methods that take `&self` may observe `self`, but they must
+not invalidate observations about `self`.
+
+For now, we should skip marker preservation declarations. The conservative rule
+is that an `&mut self` call creates a new value, and old observations do not
+carry forward unless they can be re-established. This may be stricter than
+necessary, but it keeps the first model simple.
+
+There is one useful refinement that does not require per-method preservation
+declarations: immutable markers. Some observations are tied to properties that
+cannot be changed through the public API of a value. Those markers can be copied
+from the old SSA value to the new SSA value after mutation.
+
+A fixed-size array is the motivating example. Mutating an element changes the
+array's contents, but it does not change the array's length. An index proven to
+be in bounds for the array should remain in bounds after an element update:
+
+```llg
+let index: u32 with InBounds(array) = check_index(raw_index, array);
+array[index] = 10;
+let value = array[index];
+```
+
+Conceptually, the mutation still creates a new SSA value:
+
+```llg
+let index: u32 with InBounds(array0) = check_index(raw_index, array0);
+let array1 = array0.set(index, 10);
+let value = array1[index];
+```
+
+This is allowed only if `InBounds(array)` is known to depend on an immutable
+property of this kind of array, such as its length. The marker can then be
+copied from `array0` to `array1`. The same marker would not necessarily be
+immutable for a collection whose length can change through mutation.
+
+Interior mutation is the important caveat. A Rust-like `Mutex` can take a shared
+reference and later produce mutable access through a guard. Langlog does not
+need that immediately, but if it ever adds something similar, that type must
+uphold marker contracts itself. This is analogous to Rust's trusted interior
+mutability story: the safe surface can exist only because the implementation
+does the runtime checks or maintains the invariants that the compiler cannot see.
+
+Marker creation should also carry a contract. User code should be able to define
+and use markers, but introducing a marker should require an explicit trusted
+operation such as:
+
+```llg
+unsafe {
+    Event::mark(value)
+}
+```
+
+The same pattern should apply to all markers for now. Safe code can consume and
+require markers, but creating a marker requires an unsafe block because it
+asserts that the marker's contract is true. Local propagation can be inferred,
+but propagation across a function boundary must be part of the signature. We can
+loosen this later if ordinary checked operations need a safe marker-construction
+path.
+
+Marker inference should handle most of the local burden. Inside a function body,
+the compiler can infer marker flow through local bindings, checked operations,
+SSA updates, and explicit marker-producing calls. Programmers should not need to
+restate every marker fact at every local variable.
+
+Function boundaries should be stricter. Extra markers on arguments can be
+elided, because ignoring a fact is safe:
+
+```llg
+fn len(input: String) -> u32;
+
+let line: String with Event = stdin.read();
+let length = len(line);
+```
+
+The call to `len` is allowed because `String with Event` can be used where only
+`String` is required. The reverse is not true:
+
+```llg
+let local: String = "hello";
+let received: String with Event = local; // rejected
+```
+
+Return values carry only the markers named by the function signature. Markers
+are not implicitly preserved through a call, because the compiler should not
+assume that an arbitrary function preserves the contract of a marker it did not
+mention.
+
+```llg
+fn trim(input: String) -> String;
+
+let line: String with Event = stdin.read();
+let trimmed = trim(line); // String, not String with Event
+```
+
+Generics should follow the same rule. A generic type parameter does not capture
+unmentioned markers from an argument. It represents the type information and
+marker requirements stated in the signature and `where` clause:
+
+```llg
+fn trim<T>(input: T) -> T
+where
+    T: String;
+```
+
+Calling this with a `String with Event` still returns `String`, not `String with
+Event`, because the `Event` marker was not part of the function contract. If a
+function preserves or creates a marker, that marker must appear explicitly in
+the return type:
+
+```llg
+fn trim_event(input: String with Event) -> String with Event;
+```
+
+Local marker propagation needs a more precise rule than "some expressions
+preserve markers." Assignment is identity-preserving, so it should preserve
+markers:
+
+```llg
+let line: String with Event = stdin.read();
+let same = line; // String with Event
+```
+
+Other operations are value-transforming. A marker should be preserved through an
+operation only when the operation's companion marker rule says how to transfer
+the marker. If no transfer rule exists, the marker is dropped.
+
+Marker rules should be written in terms of `place`s rather than ordinary runtime
+types. A `place` is a compiler-visible SSA identity that can carry marker facts.
+Source locals, state arguments, task fields, projections, and compiler-created
+temporaries can lower to places. A place is not an arbitrary runtime expression;
+if an expression should carry markers, it must first be named or lowered to an
+SSA temporary. Mutating a value creates a new place for the new SSA version,
+while stable facets such as `array.length` may remain related across versions
+through immutable markers. The ordinary type system should already have checked
+that the operator is valid for the runtime types involved.
+
+Each syntax operator can have a companion marker rule that describes the marker
+facts produced by that operator. For example, `<` can be represented by a
+`LessThan` companion rule, and checked subtraction can be represented by a `Sub`
+companion rule.
+
+For boolean operators, the result is also a place. An `if` can be understood as
+first evaluating its condition into a boolean result place, then marking that
+result as `True()` in the then branch and `False()` in the else branch:
+
+```llg
+let result = a < b;
+
+if result {
+    // result with True()
+} else {
+    // result with False()
+}
+```
+
+The operator's marker rule translates those truth markers into relational
+observations:
+
+```llg
+mark LessThan(a: place, b: place, result: place) {
+    if result with True() {
+        implies LessThan(a, b) for a;
+        implies GreaterThan(b, a) for b;
+    }
+
+    if result with False() {
+        implies GreaterOrEqual(a, b) for a;
+        implies LessOrEqual(b, a) for b;
+    }
+}
+```
+
+The same rule applies to `observe`: after `observe a < b`, the result of the
+comparison is known to have `True()`, so the `LessThan` marker rule can introduce
+the relational markers for following statements.
+
+For the first version, marker rules for boolean expressions should probably only
+apply to simple expressions where both sides are named places. More complicated
+expressions can be handled later after lowering has made their intermediate SSA
+places explicit.
+
+Value-producing operators can use the same rule shape, but their implications
+apply to the successful result of the operation. Since arithmetic is checked by
+default, successful subtraction can preserve a `LessThan` fact by producing a
+result less than or equal to the left operand:
+
+```llg
+mark Sub(a: place, amount: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+```
+
+The `with` syntax in a marker-rule condition is a marker refinement pattern.
+`a with Marker(...)` attempts to view `a` as the same place refined by the
+stated marker. It succeeds only if the current marker environment already
+contains a matching marker attached to `a`; it does not create the marker.
+
+The `?bound` syntax is a marker-pattern binding. In
+`a with LessThan(a, ?bound)`, the compiler searches the current marker
+environment for a marker attached to `a` whose shape is `LessThan(a, X)`. If
+one exists, it binds `bound` to the matched place `X` inside the block. The `?`
+is used at the binding site; later uses refer to `bound`.
+
+Relational markers should stay close to the obligations they discharge. The
+first version should require a direct marker match, possibly after applying
+declared transfer rules. For example, indexing into an array could create an
+obligation like:
+
+```llg
+index with LessThan(index, array.length)
+```
+
+A guard can introduce exactly that marker:
+
+```llg
+if index < array.length {
+    let value = array[index];
+}
+```
+
+The compiler should not initially try to solve indirect constraints such as
+`index < limit` and `limit <= array.length` implying `index < array.length`.
+That may be worth adding later for simple linear-time cases, but the first
+model should avoid becoming a full constraint solver. If an obligation cannot
+be matched directly, the compiler should ask the developer to add a guard or
+checked operation that produces the marker needed.
