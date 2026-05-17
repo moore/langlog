@@ -446,3 +446,145 @@ productive but it excludes many forms of accdental non prodetive iteration.
 We should not allow `let` statments that don't inilize values. This implies we should
 have if/else and match {} as expressions. We may also want to implment `reduce` as a 
 first call oppration over iterables.
+
+## Tasks take two
+
+Where we left off, the system could stacklessly transition between tasks,
+which is a form of state machine, but we don't make the set of states explicit.
+In addition, we don't really have a story for shared resources that cross
+task/state boundaries. This is a sketch of how we might correct those ideas:
+
+```
+task main() -> u32 {
+    let buffer: [u32; 4] = [10, 20, 30, 40];
+    let total: u32 = 0;
+
+    state start() {
+        let mut counter: u32 = 9000;
+        forever {
+            counter = counter - 1;
+            if counter < 9000 {
+                go next(counter);
+            }
+        }
+    }
+
+    state next(count: u32) {
+        exit count;
+    }
+
+}
+```
+
+In this design, the task's top level defines data shared between states,
+along with the states of the task. Each state can loop with the `forever`
+loop or `go` to a new state. The `go` keyword is a tail trassition to the
+new state allowing the task to be stackless. 
+The task signature has a function-like shape
+that allows initialization values to be passed in like function parameters
+and defines the type that `exit` takes.
+
+## Tasks take three
+
+With explicit states, `forever` may no longer need to be a primitive language
+feature. An infinite task loop can be represented directly as a cycle in the
+`go` transition graph. This gives the compiler one shape to reason about:
+states contain bounded work, and `go` performs a tail transition to another
+state.
+
+The productivity rule can then be stated over the state graph:
+
+> Every cyclic path through `go` transitions must introduce an `Event` marker
+> during execution of some state body in the cycle.
+
+The "some state body" part matters. An event-marked value passed in as a task
+argument or state argument does not satisfy the obligation, because that event
+did not happen while executing the state body. The cycle must receive or create
+fresh event-marked information while running.
+
+For example, this is productive:
+
+```llg
+task echo() -> u32 {
+    state read() {
+        let line: String with Event = stdin.read();
+        go write(line);
+    }
+
+    state write(line: String with Event) {
+        stdout.write(line);
+        go read();
+    }
+}
+```
+
+The cycle from `read` to `write` and back to `read` is allowed because the
+`read` state receives a fresh `Event` value before it transitions.
+
+This is not productive:
+
+```llg
+task spin(seed: String with Event) -> u32 {
+    state spin(seed: String with Event) {
+        go spin(seed);
+    }
+}
+```
+
+Even though `seed` is marked with `Event`, no new event is introduced during
+the body of `spin`. The state can transition back to itself forever without
+receiving new information.
+
+This suggests adding marker values to the type system. Markers are compile-time
+facts attached to values, but they are not runtime fields and are erased during
+lowering. They are also not Rust-style traits, so `with` reads better than `+`:
+
+```llg
+fn read() -> String with Event;
+fn read_foo() -> String with (Event, Foo);
+```
+
+More complex marker requirements can move into a `where` clause by naming the
+qualified types with generics. This avoids needing a special name for the return
+value and scales better to multiple return values or partially marked return
+shapes:
+
+```llg
+fn parse<Input, Output>(input: Input) -> Output
+where
+    Input: String with Event,
+    Output: Message with Event;
+```
+
+The `:` syntax is still reasonable here because base types such as `String` can
+be treated as bounds over representable values. In that model, `Input: String
+with Event` means that `Input` has the shape of a string and carries the
+`Event` marker.
+
+Using the same generic name also gives a compact way to preserve markers:
+
+```llg
+fn trim<T>(input: T) -> T
+where
+    T: String;
+```
+
+If `T` is `String with Event`, the result is also `String with Event` because
+the marker is part of the named generic type.
+
+User code should be able to define and use markers, but creating a marker needs
+to carry a contract. An operation such as `Event::mark(value)` could be the
+escape hatch, similar in spirit to `unsafe` in Rust:
+
+```llg
+fn read_line(stdin: Stdin) -> String with Event {
+    unsafe {
+        Event::mark(stdin.read_raw())
+    }
+}
+```
+
+The contract of `Event::mark` is that the marked value represents fresh external
+input or a fresh externally scheduled occurrence. Safe code can carry, require,
+and preserve markers, but introducing one is an explicit assertion that the
+programmer must uphold.
