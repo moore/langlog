@@ -30,7 +30,7 @@ cargo run -p langlog-driver --bin langlog -- check --warnings-as-errors examples
 ## 2. Use The Playground
 
 The browser playground lets you edit one Langlog source file, check it, build
-it to Wasm, and run the exported `main` function.
+it to Wasm, and run the exported task root.
 
 - Use **Check** to see syntax, semantic, and proof diagnostics.
 - Use **Build** to generate Wasm and inspect the WAT output.
@@ -38,22 +38,22 @@ it to Wasm, and run the exported `main` function.
 - The terminal stdin field is whitespace-separated `u32` input for
   `read_u32()`.
 
-The smallest runnable program is:
+The smallest runnable program is a task:
 
 ```langlog
-fn main() -> u32 {
-    42
+task main() -> u32 {
+    exit 42;
 }
 ```
 
 Playground terminal I/O uses host builtins:
 
 ```langlog
-fn main() -> u32 {
+task main() -> u32 {
     let value: u32 = read_u32();
     print_u32(value);
     print_newline();
-    value
+    exit value;
 }
 ```
 
@@ -65,17 +65,19 @@ From the command line, build the current Wasm V1 subset with:
 cargo run -p langlog-driver --bin langlog -- build --target wasm path/to/main.llg
 ```
 
-Wasm V1 currently supports `fn main() -> u32`, flattened non-collection values
-such as tuples, arrays, `Option<T>`, `Result<T, E>`, and `range<u32>`, plus
-locals, assignment, checked arithmetic, comparisons, structural equality,
-indexing, `if`, `match`, `for` over arrays and ranges, direct calls, recovery
-expressions, `observe`, `return`, and the playground host builtins. It still
-rejects Set/Map runtime values, first-class function values, indirect calls,
-non-local assignment targets, and non-`u32` `main`.
+Wasm V1 currently supports `task main() -> u32` and `fn main() -> u32`,
+flattened non-collection values such as tuples, arrays, `Option<T>`,
+`Result<T, E>`, and `range<u32>`, plus locals, assignment, checked arithmetic,
+comparisons, structural equality, indexing, `if`, `match`, `for` over arrays
+and ranges, direct calls, recovery expressions, `observe`, task `exit`,
+`delegate`, finite `forever` examples, `return` inside ordinary functions, and
+the playground host builtins. It still rejects Set/Map runtime values,
+first-class function values, indirect calls, non-local assignment targets, and
+unsupported root shapes.
 
-## 4. Write Your First Function
+## 4. Write Helper Functions
 
-Every current Langlog file is a list of functions:
+Langlog files can contain tasks and ordinary helper functions:
 
 ```langlog
 fn add_one(value: u32) -> u32 {
@@ -321,14 +323,14 @@ fn choose(flag: bool) -> u32 {
     value
 }
 
-fn main() -> u32 {
+task main() -> u32 {
     let values: [u32; 4] = [1, 2, 3, 4];
     let left: u32 = sum(values);
     let right: u32 = bounded(10, 20);
     let selected: u32 = choose(true);
     let subtotal: u32 = left + right or(err) 0;
 
-    subtotal + selected or(err) 0
+    exit subtotal + selected or(err) 0;
 }
 ```
 

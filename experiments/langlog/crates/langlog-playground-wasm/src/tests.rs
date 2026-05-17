@@ -84,7 +84,7 @@ fn requirement_llg_wasm_06_playground_examples_build_and_run_ready() {
         serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
     let examples = examples.as_array().expect("examples should be an array");
 
-    assert_eq!(examples.len(), 15);
+    assert_eq!(examples.len(), 19);
 
     for example in examples {
         let name = example
@@ -109,4 +109,75 @@ fn requirement_llg_wasm_06_playground_examples_build_and_run_ready() {
             "{name} should export main"
         );
     }
+}
+
+//= WASM.md#llg-wasm-06-playground-adapter
+//= type=test
+//# The playground example programs MUST use task-mode roots with `task main() -> u32`.
+#[test]
+fn requirement_llg_wasm_06_playground_examples_use_task_roots() {
+    let examples: serde_json::Value =
+        serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
+    let examples = examples.as_array().expect("examples should be an array");
+    let first = examples
+        .first()
+        .and_then(|example| example.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .expect("first example should have a source");
+
+    assert!(first.contains("exit 42"));
+    for example in examples {
+        let source = example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .expect("example should have a string source");
+
+        assert!(source.contains("task main() -> u32"));
+        assert!(!source.contains("fn main"));
+    }
+}
+
+//= WASM.md#llg-wasm-06-playground-adapter
+//= type=test
+//# The playground example programs MUST include a runnable finite `forever` task example.
+#[test]
+fn requirement_llg_wasm_06_playground_examples_include_finite_forever_task() {
+    let examples: serde_json::Value =
+        serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
+    let examples = examples.as_array().expect("examples should be an array");
+    let forever = examples
+        .iter()
+        .find(|example| {
+            example
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|source| source.contains("forever"))
+        })
+        .expect("examples should include a forever task");
+    let source = forever
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .expect("forever example should have a source");
+    let result = build_result(source, true);
+
+    assert!(source.contains("exit"));
+    assert!(result.success, "forever example should build");
+    assert!(result.can_run, "forever example should be runnable");
+}
+
+//= WASM.md#llg-wasm-06-playground-adapter
+//= type=test
+//# The playground example programs MUST include a task delegation example.
+#[test]
+fn requirement_llg_wasm_06_playground_examples_include_task_delegation() {
+    let examples: serde_json::Value =
+        serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
+    let examples = examples.as_array().expect("examples should be an array");
+
+    assert!(examples.iter().any(|example| {
+        example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| source.contains("delegate"))
+    }));
 }

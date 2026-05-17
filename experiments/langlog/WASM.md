@@ -118,3 +118,8 @@ This document complements, but does not replace, the main language spec:
   inspectable string summaries.
 - The playground example programs MUST build successfully and be marked
   runnable by the playground adapter.
+- The playground example programs MUST use task-mode roots with
+  `task main() -> u32`.
+- The playground example programs MUST include a runnable finite `forever` task
+  example.
+- The playground example programs MUST include a task delegation example.

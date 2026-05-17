@@ -28,8 +28,8 @@ See also:
   ```
 
 - The current parser accepts one or more top-level function and task items.
-- The Wasm V1 backend can execute either a `fn main() -> u32` program or a
-  task-mode program rooted at `task main() -> u32`.
+- The Wasm V1 backend can execute either a task-mode program rooted at
+  `task main() -> u32` or an ordinary `fn main() -> u32` program.
 - Multi-file compilation, imports, modules, and packages do not exist yet.
 
 ## Lexical Structure
@@ -78,7 +78,7 @@ Notes:
 - Recursion is a language-level non-goal, but recursion rejection is part of
   later semantic checking rather than parsing.
 
-The planned task-orchestration surface also adds top-level tasks:
+The task-orchestration surface adds top-level tasks:
 
 ```langlog
 task name(param1: Type, param2: Type) -> Type {
@@ -552,9 +552,9 @@ The backend runs only after syntax, semantic, and proof checks succeed.
 
 Wasm V1 supports:
 
-- `fn main() -> u32`
 - `task main() -> u32`, with reachable tasks lowered into one dispatcher using
   a tag local and flattened task-state slots
+- `fn main() -> u32`
 - flattened non-collection values using `i32` slots:
   - `()`
   - `u32`, `bool`, and `ArithmeticError`
