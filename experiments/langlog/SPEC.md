@@ -83,6 +83,10 @@ properties that should be enforced structurally rather than by convention:
 - The keyword set MUST reserve `fn`, `task`, `let`, `mut`, `if`, `else`,
   `match`, `for`, `in`, `forever`, `return`, `exit`, `delegate`, `observe`,
   `or`, `true`, and `false`.
+- The marker-aware language phase MUST recognize `with`, `mark`, `place`,
+  `implies`, and `unsafe` in marker syntax positions.
+- Marker syntax words MAY remain contextual outside marker syntax positions
+  when doing so is unambiguous.
 
 ## LLG-LEX-04 Lexical Error Diagnostics
 
@@ -191,6 +195,160 @@ properties that should be enforced structurally rather than by convention:
 - `Map<K, V, N>` MUST require exactly one key type, one value type, and one
   explicit capacity.
 
+## LLG-MARK-01 Marker Model
+
+The marker-aware language phase replaces ad hoc observations and proof facts
+with marker facts attached to places.
+
+- A `place` MUST be a compiler-visible SSA identity that can carry marker
+  facts.
+- Source locals, state arguments, task fields, projections, and
+  compiler-created temporaries MAY lower to places.
+- A place MUST NOT be an arbitrary runtime expression. If an expression needs
+  to carry marker facts, it MUST first be named or lowered to an SSA temporary.
+- A marker fact MUST be compile-time information attached to a place.
+- Marker facts MUST NOT add runtime fields and MUST be erased before executable
+  lowering after all marker obligations have been checked.
+- A marker-qualified type or place requirement MUST use `with`, such as
+  `String with Event`.
+- Multiple markers MUST use a parenthesized marker list, such as
+  `String with (Event, Foo)`.
+- A value with extra marker facts MAY be used where those markers are not
+  required.
+- A value without a required marker fact MUST NOT be used where that marker is
+  required.
+
+## LLG-MARK-02 Function Boundaries
+
+- Function arguments MAY elide unmentioned markers, because ignoring marker
+  facts is safe.
+- Function return values MUST carry only the marker facts named by the function
+  signature.
+- A generic type parameter MUST NOT capture unmentioned marker facts from an
+  argument.
+- If a function preserves or creates a marker fact across the call boundary,
+  the marker MUST appear explicitly in the return type.
+
+For example:
+
+```llg
+fn len(input: String) -> u32;
+
+let line: String with Event = stdin.read();
+let length = len(line);
+```
+
+The call to `len` is accepted because `Event` is elided at the argument
+boundary. By contrast:
+
+```llg
+fn trim(input: String) -> String;
+
+let line: String with Event = stdin.read();
+let trimmed = trim(line); // String, not String with Event
+```
+
+The result does not keep `Event` unless `trim` explicitly declares that marker
+in its return type.
+
+## LLG-MARK-03 Marker Construction
+
+- Safe code MAY consume and require marker facts.
+- Code that creates a marker fact MUST do so inside an `unsafe` block.
+- Unsafe marker construction MUST assert that the marker contract is true for
+  the marked place.
+- Compiler-derived marker facts MAY still be created by built-in control-flow
+  and companion marker rules specified by this document.
+
+For example:
+
+```llg
+unsafe {
+    Event::mark(value)
+}
+```
+
+## LLG-MARK-04 Builtin Marker Families
+
+- `True()` MUST mark a boolean result place that is known to be true.
+- `False()` MUST mark a boolean result place that is known to be false.
+- `Equal(left, right)` MUST mark that `left` is equal to `right`.
+- `LessThan(left, right)` MUST mark that `left` is less than `right`.
+- `GreaterThan(left, right)` MUST mark that `left` is greater than `right`.
+- `LessOrEqual(left, right)` MUST mark that `left` is less than or equal to
+  `right`.
+- `GreaterOrEqual(left, right)` MUST mark that `left` is greater than or equal
+  to `right`.
+- `MemberOf(key, map)` MUST mark that `key` is known to be present in `map`.
+- `Event` MUST mark a value that represents fresh external input or a fresh
+  externally scheduled occurrence.
+
+Full user-defined marker-family declaration syntax is deferred. The first
+marker-aware phase defines builtin marker families and builtin companion marker
+rules.
+
+## LLG-MARK-05 Marker Transfer
+
+- Assignment MUST preserve marker facts because it preserves place identity.
+- Mutating a value MUST create a new place for the new SSA version.
+- Ordinary marker facts attached to the old place MUST NOT automatically apply
+  to the new place.
+- Immutable marker facts MAY be copied from the old place to the new place when
+  they depend only on a stable public facet that the mutation cannot change.
+- A fixed-array length is a stable public facet. An index proven less than a
+  fixed-array length MAY remain proven after an element update.
+- A collection length that can change through mutation MUST NOT be treated as a
+  stable facet for this purpose.
+
+## LLG-MARK-06 Companion Marker Rules
+
+Each syntax operator MAY have a companion marker rule that describes marker
+facts produced by that operator. Companion marker rules MUST use `mark`, `place`,
+`implies`, and marker-pattern bindings such as `?bound`.
+
+Marker-rule conditions of the form `a with Marker(...)` MUST be marker
+refinement patterns. The condition succeeds only if the current marker
+environment already contains a matching marker attached to `a`; it MUST NOT
+create the marker.
+
+Marker-pattern bindings MUST use `?name` at the binding site. In
+`a with LessThan(a, ?bound)`, the compiler searches for an existing marker
+attached to `a` with shape `LessThan(a, X)` and binds `bound` to the matched
+place `X` inside the block.
+
+For boolean operators, the result is also a place. Control flow MUST mark the
+condition result with `True()` in the then branch and `False()` in the else
+branch. The operator's companion marker rule translates those truth markers
+into relational marker facts:
+
+```llg
+mark LessThan(a: place, b: place, result: place) {
+    if result with True() {
+        implies LessThan(a, b) for a;
+        implies GreaterThan(b, a) for b;
+    }
+
+    if result with False() {
+        implies GreaterOrEqual(a, b) for a;
+        implies LessOrEqual(b, a) for b;
+    }
+}
+```
+
+For value-producing operators, implications apply to the successful result of
+the operation:
+
+```llg
+mark Sub(a: place, amount: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+```
+
+If no companion marker rule applies, the operation MUST NOT preserve the input
+marker facts onto the result.
+
 ## LLG-DIAG-01 Source Span Preservation
 
 - The front end MUST preserve byte spans for tokens and syntax nodes.
@@ -227,6 +385,81 @@ properties that should be enforced structurally rather than by convention:
   arm.
 - A missing semicolon before `}` MUST not cascade into additional syntax errors
   for the same statement.
+
+## LLG-DIAG-04 Marker Obligation Diagnostics
+
+- A failed marker obligation diagnostic MUST identify the operation that
+  created the obligation.
+- A failed marker obligation diagnostic MUST display the required marker
+  pattern.
+- A failed place-specific marker obligation diagnostic MUST identify the target
+  place that needed the marker.
+- When useful for a place-specific obligation, a failed marker obligation
+  diagnostic SHOULD display marker facts currently known for the target place.
+- When useful, a failed marker obligation diagnostic SHOULD display near-miss
+  marker facts that have the right marker family but refer to different places.
+- When a direct guard or checked operation can produce the missing marker, the
+  diagnostic SHOULD suggest that source pattern.
+- Diagnostics MUST NOT imply that Langlog performs arbitrary constraint solving.
+
+Example for a missing array-bound marker:
+
+```text
+cannot index `array` with `index`
+
+required marker:
+    index with LessThan(index, array.length)
+
+known markers on `index`:
+    none
+
+help: add a guard that proves the bound:
+    if index < array.length { ... }
+```
+
+Example for a near miss:
+
+```text
+cannot index `array` with `index`
+
+required marker:
+    index with LessThan(index, array.length)
+
+found:
+    index with LessThan(index, limit)
+
+Langlog does not infer that `limit <= array.length`.
+Add a direct guard or checked operation that produces the required marker.
+```
+
+Example for a stale SSA marker:
+
+```text
+marker applies to an older version of `users`
+
+required:
+    key with MemberOf(key, users1)
+
+found:
+    key with MemberOf(key, users0)
+
+`users.remove(id)` created a new version of `users`.
+Re-check membership after the mutation.
+```
+
+Example for a missing event in a future explicit state cycle:
+
+```text
+cycle in task `server` can repeat without receiving an Event
+
+cycle:
+    poll -> poll
+
+required:
+    some state body in the cycle must introduce a value with Event
+
+help: add a receive, timer, or unsafe Event::mark-backed operation in the cycle
+```
 
 ## LLG-SEMA-01 Name Resolution And Scopes
 
@@ -336,45 +569,60 @@ The task memory model specifies required behavior, not an exact ABI layout.
 Large external resources such as buffers should be represented in task state by
 handles or leases rather than forced inline by this memory model.
 
-## LLG-PROOF-01 Proof-Required Operations
+## LLG-PROOF-01 Marker-Required Operations
 
-- The proof phase MUST reject indexing that may go out of bounds unless safety
-  is proven.
-- Proof checking MUST traverse task bodies, including `forever` bodies, `exit`
+- The marker-aware proof phase MUST reject an operation whose marker obligation
+  is not discharged.
+- Marker checking MUST traverse task bodies, including `forever` bodies, `exit`
   values, and `delegate` arguments.
-- Indexing MUST require the proven index upper bound to be strictly less than
-  the indexed array length.
+- Array indexing MUST require a marker obligation equivalent to
+  `index with LessThan(index, array.length)`.
+- Map indexing or map-presence-sensitive lookup MUST require a marker
+  obligation equivalent to `key with MemberOf(key, map)`.
+- A place-specific marker obligation MUST name the required marker pattern, the
+  target place, and the source operation span.
 
-## LLG-PROOF-02 Observations
+## LLG-PROOF-02 Marker Introduction And Discharge
 
-- In the current phase, the proof phase MUST derive facts from comparison-based
-  control-flow tests.
-- The proof phase MUST incorporate explicit `observe` statements into the fact
-  model on the continuing path after a guarded `observe` succeeds.
-- In phase 1, an `observe` fact MUST relate a left-hand proof expression to a
-  right-hand proof expression.
-- Control-flow equality and inequality comparisons MUST be available as proof
-  facts inside the guarded branch.
-- Control-flow comparisons over mutable bindings MUST be tracked for diagnostics
-  but MUST NOT discharge proof obligations.
-- Warnings about mutable control-flow facts MUST appear only when such a fact
-  would otherwise discharge a real obligation.
-- A mutable control-flow warning MUST be reported when mutable facts would
-  discharge a proof obligation.
-- Redundant mutable control-flow hints MUST NOT produce extra warnings for an
-  obligation that is already explained by another mutable hint.
-- Mutable control-flow facts MUST NOT survive reassignment as if they were
-  stable proofs.
-- Proof checking MUST inspect obligations inside `else` branches.
-- Proof facts MUST be available for bindings introduced inside `else` branches,
-  loop patterns, match patterns, and expression blocks.
-- Binding-based proof facts MUST attach to binding identity rather than
-  identifier text so shadowing does not inherit outer facts.
+- Marker obligations MUST be discharged only by a direct marker match, possibly
+  after applying declared companion marker transfer rules.
+- The marker checker MUST NOT perform arbitrary algebra, transitive relation
+  solving, backtracking proof search, or global constraint solving.
+- If no direct marker match exists, the compiler MUST reject the operation and
+  explain which marker is missing.
+- Control-flow conditions MUST introduce `True()` for the condition result in
+  the then branch and `False()` for the condition result in the else branch.
+- Successful `observe` statements MUST introduce `True()` for the observed
+  condition result on the continuing path.
+- Companion marker rules MAY translate `True()` and `False()` facts into
+  relation markers such as `LessThan(index, array.length)`.
+- Marker facts MUST remain scoped to the control-flow region in which they are
+  known.
+- Marker facts MUST attach to places rather than identifier text, so shadowing
+  does not inherit outer marker facts.
+- Marker checking MUST inspect obligations inside `else` branches.
+- Marker facts MUST be available for bindings introduced inside `else`
+  branches, loop patterns, match patterns, and expression blocks.
+
+## LLG-PROOF-03 Event Productivity
+
+- `Event` MUST be the marker used to represent fresh external input or a fresh
+  externally scheduled occurrence.
+- In a future explicit-state task model, every cyclic path through `go`
+  transitions MUST introduce an `Event` marker during execution of some state
+  body in the cycle.
+- An `Event` marker carried into a task argument or state argument MUST NOT by
+  itself satisfy the cycle obligation, because the event did not happen inside
+  the cycle.
+- This rule does not rewrite the current `forever`/`delegate` task syntax.
 
 ## LLG-REL-01 Collections And Relations
 
-- The first enforced relation MUST allow a key introduced by iterating a
-  `Set<K, N>` to imply presence in a `Map<K, V, M>`.
+- The first enforced collection relation MUST be expressed as a marker transfer
+  rule.
+- A key introduced by iterating a `Set<K, N>` MAY imply a `MemberOf(key, map)`
+  marker for a related `Map<K, V, M>` only when the relation has been declared
+  by the language or a trusted builtin rule.
 
 ## Non-Goals
 
@@ -390,10 +638,12 @@ Phase 1 does not attempt to provide:
 
 ## Open Design Boundaries
 
-These items are intentionally left open while the front end and proof model
-evolve:
+These items are intentionally left open while the front end and marker-aware
+proof model evolve:
 
 - the exact syntax for declared collection relations;
+- full user-defined marker-family declarations beyond the first builtin marker
+  families and companion rules;
 - whether `Result` error types are closed or user-defined in early phases;
 - whether collection insertion is proof-required or explicitly fallible in the
   first executable runtime;

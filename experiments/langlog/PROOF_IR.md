@@ -1,7 +1,8 @@
 # Langlog Proof IR Specification
 
 Status: draft 0. This document defines the proof-specific intermediate
-representation that sits between typed HIR and later proof discharge logic.
+representation that sits between typed HIR and later marker-obligation
+discharge logic.
 
 Normative terms in this document follow RFC 2119, but they apply to the
 compiler-facing proof IR rather than to the user-facing surface language.
@@ -13,47 +14,57 @@ This document complements, but does not replace, the main language spec:
 - [HIR.md](./HIR.md) defines the semantic IR and the AST-to-HIR elaboration
   boundary.
 - [PLAN.md](./PLAN.md) tracks implementation sequencing and milestone status.
-- A future `SEMANTICS.md` should formalize proof judgments over Proof IR and
-  dynamic semantics over MIR.
+- A future `SEMANTICS.md` should formalize marker-obligation judgments over
+  Proof IR and dynamic semantics over MIR.
 
 ## LLG-PIR-01 Pipeline And Lowering
 
-- Successfully checked HIR MUST lower into Proof IR before proof obligation
+- Successfully checked HIR MUST lower into Proof IR before marker-obligation
   discharge runs.
 - Every Proof IR node MUST preserve a source span sufficient for diagnostics
   and traceability.
 
-## LLG-PIR-02 Fact Subjects And Stability
+## LLG-PIR-02 Places And Marker Facts
 
-- Every proof fact subject in Proof IR MUST reference binding identity rather
-  than identifier text.
-- Proof IR MUST distinguish stable facts from mutable diagnostic-only hints so
-  mutable comparisons cannot discharge obligations.
+- Every marker fact target in Proof IR MUST reference a `PlaceId` rather than
+  identifier text.
+- A `PlaceId` MUST identify a compiler-visible SSA place that can carry marker
+  facts.
+- Proof IR MUST distinguish ordinary marker facts, immutable marker facts, and
+  diagnostic-only hints.
+- Diagnostic-only hints MUST NOT discharge marker obligations.
 
-## LLG-PIR-03 Obligations And Fact Sources
+## LLG-PIR-03 Marker Obligations And Fact Sources
 
-- Proof-required operations, including indexing and map-presence checks, MUST
-  lower to explicit proof obligations that preserve the originating operation
+- Marker-required operations, including indexing and map-presence checks, MUST
+  lower to explicit marker obligations that preserve the originating operation
   span.
-- Successful `observe` statements and comparison-based control-flow tests MUST
-  lower to explicit fact-producing nodes that preserve the originating relation
-  spans.
+- Every place-specific marker obligation MUST carry the required marker
+  pattern, the target `PlaceId`, and the source operation span.
+- Non-place marker obligations, such as future event-cycle productivity
+  obligations, MUST carry an explicit obligation target that identifies the
+  task or control-flow structure being checked.
+- Marker fact sources MUST include control-flow truth markers, successful
+  `observe` statements, unsafe marker construction, companion-rule
+  implications, assignment identity, and immutable marker carry-forward.
+- Comparison-based control-flow tests MUST lower to truth-marker facts on the
+  condition result place.
 
 ## LLG-PIR-04 Normalization Boundary
 
-- Proof IR MUST retain only proof-relevant control flow, obligations, fact
-  sources, and proof expressions; non-proof statements MAY be omitted unless
-  needed to preserve proof scope.
+- Proof IR MUST retain only marker-relevant control flow, marker obligations,
+  marker fact sources, and marker expressions; non-marker statements MAY be
+  omitted unless needed to preserve marker scope.
 - Grouped expressions and other parser- or HIR-only wrapper nodes MUST NOT
   survive as distinct Proof IR nodes.
 
 ## LLG-PIR-05 Successful Proof IR Well-Formedness
 
 - Successfully lowered Proof IR MUST NOT contain unresolved names,
-  identifier-text fact subjects, or `Unknown` or otherwise untyped proof
-  expressions.
-- Every proof obligation and fact in successfully lowered Proof IR MUST be
-  attributable to a source span in the originating HIR.
+  identifier-text marker targets, unresolved marker patterns, or `Unknown` or
+  otherwise untyped marker expressions.
+- Every marker obligation and marker fact in successfully lowered Proof IR MUST
+  be attributable to a source span in the originating HIR.
 
 ## Non-Normative Notes
 
@@ -63,16 +74,16 @@ internal data-structure choice as a normative requirement.
 
 ## Purpose
 
-Proof IR exists to separate proof-specific normalization from both general HIR
-structure and final proof discharge.
+Proof IR exists to separate marker-specific normalization from both general HIR
+structure and final marker-obligation discharge.
 
 It should let the proof engine work over:
 
-- explicit proof obligations instead of discovering them while walking general
+- explicit marker obligations instead of discovering them while walking general
   HIR;
-- normalized fact-producing comparisons instead of arbitrary expression trees;
-- branch-scoped proof structure rather than full front-end statement syntax;
-- binding-identity-based subjects rather than names or resolution tables.
+- normalized marker-producing operations instead of arbitrary expression trees;
+- branch-scoped marker structure rather than full front-end statement syntax;
+- `PlaceId`-based marker targets rather than names or resolution tables.
 
 ## Pipeline Position
 
@@ -85,37 +96,38 @@ source -> AST -> typed HIR -> proof IR -> MIR -> execution/backend
 In this structure:
 
 - HIR preserves checked source meaning with semantic normalization;
-- Proof IR preserves only proof-relevant structure and obligations;
+- Proof IR preserves only marker-relevant structure and obligations;
 - MIR preserves executable control flow and state updates.
 
 Future formalization should target this pipeline rather than full HIR alone:
 
 - elaboration rules from HIR to Proof IR;
-- proof fact generation and obligation discharge over Proof IR;
+- marker fact generation and obligation discharge over Proof IR;
 - dynamic semantics over MIR.
 
 ## Current Implementation Status
 
 The current implementation still discharges obligations directly from HIR.
-This document defines the intended next internal boundary so proof reasoning,
+This document defines the intended next internal boundary so marker reasoning,
 testing, and eventual formal semantics stop depending on the full HIR shape.
 
 ## Design Goals
 
-- Keep the proof engine focused on proof concepts rather than general language
+- Keep the proof engine focused on marker concepts rather than general language
   traversal.
-- Normalize proof-relevant control flow once during lowering.
+- Normalize marker-relevant control flow once during lowering.
 - Preserve enough source information for user-facing diagnostics.
-- Keep the first Proof IR structured and close to current proof needs rather
+- Keep the first Proof IR structured and close to current marker needs rather
   than introducing a full CFG immediately.
-- Support future relation proofs without reworking the obligation model again.
+- Support future relational markers without reworking the obligation model
+  again.
 
 ## Non-Goals
 
 - Proof IR is not the user-facing language contract.
 - Proof IR is not the executable IR.
-- Proof IR does not need to preserve HIR nodes that have no proof relevance.
-- Proof IR does not need to be the final internal form for all future proof
+- Proof IR does not need to preserve HIR nodes that have no marker relevance.
+- Proof IR does not need to be the final internal form for all future marker
   optimizations.
 
 ## Illustrative Shape
@@ -139,21 +151,26 @@ ProofBlock {
 }
 
 ProofEntry::Branch {
-    condition_facts: Vec<ProofFact>,
-    mutable_hints: Vec<ProofFact>,
+    condition_place: PlaceId,
+    then_facts: Vec<MarkerFact>,
+    else_facts: Vec<MarkerFact>,
+    diagnostic_hints: Vec<MarkerFact>,
     then_block: ProofBlock,
     else_block: Option<ProofBlock>,
     span: Span,
 }
 
 ProofEntry::Observe {
-    fact: ProofRelation,
+    condition_place: PlaceId,
+    fact: MarkerFact,
     else_block: ProofBlock,
     span: Span,
 }
 
 ProofEntry::Obligation {
-    kind: ObligationKind,
+    target: ObligationTarget,
+    required: MarkerPattern,
+    source: ObligationSource,
     span: Span,
 }
 
@@ -162,36 +179,66 @@ ProofEntry::Eval {
     span: Span,
 }
 
-ProofRelation {
-    subject: BindingId,
-    op: ObserveOp,
-    right: ProofExpr,
-    source: FactSource,
-    stable: bool,
+MarkerFact {
+    target: PlaceId,
+    marker: MarkerPattern,
+    source: MarkerFactSource,
     span: Span,
 }
 
-ObligationKind::InBounds { target: ProofExpr, index: ProofExpr, length: u64 }
-ObligationKind::MapPresence { target: ProofExpr, key: ProofExpr }
+MarkerFactSource::ControlFlowTruth
+MarkerFactSource::Observe
+MarkerFactSource::UnsafeConstruction
+MarkerFactSource::CompanionRule
+MarkerFactSource::AssignmentIdentity
+MarkerFactSource::ImmutableCarryForward
+
+MarkerPattern::Equal { left: PlaceId, right: PlaceId }
+MarkerPattern::LessThan { left: PlaceId, right: PlaceId }
+MarkerPattern::MemberOf { key: PlaceId, map: PlaceId }
+MarkerPattern::Event
+MarkerPattern::True
+MarkerPattern::False
+
+ObligationTarget::Place(PlaceId)
+ObligationTarget::StateCycle { task: TaskId, cycle: Vec<StateId> }
+
+ObligationSource::Index { array: PlaceId, index: PlaceId }
+ObligationSource::MapLookup { map: PlaceId, key: PlaceId }
+ObligationSource::EventCycle
 ```
 
-This is intentionally not final. The first objective is to make proof
-obligations, branch-scoped facts, and stability distinctions explicit.
+This is intentionally not final. The first objective is to make marker
+obligations, branch-scoped marker facts, source spans, and stability
+distinctions explicit.
 
 ## Expected First Lowering Rules
 
 The first HIR-to-Proof-IR lowering is expected to follow these rules:
 
-- A HIR `observe` lowers to an explicit fact-producing entry plus the guarded
+- A HIR `observe` lowers to an explicit marker-producing entry plus the guarded
   `else` block that defines the failing path.
-- A proof-relevant `if` lowers to a branch entry that records comparison facts
-  for the guarded success path.
+- A marker-relevant `if` lowers to a branch entry that records `True()` for the
+  condition result place in the then branch and `False()` for the condition
+  result place in the else branch.
+- Companion marker rules lower to marker-producing entries that preserve the
+  source span of the operator application and the source span of the rule that
+  emitted the marker.
+- Assignment lowers as marker identity propagation.
+- Mutation lowers as a new `PlaceId` for the new SSA version of the mutated
+  value.
+- Immutable marker carry-forward lowers as an explicit marker fact source
+  rather than as implicit reuse of the old place.
 - Indexing, map-presence checks, and future raw arithmetic operations lower to
-  explicit obligation entries whenever the language phase requires proof.
-- Non-proof statements may lower only through their proof-relevant expressions
+  explicit marker obligation entries whenever the language phase requires marker
+  checking.
+- Event-productivity checking for future explicit `go` cycles lowers cyclic
+  state paths to marker obligations requiring an `Event` introduction in some
+  state body on each cycle.
+- Non-marker statements may lower only through their marker-relevant expressions
   rather than preserving the full statement shell.
-- Fact subjects lower to binding identities, while fact displays still preserve
-  the original left and right source spans for diagnostics.
+- Marker fact targets lower to `PlaceId`s, while diagnostic displays still
+  preserve the original source spans for the places and operators involved.
 
 ## Relationship To Formal Semantics
 
@@ -199,8 +246,8 @@ If Langlog later adds a formal proof system document, Proof IR is the right
 place to write those judgments. It is smaller than HIR, closer to the solver
 model, and stable enough to express:
 
-- fact-introduction judgments;
-- branch-scoped assumption rules;
-- obligation-generation judgments;
-- discharge rules for indexing, relation obligations, and future raw arithmetic
-  obligations.
+- marker-fact introduction judgments;
+- branch-scoped marker environment rules;
+- marker-obligation generation judgments;
+- direct marker-discharge rules for indexing, map presence, event
+  productivity, and future raw arithmetic obligations.
