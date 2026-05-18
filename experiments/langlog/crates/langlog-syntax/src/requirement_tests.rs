@@ -210,31 +210,61 @@ fn requirement_llg_lex_04_marks_invalid_character_spans() {
 
 //= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A source file MUST contain only function items, task items, and marker companion-rule items at the top level.
+//# A source file MUST contain only function items, task items, marker-family declaration items, and marker companion-rule items at the top level.
 #[test]
 fn requirement_llg_syn_01_accepts_function_and_task_top_level_items() {
     let parsed = parse_ok(
         r#"
+marker Trusted();
 fn main() {}
 fn helper() {}
 task worker() -> u32 { exit 0; }
 "#,
     );
 
-    assert_eq!(parsed.module.items.len(), 3);
-    assert!(matches!(parsed.module.items[0], Item::Function(_)));
+    assert_eq!(parsed.module.items.len(), 4);
+    assert!(matches!(parsed.module.items[0], Item::MarkerFamily(_)));
     assert!(matches!(parsed.module.items[1], Item::Function(_)));
-    assert!(matches!(parsed.module.items[2], Item::Task(_)));
+    assert!(matches!(parsed.module.items[2], Item::Function(_)));
+    assert!(matches!(parsed.module.items[3], Item::Task(_)));
 }
 
 //= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A non-function, non-task, non-marker-rule top-level item MUST be rejected with a syntax diagnostic.
+//# A non-function, non-task, non-marker-family, non-marker-rule top-level item MUST be rejected with a syntax diagnostic.
 #[test]
 fn requirement_llg_syn_01_rejects_non_item_top_level_forms_with_a_syntax_diagnostic() {
     let parsed = parse_err("let value = 1;");
 
     assert_diagnostic_contains(&parsed, "expected a top-level item");
+}
+
+//= SPEC.md#llg-syn-01-top-level-items
+//= type=test
+//# A marker-family declaration item MUST use `marker Name(param: place, ...);` and MUST be proof-only metadata rather than executable code.
+#[test]
+fn requirement_llg_syn_01_parses_marker_family_declaration_items() {
+    let parsed = parse_ok("marker OwnedBy(value: place, owner: place);");
+
+    let [Item::MarkerFamily(family)] = parsed.module.items.as_slice() else {
+        panic!("expected one marker family item");
+    };
+    assert_eq!(family.name.value, "OwnedBy");
+    assert_eq!(family.params.len(), 2);
+    assert_eq!(family.params[0].name.value, "value");
+    assert_eq!(family.params[1].name.value, "owner");
+
+    let missing_semicolon = parse_err("marker Trusted()");
+    assert_diagnostic_contains(
+        &missing_semicolon,
+        "expected `;` after marker family declaration",
+    );
+
+    let non_place = parse_err("marker Trusted(value: u32);");
+    assert_diagnostic_contains(
+        &non_place,
+        "expected `place` as the marker family parameter type",
+    );
 }
 
 //= SPEC.md#llg-syn-01-top-level-items

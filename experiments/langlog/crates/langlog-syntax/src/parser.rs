@@ -1,10 +1,10 @@
 use crate::ast::{
     AssignStmt, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr, ExprKind, ExprStmt,
     ForStmt, ForeverStmt, Function, GenericArg, IfStmt, Item, LetStmt, MarkerAnnotation, MarkerArg,
-    MarkerArgKind, MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock,
-    MarkerRuleIfStmt, MarkerRuleParam, MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module,
-    ObserveOp, ObserveStmt, Param, Pattern, PatternKind, ReturnStmt, Stmt, Task, Type, TypeKind,
-    UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
+    MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt, MarkerRefinement,
+    MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt, MarkerRuleParam, MarkerRuleStmt, MatchArm,
+    MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern, PatternKind, ReturnStmt,
+    Stmt, Task, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -89,13 +89,16 @@ impl<'a> Parser<'a> {
         match self.current_tag() {
             TokenTag::Fn => self.parse_function().map(Item::Function),
             TokenTag::Task => self.parse_task().map(Item::Task),
+            TokenTag::Identifier if self.at_contextual_keyword("marker") => {
+                self.parse_marker_family().map(Item::MarkerFamily)
+            }
             TokenTag::Identifier if self.at_contextual_keyword("mark") => {
                 self.parse_marker_rule().map(Item::MarkerRule)
             }
             _ => {
                 self.error_current(
                     "expected a top-level item",
-                    "expected `fn`, `task`, or `mark`",
+                    "expected `fn`, `task`, `marker`, or `mark`",
                 );
                 None
             }
@@ -141,6 +144,59 @@ impl<'a> Parser<'a> {
             return_type,
             body,
         })
+    }
+
+    fn parse_marker_family(&mut self) -> Option<MarkerFamily> {
+        let start = self.expect_contextual_keyword(
+            "marker",
+            "expected `marker` to start a marker family declaration",
+        )?;
+        let name = self.expect_identifier("expected a marker family name")?;
+        self.expect_tag(TokenTag::LParen, "expected `(` after marker family name")?;
+        let params = self.parse_marker_family_params()?;
+        let end = self.expect_tag(
+            TokenTag::Semi,
+            "expected `;` after marker family declaration",
+        )?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+
+        Some(MarkerFamily { span, name, params })
+    }
+
+    fn parse_marker_family_params(&mut self) -> Option<Vec<MarkerFamilyParam>> {
+        let mut params = Vec::new();
+
+        if self.bump_if(TokenTag::RParen) {
+            return Some(params);
+        }
+
+        loop {
+            let name = self.expect_identifier("expected a marker family parameter name")?;
+            self.expect_tag(
+                TokenTag::Colon,
+                "expected `:` after marker family parameter name",
+            )?;
+            let place = self.expect_contextual_keyword(
+                "place",
+                "expected `place` as the marker family parameter type",
+            )?;
+            let span = name.span.cover(place.span).unwrap_or(name.span);
+            params.push(MarkerFamilyParam { span, name });
+
+            if self.bump_if(TokenTag::Comma) {
+                if self.bump_if(TokenTag::RParen) {
+                    break;
+                }
+            } else {
+                self.expect_tag(
+                    TokenTag::RParen,
+                    "expected `)` after marker family parameters",
+                )?;
+                break;
+            }
+        }
+
+        Some(params)
     }
 
     fn parse_marker_rule(&mut self) -> Option<MarkerRule> {
@@ -1389,6 +1445,7 @@ impl<'a> Parser<'a> {
         while !self.at(TokenTag::Eof) {
             if self.at(TokenTag::Fn)
                 || self.at(TokenTag::Task)
+                || self.at_contextual_keyword("marker")
                 || self.at_contextual_keyword("mark")
             {
                 break;

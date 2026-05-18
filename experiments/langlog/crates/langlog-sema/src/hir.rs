@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MarkerAnnotation, MarkerArg,
-    MarkerArgKind, MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock,
-    MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type, TypeKind,
-    UnaryOp,
+    MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt, MarkerRefinement,
+    MarkerRule, MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt,
+    Task, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -24,8 +24,22 @@ pub struct HirBindingId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirProgram {
+    pub marker_families: Vec<HirMarkerFamilyDecl>,
     pub functions: Vec<HirFunction>,
     pub marker_rules: Vec<HirMarkerRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerFamilyDecl {
+    pub name: String,
+    pub params: Vec<HirMarkerFamilyParam>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerFamilyParam {
+    pub name: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,7 +338,7 @@ pub enum HirExprKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HirMarkerFamily {
     True,
     False,
@@ -335,6 +349,7 @@ pub enum HirMarkerFamily {
     GreaterOrEqual,
     MemberOf,
     Event,
+    User(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,8 +409,18 @@ pub(crate) fn lower_program(
     resolutions: &[ResolvedName],
     types: &TypeFacts,
 ) -> HirProgram {
-    let lowerer = HirLowerer::new(resolutions, types);
+    let marker_family_arities = source_marker_family_arities(parsed);
+    let lowerer = HirLowerer::new(resolutions, types, marker_family_arities);
     HirProgram {
+        marker_families: parsed
+            .module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::MarkerFamily(family) => Some(lower_marker_family_decl(family)),
+                Item::Function(_) | Item::Task(_) | Item::MarkerRule(_) => None,
+            })
+            .collect(),
         functions: parsed
             .module
             .items
@@ -403,7 +428,7 @@ pub(crate) fn lower_program(
             .filter_map(|item| match item {
                 Item::Function(function) => Some(lowerer.lower_function(function)),
                 Item::Task(task) => Some(lowerer.lower_task(task)),
-                Item::MarkerRule(_) => None,
+                Item::MarkerFamily(_) | Item::MarkerRule(_) => None,
             })
             .collect(),
         marker_rules: parsed
@@ -412,25 +437,62 @@ pub(crate) fn lower_program(
             .iter()
             .filter_map(|item| match item {
                 Item::MarkerRule(rule) => Some(lowerer.lower_marker_rule(rule)),
-                Item::Function(_) | Item::Task(_) => None,
+                Item::Function(_) | Item::Task(_) | Item::MarkerFamily(_) => None,
             })
             .collect(),
+    }
+}
+
+fn source_marker_family_arities(parsed: &ParsedModule) -> HashMap<String, usize> {
+    parsed
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::MarkerFamily(family) => Some((family.name.value.clone(), family.params.len())),
+            Item::Function(_) | Item::Task(_) | Item::MarkerRule(_) => None,
+        })
+        .collect()
+}
+
+fn lower_marker_family_decl(family: &MarkerFamily) -> HirMarkerFamilyDecl {
+    HirMarkerFamilyDecl {
+        name: family.name.value.clone(),
+        params: family
+            .params
+            .iter()
+            .map(lower_marker_family_param)
+            .collect(),
+        span: family.span,
+    }
+}
+
+fn lower_marker_family_param(param: &MarkerFamilyParam) -> HirMarkerFamilyParam {
+    HirMarkerFamilyParam {
+        name: param.name.value.clone(),
+        span: param.span,
     }
 }
 
 struct HirLowerer<'a> {
     resolutions: HashMap<Span, &'a ResolvedName>,
     types: &'a TypeFacts,
+    marker_families: HashMap<String, usize>,
 }
 
 impl<'a> HirLowerer<'a> {
-    fn new(resolutions: &'a [ResolvedName], types: &'a TypeFacts) -> Self {
+    fn new(
+        resolutions: &'a [ResolvedName],
+        types: &'a TypeFacts,
+        marker_families: HashMap<String, usize>,
+    ) -> Self {
         Self {
             resolutions: resolutions
                 .iter()
                 .map(|resolution| (resolution.use_span, resolution))
                 .collect(),
             types,
+            marker_families,
         }
     }
 
@@ -555,8 +617,9 @@ impl<'a> HirLowerer<'a> {
 
     fn lower_marker_template(&self, marker: &MarkerAnnotation) -> HirMarkerTemplate {
         HirMarkerTemplate {
-            family: lower_marker_family(&marker.name.value)
-                .expect("checked marker rules must use builtin marker families"),
+            family: self
+                .lower_marker_family(&marker.name.value)
+                .expect("checked marker rules must use known marker families"),
             args: marker
                 .args
                 .iter()
@@ -678,8 +741,9 @@ impl<'a> HirLowerer<'a> {
                 span: stmt.span,
             }),
             Stmt::UnsafeMarker(stmt) => HirStmt::UnsafeMarker(HirUnsafeMarkerStmt {
-                marker: lower_marker_family(&stmt.construction.marker.value)
-                    .expect("checked marker statements must name a builtin marker"),
+                marker: self
+                    .lower_marker_family(&stmt.construction.marker.value)
+                    .expect("checked marker statements must name a known marker"),
                 args: stmt
                     .construction
                     .args
@@ -841,8 +905,9 @@ impl<'a> HirLowerer<'a> {
             },
             ExprKind::UnsafeMarker(construction) => HirExpr {
                 kind: HirExprKind::UnsafeMarker {
-                    marker: lower_marker_family(&construction.marker.value)
-                        .expect("checked marker expressions must name a builtin marker"),
+                    marker: self
+                        .lower_marker_family(&construction.marker.value)
+                        .expect("checked marker expressions must name a known marker"),
                     args: construction
                         .args
                         .iter()
@@ -923,9 +988,11 @@ impl<'a> HirLowerer<'a> {
     }
 
     fn lower_marker_requirement(&self, marker: &MarkerAnnotation) -> Option<HirMarkerRequirement> {
-        let family = lower_marker_family(&marker.name.value)?;
+        let family = self.lower_marker_family(&marker.name.value)?;
+        let arity = self.marker_family_arity(&family);
         let args = normalize_marker_places(
-            family,
+            &family,
+            arity,
             marker
                 .args
                 .iter()
@@ -937,6 +1004,21 @@ impl<'a> HirLowerer<'a> {
             args,
             span: marker.span,
         })
+    }
+
+    fn lower_marker_family(&self, name: &str) -> Option<HirMarkerFamily> {
+        lower_builtin_marker_family(name).or_else(|| {
+            self.marker_families
+                .contains_key(name)
+                .then(|| HirMarkerFamily::User(name.to_owned()))
+        })
+    }
+
+    fn marker_family_arity(&self, family: &HirMarkerFamily) -> Option<usize> {
+        match family {
+            HirMarkerFamily::User(name) => self.marker_families.get(name).copied(),
+            _ => None,
+        }
     }
 
     fn lower_marker_arg(&self, arg: &MarkerArg) -> Option<HirMarkerPlace> {
@@ -970,7 +1052,7 @@ fn lower_ast_type(ty: &Type) -> HirType {
     lower_semantic_type(&semantic).expect("surface types must lower into HIR types")
 }
 
-pub fn lower_marker_family(name: &str) -> Option<HirMarkerFamily> {
+pub fn lower_builtin_marker_family(name: &str) -> Option<HirMarkerFamily> {
     match name {
         "True" => Some(HirMarkerFamily::True),
         "False" => Some(HirMarkerFamily::False),
@@ -985,8 +1067,13 @@ pub fn lower_marker_family(name: &str) -> Option<HirMarkerFamily> {
     }
 }
 
+pub fn is_builtin_marker_family_name(name: &str) -> bool {
+    lower_builtin_marker_family(name).is_some()
+}
+
 fn normalize_marker_places(
-    family: HirMarkerFamily,
+    family: &HirMarkerFamily,
+    user_arity: Option<usize>,
     args: Vec<HirMarkerPlace>,
 ) -> Vec<HirMarkerPlace> {
     match family {
@@ -1005,6 +1092,13 @@ fn normalize_marker_places(
             if args.len() == 1 =>
         {
             vec![HirMarkerPlace::Subject, args[0].clone()]
+        }
+        HirMarkerFamily::User(_)
+            if user_arity.is_some_and(|arity| arity > 0 && args.len() + 1 == arity) =>
+        {
+            let mut normalized = vec![HirMarkerPlace::Subject];
+            normalized.extend(args);
+            normalized
         }
         _ => args,
     }

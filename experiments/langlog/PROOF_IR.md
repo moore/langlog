@@ -30,6 +30,8 @@ This document complements, but does not replace, the main language spec:
   identifier text.
 - A `PlaceId` MUST identify a compiler-visible SSA place that can carry marker
   facts.
+- User-defined marker family facts MUST retain the source marker family name and
+  instantiated place arguments.
 - Proof IR MUST distinguish ordinary marker facts, immutable marker facts, and
   diagnostic-only hints.
 - Diagnostic-only hints MUST NOT discharge marker obligations.
@@ -205,6 +207,7 @@ MarkerPattern::MemberOf { key: PlaceId, map: PlaceId }
 MarkerPattern::Event
 MarkerPattern::True
 MarkerPattern::False
+MarkerPattern::User { family: String, args: Vec<PlaceId> }
 
 ObligationTarget::Place(PlaceId)
 ObligationTarget::StateCycle { task: TaskId, cycle: Vec<StateId> }

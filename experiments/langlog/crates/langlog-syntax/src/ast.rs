@@ -9,6 +9,7 @@ pub struct Module {
 pub enum Item {
     Function(Function),
     Task(Task),
+    MarkerFamily(MarkerFamily),
     MarkerRule(MarkerRule),
 }
 
@@ -17,6 +18,7 @@ impl Item {
         match self {
             Self::Function(function) => function.span,
             Self::Task(task) => task.span,
+            Self::MarkerFamily(family) => family.span,
             Self::MarkerRule(rule) => rule.span,
         }
     }
@@ -38,6 +40,19 @@ pub struct Task {
     pub params: Vec<Param>,
     pub return_type: Type,
     pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerFamily {
+    pub span: Span,
+    pub name: Spanned<String>,
+    pub params: Vec<MarkerFamilyParam>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerFamilyParam {
+    pub span: Span,
+    pub name: Spanned<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

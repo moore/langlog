@@ -973,6 +973,161 @@ mark LessThan(a: place, b: place, result: place) {
     );
 }
 
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# User marker families MAY appear in marker-qualified types, unsafe marker construction, and companion rule refinements and implications.
+#[test]
+fn requirement_llg_mark_04_accepts_user_marker_families_in_marker_positions() {
+    let checked = analyze_ok(
+        r#"
+marker Trusted();
+marker Bounded(value: place, bound: place);
+
+mark Sub(a: place, amount: place, result: place) {
+    if a with Bounded(a, ?bound) {
+        implies Bounded(result, bound) for result;
+    }
+}
+
+fn keep(value: u32 with Trusted, bound: u32) -> u32 with Trusted {
+    let copied: u32 with Bounded(bound) = unsafe { Bounded::mark(value, bound) };
+    return unsafe { Trusted::mark(copied) };
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = checked.hir.as_ref().expect("expected lowered HIR");
+    assert_eq!(hir.marker_families.len(), 2);
+    assert_eq!(hir.marker_families[0].name, "Trusted");
+    assert_eq!(hir.marker_families[1].name, "Bounded");
+    assert_eq!(hir.marker_families[1].params.len(), 2);
+
+    let [HirMarkerRuleStmt::If(stmt)] = hir.marker_rules[0].body.statements.as_slice() else {
+        panic!("expected one custom-marker refinement");
+    };
+    assert_eq!(
+        stmt.refinement.marker.family,
+        HirMarkerFamily::User("Bounded".to_owned())
+    );
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# User marker family declarations MUST NOT duplicate another source marker family or shadow a builtin marker family.
+#[test]
+fn requirement_llg_mark_04_rejects_duplicate_and_builtin_shadowing_marker_families() {
+    let checked = analyze_ok(
+        r#"
+marker Trusted();
+marker Trusted();
+marker Event();
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "duplicate marker family `Trusted`");
+    assert_diagnostic_message_contains(
+        &checked,
+        "marker family `Event` conflicts with a builtin marker family",
+    );
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# User marker family parameter names MUST be unique and every parameter MUST have type `place`.
+#[test]
+fn requirement_llg_mark_04_rejects_duplicate_marker_family_parameters() {
+    let checked = analyze_ok("marker OwnedBy(value: place, value: place);");
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "duplicate marker family parameter `value`");
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# In marker-qualified value types, a user marker family MAY either use its full declared arity or elide the first declared place, which is then supplied by the qualified subject value.
+#[test]
+fn requirement_llg_mark_04_allows_user_marker_subject_elision_in_value_types() {
+    let checked = analyze_ok(
+        r#"
+marker Bounded(value: place, bound: place);
+
+fn main(value: u32, bound: u32) {
+    let full: u32 with Bounded(value, bound) = value;
+    let elided: u32 with Bounded(bound) = value;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# In marker rule bodies, a user marker family MUST be written with its full declared arity.
+#[test]
+fn requirement_llg_mark_04_requires_full_user_marker_arity_in_marker_rules() {
+    let checked = analyze_ok(
+        r#"
+marker Bounded(value: place, bound: place);
+
+mark Sub(a: place, amount: place, result: place) {
+    if a with Bounded(?bound) {
+        implies Bounded(result, bound) for result;
+    }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "wrong number of arguments for marker `Bounded`");
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# Unsafe construction of a zero-parameter user marker family MUST use one target argument.
+#[test]
+fn requirement_llg_mark_04_checks_zero_parameter_user_marker_constructor_arity() {
+    let checked = analyze_ok(
+        r#"
+marker Trusted();
+
+fn main(value: u32) {
+    unsafe { Trusted::mark(); }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "wrong number of arguments for unsafe marker `Trusted`: expected 1, found 0",
+    );
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# Unsafe construction of a nonzero-parameter user marker family MUST use the declared arity.
+#[test]
+fn requirement_llg_mark_04_checks_nonzero_user_marker_constructor_arity() {
+    let checked = analyze_ok(
+        r#"
+marker Bounded(value: place, bound: place);
+
+fn main(value: u32) {
+    unsafe { Bounded::mark(value); }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "wrong number of arguments for unsafe marker `Bounded`: expected 2, found 1",
+    );
+}
+
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
 //# This marker slice MUST accept builtin comparison companion rule names and the direct checked-arithmetic companion rule names `Add`, `Sub`, `Mul`, `Div`, and `Rem`.
@@ -992,7 +1147,12 @@ fn requirement_llg_mark_06_accepts_checked_arithmetic_companion_rule_names() {
 //# Unknown companion marker rule names MUST be rejected.
 #[test]
 fn requirement_llg_mark_06_rejects_unknown_companion_rule_names() {
-    let checked = analyze_ok("mark Product(a: place, result: place) {}");
+    let checked = analyze_ok(
+        r#"
+marker Product(a: place);
+mark Product(a: place, result: place) {}
+"#,
+    );
 
     assert!(checked.has_errors());
     assert_diagnostic_message_contains(&checked, "unknown companion marker rule `Product`");

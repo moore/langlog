@@ -1333,6 +1333,144 @@ fn main() {
             && matches!(fact.marker, MarkerPattern::Event)));
 }
 
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# User marker families define no semantics by themselves; they become facts only through unsafe construction or companion-rule implications.
+#[test]
+fn requirement_llg_mark_04_user_marker_families_require_explicit_facts() {
+    let (_, proof) = check_ok(
+        r#"
+marker Trusted();
+
+fn main() {
+    let value: u32 with Trusted = unsafe { Trusted::mark(1) };
+}
+"#,
+    );
+
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::UnsafeConstruction
+            && matches!(
+                &fact.marker,
+                MarkerPattern::User { family, args } if family == "Trusted" && args.is_empty()
+            )
+    }));
+
+    let (_, proof) = check_err(
+        r#"
+marker Trusted();
+
+fn main() {
+    let value: u32 with Trusted = 1;
+}
+"#,
+    );
+
+    assert_note_contains(&proof, "required marker: Trusted");
+}
+
+//= SPEC.md#llg-mark-02-function-boundaries
+//= type=test
+//# The same function boundary rules MUST apply to user marker families.
+#[test]
+fn requirement_llg_mark_02_function_boundaries_support_user_marker_families() {
+    check_ok(
+        r#"
+marker Trusted();
+
+fn keep(value: u32 with Trusted) -> u32 with Trusted {
+    value
+}
+
+fn needs(value: u32 with Trusted) {}
+
+fn main() {
+    needs(keep(unsafe { Trusted::mark(1) }));
+}
+"#,
+    );
+
+    let (_, proof) = check_err(
+        r#"
+marker Trusted();
+
+fn strip(value: u32 with Trusted) -> u32 {
+    value
+}
+
+fn main() {
+    let value: u32 with Trusted = strip(unsafe { Trusted::mark(1) });
+}
+"#,
+    );
+    assert_note_contains(&proof, "required marker: Trusted");
+}
+
+//= SPEC.md#llg-mark-05-marker-transfer
+//= type=test
+//# Assignment identity propagation MUST apply to user marker facts.
+#[test]
+fn requirement_llg_mark_05_assignment_copies_user_marker_facts() {
+    let (_, proof) = check_ok(
+        r#"
+marker Trusted();
+
+fn main() {
+    let value = unsafe { Trusted::mark(1) };
+    let copied: u32 with Trusted = value;
+}
+"#,
+    );
+
+    assert!(proof
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::AssignmentIdentity
+            && matches!(&fact.marker, MarkerPattern::User { family, .. } if family == "Trusted")));
+}
+
+//= PROOF_IR.md#llg-pir-02-places-and-marker-facts
+//= type=test
+//# User-defined marker family facts MUST retain the source marker family name and instantiated place arguments.
+#[test]
+fn requirement_llg_pir_02_user_marker_facts_retain_family_name_and_place_args() {
+    let (_, proof) = check_ok(
+        r#"
+marker Bounded(value: place, bound: place);
+
+mark Sub(a: place, amount: place, result: place) {
+    if a with Bounded(a, ?bound) {
+        implies Bounded(result, bound) for result;
+    }
+}
+
+fn main(index: u32) {
+    let fallback = 0;
+    unsafe { Bounded::mark(index, 4); }
+    unsafe { Bounded::mark(fallback, 4); }
+    let smaller: u32 with Bounded(4) = index - 1 or(err) fallback;
+}
+"#,
+    );
+
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(
+                &fact.marker,
+                MarkerPattern::User { family, args }
+                    if family == "Bounded" && args.len() == 2
+            )
+    }));
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::RecoveryMerge
+            && matches!(
+                &fact.marker,
+                MarkerPattern::User { family, args }
+                    if family == "Bounded" && args.len() == 2
+            )
+    }));
+}
+
 //= SPEC.md#llg-mark-01-marker-model
 //= type=test
 //# A value without a required marker fact MUST NOT be used where that marker is required.
@@ -1353,6 +1491,30 @@ fn main() {
         "let value: u32 with Event = 1;",
     );
     assert_note_contains(&proof, "required marker: Event");
+}
+
+//= SPEC.md#llg-diag-04-marker-obligation-diagnostics
+//= type=test
+//# When useful, a failed marker obligation diagnostic SHOULD display near-miss marker facts that have the right marker family but refer to different places.
+#[test]
+fn requirement_llg_diag_04_reports_user_marker_near_misses_after_reassignment() {
+    let (_, proof) = check_err(
+        r#"
+marker Bounded(value: place, bound: place);
+
+fn needs(value: u32 with Bounded(4)) {}
+
+fn main() {
+    let mut index = 0;
+    unsafe { Bounded::mark(index, 4); }
+    index = 1;
+    needs(index);
+}
+"#,
+    );
+
+    assert_note_contains(&proof, "required marker: Bounded(index#1, 4)");
+    assert_note_contains(&proof, "known near-miss marker: Bounded(index, 4)");
 }
 
 //= SPEC.md#llg-mark-02-function-boundaries

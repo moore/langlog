@@ -53,6 +53,7 @@ pub enum MarkerPattern {
     MemberOf { key: PlaceId, map: PlaceId },
     SetMember { element_type: HirType },
     Event,
+    User { family: String, args: Vec<PlaceId> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,7 +359,12 @@ pub enum ProofExprKind {
 }
 
 pub fn lower_to_proof_ir(hir: &HirProgram) -> ProofProgram {
-    ProofLowerer::new(collect_bindings(hir), collect_function_markers(hir)).lower_program(hir)
+    ProofLowerer::new(
+        collect_bindings(hir),
+        collect_function_markers(hir),
+        collect_marker_family_arities(hir),
+    )
+    .lower_program(hir)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +382,7 @@ struct ParamMarkerSignature {
 struct ProofLowerer {
     binding_info: HashMap<HirBindingId, BindingInfo>,
     function_markers: HashMap<HirItemId, FunctionMarkerSignature>,
+    marker_family_arities: HashMap<String, usize>,
     current_return_markers: Vec<HirMarkerRequirement>,
     binding_places: BindingPlaceMap,
     binding_versions: BindingVersionMap,
@@ -431,7 +438,7 @@ fn lower_marker_rule_statement(statement: &HirMarkerRuleStmt) -> ProofMarkerRule
 
 fn lower_marker_template(template: &langlog_sema::HirMarkerTemplate) -> ProofMarkerTemplate {
     ProofMarkerTemplate {
-        family: template.family,
+        family: template.family.clone(),
         args: template
             .args
             .iter()
@@ -454,10 +461,12 @@ impl ProofLowerer {
     fn new(
         binding_info: HashMap<HirBindingId, BindingInfo>,
         function_markers: HashMap<HirItemId, FunctionMarkerSignature>,
+        marker_family_arities: HashMap<String, usize>,
     ) -> Self {
         Self {
             binding_info,
             function_markers,
+            marker_family_arities,
             current_return_markers: Vec::new(),
             binding_places: HashMap::new(),
             binding_versions: HashMap::new(),
@@ -697,7 +706,7 @@ impl ProofLowerer {
                     .iter()
                     .filter_map(|arg| self.lower_expr(arg, entries))
                     .collect();
-                if let Some(fact) = self.unsafe_marker_fact(stmt.marker, &args, stmt.span) {
+                if let Some(fact) = self.unsafe_marker_fact(&stmt.marker, &args, stmt.span) {
                     entries.push(ProofEntry::Fact {
                         span: stmt.span,
                         fact,
@@ -863,7 +872,7 @@ impl ProofLowerer {
                     .filter_map(|arg| self.lower_expr(arg, entries))
                     .collect::<Vec<_>>();
                 let place = args.first()?.place;
-                if let Some(fact) = self.unsafe_marker_fact(*marker, &args, expr.span) {
+                if let Some(fact) = self.unsafe_marker_fact(marker, &args, expr.span) {
                     entries.push(ProofEntry::Fact {
                         span: expr.span,
                         fact,
@@ -871,7 +880,7 @@ impl ProofLowerer {
                 }
                 (
                     ProofExprKind::UnsafeMarker {
-                        marker: *marker,
+                        marker: marker.clone(),
                         args,
                     },
                     place,
@@ -1119,12 +1128,12 @@ impl ProofLowerer {
             .iter()
             .map(|arg| self.marker_place(arg, subject, substitution))
             .collect::<Option<Vec<_>>>()?;
-        self.marker_pattern(marker.family, &args, subject)
+        self.marker_pattern(&marker.family, &args, subject)
     }
 
     fn unsafe_marker_fact(
         &mut self,
-        family: HirMarkerFamily,
+        family: &HirMarkerFamily,
         args: &[ProofExpr],
         origin_span: Span,
     ) -> Option<MarkerFact> {
@@ -1141,7 +1150,7 @@ impl ProofLowerer {
 
     fn marker_pattern(
         &mut self,
-        family: HirMarkerFamily,
+        family: &HirMarkerFamily,
         args: &[PlaceId],
         subject: PlaceId,
     ) -> Option<(PlaceId, MarkerPattern)> {
@@ -1178,6 +1187,21 @@ impl ProofLowerer {
             HirMarkerFamily::MemberOf => {
                 let (key, map) = two_places(args)?;
                 Some((key, MarkerPattern::MemberOf { key, map }))
+            }
+            HirMarkerFamily::User(name) => {
+                let marker_args =
+                    if self.marker_family_arities.get(name) == Some(&0) && args.len() == 1 {
+                        Vec::new()
+                    } else {
+                        args.to_vec()
+                    };
+                Some((
+                    subject,
+                    MarkerPattern::User {
+                        family: name.clone(),
+                        args: marker_args,
+                    },
+                ))
             }
         }
     }
@@ -1942,7 +1966,7 @@ impl<'a> Checker<'a> {
         actual: &MarkerPattern,
         bindings: &mut HashMap<String, PlaceId>,
     ) -> bool {
-        match (template.family, actual) {
+        match (&template.family, actual) {
             (HirMarkerFamily::True, MarkerPattern::True { value })
             | (HirMarkerFamily::False, MarkerPattern::False { value }) => {
                 self.same_place(subject, *value) && template.args.is_empty()
@@ -1958,8 +1982,30 @@ impl<'a> Checker<'a> {
             (HirMarkerFamily::MemberOf, MarkerPattern::MemberOf { key, map }) => {
                 self.match_two_place_template(&template.args, *key, *map, bindings)
             }
+            (
+                HirMarkerFamily::User(expected_family),
+                MarkerPattern::User {
+                    family: actual_family,
+                    args,
+                },
+            ) if expected_family == actual_family => {
+                self.match_place_template_args(&template.args, args, bindings)
+            }
             _ => false,
         }
+    }
+
+    fn match_place_template_args(
+        &self,
+        template_args: &[ProofMarkerTemplateArg],
+        actual_args: &[PlaceId],
+        bindings: &mut HashMap<String, PlaceId>,
+    ) -> bool {
+        template_args.len() == actual_args.len()
+            && template_args
+                .iter()
+                .zip(actual_args.iter().copied())
+                .all(|(arg, actual)| self.match_template_arg(arg, actual, bindings))
     }
 
     fn match_two_place_template(
@@ -2019,7 +2065,7 @@ impl<'a> Checker<'a> {
         target: PlaceId,
         bindings: &HashMap<String, PlaceId>,
     ) -> Option<MarkerPattern> {
-        match template.family {
+        match &template.family {
             HirMarkerFamily::Event => Some(MarkerPattern::Event),
             HirMarkerFamily::True if template.args.is_empty() => {
                 Some(MarkerPattern::True { value: target })
@@ -2034,7 +2080,7 @@ impl<'a> Checker<'a> {
             | HirMarkerFamily::GreaterOrEqual
             | HirMarkerFamily::MemberOf => {
                 let (left, right) = self.instantiate_two_template_args(&template.args, bindings)?;
-                match template.family {
+                match &template.family {
                     HirMarkerFamily::Equal => Some(MarkerPattern::Equal { left, right }),
                     HirMarkerFamily::LessThan => Some(MarkerPattern::LessThan { left, right }),
                     HirMarkerFamily::GreaterThan => {
@@ -2050,11 +2096,28 @@ impl<'a> Checker<'a> {
                         key: left,
                         map: right,
                     }),
-                    HirMarkerFamily::Event | HirMarkerFamily::True | HirMarkerFamily::False => None,
+                    HirMarkerFamily::Event
+                    | HirMarkerFamily::True
+                    | HirMarkerFamily::False
+                    | HirMarkerFamily::User(_) => None,
                 }
             }
+            HirMarkerFamily::User(name) => Some(MarkerPattern::User {
+                family: name.clone(),
+                args: self.instantiate_template_args(&template.args, bindings)?,
+            }),
             HirMarkerFamily::True | HirMarkerFamily::False => None,
         }
+    }
+
+    fn instantiate_template_args(
+        &self,
+        args: &[ProofMarkerTemplateArg],
+        bindings: &HashMap<String, PlaceId>,
+    ) -> Option<Vec<PlaceId>> {
+        args.iter()
+            .map(|arg| self.instantiate_template_arg(arg, bindings))
+            .collect()
     }
 
     fn instantiate_two_template_args(
@@ -2226,6 +2289,23 @@ impl<'a> Checker<'a> {
                     && self.same_place(*actual_map, *required_map)
             }
             (
+                MarkerPattern::User {
+                    family: actual_family,
+                    args: actual_args,
+                },
+                MarkerPattern::User {
+                    family: required_family,
+                    args: required_args,
+                },
+            ) => {
+                actual_family == required_family
+                    && actual_args.len() == required_args.len()
+                    && actual_args
+                        .iter()
+                        .zip(required_args)
+                        .all(|(actual, required)| self.same_place_or_literal(*actual, *required))
+            }
+            (
                 MarkerPattern::SetMember {
                     element_type: actual_type,
                 },
@@ -2276,7 +2356,8 @@ impl<'a> Checker<'a> {
             }
             MarkerPattern::MemberOf { .. }
             | MarkerPattern::SetMember { .. }
-            | MarkerPattern::Event => false,
+            | MarkerPattern::Event
+            | MarkerPattern::User { .. } => false,
         }
     }
 
@@ -2354,6 +2435,30 @@ impl<'a> Checker<'a> {
                 !self.same_place(*actual_key, *required_key)
                     && self.same_binding_name(*actual_key, *required_key)
                     && self.same_place(*actual_map, *required_map)
+            }
+            (
+                MarkerPattern::User {
+                    family: actual_family,
+                    args: actual_args,
+                },
+                MarkerPattern::User {
+                    family: required_family,
+                    args: required_args,
+                },
+            ) => {
+                actual_family == required_family
+                    && actual_args.len() == required_args.len()
+                    && matches!(
+                        (actual_args.first(), required_args.first()),
+                        (Some(actual), Some(required))
+                            if !self.same_place(*actual, *required)
+                                && self.same_binding_name(*actual, *required)
+                    )
+                    && actual_args
+                        .iter()
+                        .skip(1)
+                        .zip(required_args.iter().skip(1))
+                        .all(|(actual, required)| self.same_place_or_literal(*actual, *required))
             }
             _ => false,
         }
@@ -2499,6 +2604,15 @@ impl<'a> Checker<'a> {
                 format!("SetMember({})", format_hir_type(element_type))
             }
             MarkerPattern::Event => "Event".to_owned(),
+            MarkerPattern::User { family, args } if args.is_empty() => family.clone(),
+            MarkerPattern::User { family, args } => format!(
+                "{}({})",
+                family,
+                args.iter()
+                    .map(|arg| self.place_display(*arg))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -2549,6 +2663,10 @@ fn substitute_marker_place(
             element_type: element_type.clone(),
         },
         MarkerPattern::Event => MarkerPattern::Event,
+        MarkerPattern::User { family, args } => MarkerPattern::User {
+            family: family.clone(),
+            args: args.iter().copied().map(replace).collect(),
+        },
     })
 }
 
@@ -2757,7 +2875,7 @@ fn preserve_relation_from_subject(subject: &str, family: HirMarkerFamily) -> Pro
     ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
         subject: subject.to_owned(),
         marker: marker_template(
-            family,
+            family.clone(),
             vec![
                 ProofMarkerTemplateArg::Place(subject.to_owned()),
                 ProofMarkerTemplateArg::Binding("bound".to_owned()),
@@ -2901,6 +3019,13 @@ fn collect_function_markers(hir: &HirProgram) -> HashMap<HirItemId, FunctionMark
     hir.functions
         .iter()
         .map(|function| (function.id, function_marker_signature(function)))
+        .collect()
+}
+
+fn collect_marker_family_arities(hir: &HirProgram) -> HashMap<String, usize> {
+    hir.marker_families
+        .iter()
+        .map(|family| (family.name.clone(), family.params.len()))
         .collect()
 }
 

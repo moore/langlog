@@ -84,8 +84,8 @@ properties that should be enforced structurally rather than by convention:
 - The keyword set MUST reserve `fn`, `task`, `let`, `mut`, `if`, `else`,
   `match`, `for`, `in`, `forever`, `return`, `exit`, `delegate`, `observe`,
   `or`, `true`, and `false`.
-- The marker-aware language phase MUST recognize `with`, `mark`, `place`,
-  `implies`, and `unsafe` in marker syntax positions.
+- The marker-aware language phase MUST recognize `with`, `marker`, `mark`,
+  `place`, `implies`, and `unsafe` in marker syntax positions.
 - Marker syntax words MAY remain contextual outside marker syntax positions
   when doing so is unambiguous.
 
@@ -96,10 +96,10 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-SYN-01 Top-Level Items
 
-- A source file MUST contain only function items, task items, and marker
-  companion-rule items at the top level.
-- A non-function, non-task, non-marker-rule top-level item MUST be rejected
-  with a syntax diagnostic.
+- A source file MUST contain only function items, task items, marker-family
+  declaration items, and marker companion-rule items at the top level.
+- A non-function, non-task, non-marker-family, non-marker-rule top-level item
+  MUST be rejected with a syntax diagnostic.
 - A function item MUST use Rust-like syntax with `fn`, a name, a parameter list,
   and a block body.
 - The current parser allows the return type to be omitted in phase 1.
@@ -110,6 +110,9 @@ properties that should be enforced structurally rather than by convention:
 - An executable task program MUST use `task main() -> u32` as its root task.
 - A marker companion-rule item MUST use `mark Name(param: place, ...) { ... }`
   and MUST be proof-only metadata rather than executable code.
+- A marker-family declaration item MUST use
+  `marker Name(param: place, ...);` and MUST be proof-only metadata rather than
+  executable code.
 - Future root task configuration MAY allow other root task names or signatures.
 
 ## LLG-SYN-02 Statements
@@ -236,6 +239,7 @@ with marker facts attached to places.
 - A marker-qualified return type MUST require the returned expression to
   provide each named marker and MUST provide those markers to callers after the
   call succeeds.
+- The same function boundary rules MUST apply to user marker families.
 - A generic type parameter MUST NOT capture unmentioned marker facts from an
   argument.
 - If a function preserves or creates a marker fact across the call boundary,
@@ -299,13 +303,32 @@ unsafe {
 - The trusted `read_u32()` host builtin MUST return a value marked with
   `Event`.
 
-Full user-defined marker-family declaration syntax is deferred. The first
-marker-aware phase defines builtin marker families and builtin companion marker
-rules.
+User-defined marker-family declarations MUST use
+`marker Name(param: place, ...);`. A zero-parameter marker family MUST still use
+parentheses, such as `marker Trusted();`.
+User marker family parameter names MUST be unique and every parameter MUST have
+type `place`.
+User marker family names MUST live in a marker namespace separate from
+functions and tasks.
+User marker family declarations MUST NOT duplicate another source marker family
+or shadow a builtin marker family.
+User marker families MAY appear in marker-qualified types, unsafe marker
+construction, and companion rule refinements and implications.
+In marker rule bodies, a user marker family MUST be written with its full
+declared arity.
+In marker-qualified value types, a user marker family MAY either use its full
+declared arity or elide the first declared place, which is then supplied by the
+qualified subject value.
+Unsafe construction of a zero-parameter user marker family MUST use one target
+argument. Unsafe construction of a nonzero-parameter user marker family MUST use
+the declared arity.
+User marker families define no semantics by themselves; they become facts only
+through unsafe construction or companion-rule implications.
 
 ## LLG-MARK-05 Marker Transfer
 
 - Assignment MUST preserve marker facts because it preserves place identity.
+- Assignment identity propagation MUST apply to user marker facts.
 - Mutating a value MUST create a new place for the new SSA version.
 - Ordinary marker facts attached to the old place MUST NOT automatically apply
   to the new place.
@@ -326,6 +349,8 @@ This marker slice MUST accept builtin comparison companion rule names and the
 direct checked-arithmetic companion rule names `Add`, `Sub`, `Mul`, `Div`, and
 `Rem`.
 Unknown companion marker rule names MUST be rejected.
+User marker family names MUST NOT become companion rule names; `mark Foo`
+remains valid only for accepted builtin companion rule names.
 Each accepted builtin companion marker rule name MUST use exactly three
 `place` parameters.
 Companion marker rules MUST reject unknown marker families in refinements and
@@ -705,8 +730,8 @@ These items are intentionally left open while the front end and marker-aware
 proof model evolve:
 
 - the exact syntax for declared collection relations;
-- full user-defined marker-family declarations beyond the first builtin marker
-  families and companion rules;
+- typed marker parameters and user-defined companion operator names beyond the
+  current marker-family declaration surface;
 - whether `Result` error types are closed or user-defined in early phases;
 - whether collection insertion is proof-required or explicitly fallible in the
   first executable runtime;

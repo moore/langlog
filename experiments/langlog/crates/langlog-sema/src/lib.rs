@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MarkerAnnotation,
-    MarkerArg, MarkerArgKind, MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock,
-    MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type, TypeKind,
-    UnaryOp,
+    MarkerArg, MarkerArgKind, MarkerFamily, MarkerImplicationStmt, MarkerRefinement, MarkerRule,
+    MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type,
+    TypeKind, UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -33,6 +33,11 @@ struct Binding {
 enum ItemKind {
     Function,
     Task,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkerFamilySignature {
+    arity: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +361,7 @@ impl<'a> Analyzer<'a> {
             match item {
                 Item::Function(function) => self.analyze_function(function),
                 Item::Task(task) => self.analyze_task(task),
+                Item::MarkerFamily(_) => {}
                 Item::MarkerRule(rule) => self.analyze_marker_rule(rule),
             }
         }
@@ -1034,6 +1040,7 @@ struct TypeChecker<'a> {
     diagnostics: Vec<Diagnostic>,
     item_signatures: HashMap<String, ItemSignature>,
     host_signatures: HashMap<String, FunctionType>,
+    marker_families: HashMap<String, MarkerFamilySignature>,
     facts: TypeFacts,
 }
 
@@ -1063,7 +1070,21 @@ impl<'a> TypeChecker<'a> {
                         signature: task_signature(task),
                     },
                 )),
-                Item::MarkerRule(_) => None,
+                Item::MarkerFamily(_) | Item::MarkerRule(_) => None,
+            })
+            .collect();
+        let marker_families = parsed
+            .module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::MarkerFamily(family) => Some((
+                    family.name.value.clone(),
+                    MarkerFamilySignature {
+                        arity: family.params.len(),
+                    },
+                )),
+                Item::Function(_) | Item::Task(_) | Item::MarkerRule(_) => None,
             })
             .collect();
 
@@ -1072,17 +1093,51 @@ impl<'a> TypeChecker<'a> {
             diagnostics: Vec::new(),
             item_signatures,
             host_signatures,
+            marker_families,
             facts: TypeFacts::default(),
         }
     }
 
     fn check_module(&mut self) {
+        self.check_marker_family_declarations();
         self.check_marker_rule_declarations();
         for item in &self.parsed.module.items {
             match item {
                 Item::Function(function) => self.check_function(function),
                 Item::Task(task) => self.check_task(task),
+                Item::MarkerFamily(family) => self.check_marker_family(family),
                 Item::MarkerRule(rule) => self.check_marker_rule(rule),
+            }
+        }
+    }
+
+    fn check_marker_family_declarations(&mut self) {
+        let mut seen = HashMap::new();
+        for item in &self.parsed.module.items {
+            let Item::MarkerFamily(family) = item else {
+                continue;
+            };
+            if is_builtin_marker_family_name(&family.name.value) {
+                self.report_builtin_marker_family_shadow(
+                    family.name.span,
+                    family.name.value.as_str(),
+                );
+            }
+            if let Some(previous) = seen.insert(family.name.value.clone(), family.name.span) {
+                self.report_duplicate_marker_family(family.name.span, previous, &family.name.value);
+            }
+        }
+    }
+
+    fn check_marker_family(&mut self, family: &MarkerFamily) {
+        let mut seen_params = HashMap::new();
+        for param in &family.params {
+            if let Some(previous) = seen_params.insert(param.name.value.clone(), param.name.span) {
+                self.report_duplicate_marker_family_param(
+                    param.name.span,
+                    previous,
+                    &param.name.value,
+                );
             }
         }
     }
@@ -1250,12 +1305,12 @@ impl<'a> TypeChecker<'a> {
         scopes: &MarkerRuleScopeStack,
         context: MarkerRuleMarkerContext,
     ) {
-        let Some(family) = lower_marker_family(&marker.name.value) else {
+        let Some(family) = self.resolve_marker_family(&marker.name.value) else {
             self.report_unknown_marker(marker.name.span, marker.name.value.as_str());
             return;
         };
 
-        if !self.marker_rule_arity_is_valid(family, marker.args.len()) {
+        if !self.marker_rule_arity_is_valid(&family, marker.args.len()) {
             self.report_marker_arity(marker.name.span, marker.name.value.as_str());
         }
 
@@ -1277,7 +1332,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn marker_rule_arity_is_valid(&self, family: HirMarkerFamily, arity: usize) -> bool {
+    fn marker_rule_arity_is_valid(&self, family: &HirMarkerFamily, arity: usize) -> bool {
         match family {
             HirMarkerFamily::Event => arity == 0,
             HirMarkerFamily::True | HirMarkerFamily::False => arity == 0,
@@ -1287,6 +1342,10 @@ impl<'a> TypeChecker<'a> {
             | HirMarkerFamily::LessOrEqual
             | HirMarkerFamily::GreaterOrEqual
             | HirMarkerFamily::MemberOf => arity == 2,
+            HirMarkerFamily::User(name) => self
+                .marker_families
+                .get(name)
+                .is_some_and(|signature| arity == signature.arity),
         }
     }
 
@@ -1600,12 +1659,12 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_marker_annotation(&mut self, marker: &MarkerAnnotation, scopes: &TypeScopeStack) {
-        let Some(family) = lower_marker_family(&marker.name.value) else {
+        let Some(family) = self.resolve_marker_family(&marker.name.value) else {
             self.report_unknown_marker(marker.name.span, marker.name.value.as_str());
             return;
         };
 
-        if !self.marker_type_arity_is_valid(family, marker.args.len()) {
+        if !self.marker_type_arity_is_valid(&family, marker.args.len()) {
             self.report_marker_arity(marker.name.span, marker.name.value.as_str());
         }
 
@@ -1614,7 +1673,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn marker_type_arity_is_valid(&self, family: HirMarkerFamily, arity: usize) -> bool {
+    fn marker_type_arity_is_valid(&self, family: &HirMarkerFamily, arity: usize) -> bool {
         match family {
             HirMarkerFamily::Event => arity == 0,
             HirMarkerFamily::True | HirMarkerFamily::False => arity <= 1,
@@ -1624,6 +1683,12 @@ impl<'a> TypeChecker<'a> {
             | HirMarkerFamily::LessOrEqual
             | HirMarkerFamily::GreaterOrEqual
             | HirMarkerFamily::MemberOf => (1..=2).contains(&arity),
+            HirMarkerFamily::User(name) => {
+                self.marker_families.get(name).is_some_and(|signature| {
+                    arity == signature.arity
+                        || (signature.arity > 0 && arity + 1 == signature.arity)
+                })
+            }
         }
     }
 
@@ -1651,6 +1716,14 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn resolve_marker_family(&self, name: &str) -> Option<HirMarkerFamily> {
+        lower_builtin_marker_family(name).or_else(|| {
+            self.marker_families
+                .contains_key(name)
+                .then(|| HirMarkerFamily::User(name.to_owned()))
+        })
+    }
+
     fn check_unsafe_marker_construction(
         &mut self,
         marker_span: Span,
@@ -1658,7 +1731,7 @@ impl<'a> TypeChecker<'a> {
         args: &[Expr],
         scopes: &mut TypeScopeStack,
     ) -> SemanticType {
-        let Some(family) = lower_marker_family(marker_name) else {
+        let Some(family) = self.resolve_marker_family(marker_name) else {
             self.report_unknown_marker(marker_span, marker_name);
             for arg in args {
                 self.check_expr(arg, scopes);
@@ -1666,7 +1739,7 @@ impl<'a> TypeChecker<'a> {
             return SemanticType::Unknown;
         };
 
-        let expected = self.unsafe_marker_arity(family);
+        let expected = self.unsafe_marker_arity(&family);
         if args.len() != expected {
             self.report_marker_constructor_arity(marker_span, marker_name, expected, args.len());
         }
@@ -1682,7 +1755,7 @@ impl<'a> TypeChecker<'a> {
             .unwrap_or(SemanticType::Unknown)
     }
 
-    fn unsafe_marker_arity(&self, family: HirMarkerFamily) -> usize {
+    fn unsafe_marker_arity(&self, family: &HirMarkerFamily) -> usize {
         match family {
             HirMarkerFamily::Event | HirMarkerFamily::True | HirMarkerFamily::False => 1,
             HirMarkerFamily::Equal
@@ -1691,6 +1764,11 @@ impl<'a> TypeChecker<'a> {
             | HirMarkerFamily::LessOrEqual
             | HirMarkerFamily::GreaterOrEqual
             | HirMarkerFamily::MemberOf => 2,
+            HirMarkerFamily::User(name) => self
+                .marker_families
+                .get(name)
+                .map(|signature| signature.arity.max(1))
+                .unwrap_or(1),
         }
     }
 
@@ -2251,10 +2329,8 @@ impl<'a> TypeChecker<'a> {
 
     fn report_unknown_marker(&mut self, span: Span, name: &str) {
         self.diagnostics.push(
-            Diagnostic::error(format!("unknown marker `{name}`")).with_label(Label::primary(
-                span,
-                "expected a builtin marker family here",
-            )),
+            Diagnostic::error(format!("unknown marker `{name}`"))
+                .with_label(Label::primary(span, "expected a known marker family here")),
         );
     }
 
@@ -2263,6 +2339,40 @@ impl<'a> TypeChecker<'a> {
             Diagnostic::error(format!("wrong number of arguments for marker `{name}`")).with_label(
                 Label::primary(span, "marker arguments do not match this family"),
             ),
+        );
+    }
+
+    fn report_duplicate_marker_family(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate marker family `{name}`"))
+                .with_label(Label::primary(
+                    span,
+                    "duplicate marker family declared here",
+                ))
+                .with_label(Label::secondary(
+                    previous,
+                    "first marker family declared here",
+                )),
+        );
+    }
+
+    fn report_builtin_marker_family_shadow(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "marker family `{name}` conflicts with a builtin marker family"
+            ))
+            .with_label(Label::primary(
+                span,
+                "choose a marker family name that is not builtin",
+            )),
+        );
+    }
+
+    fn report_duplicate_marker_family_param(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate marker family parameter `{name}`"))
+                .with_label(Label::primary(span, "duplicate parameter declared here"))
+                .with_label(Label::secondary(previous, "first parameter declared here")),
         );
     }
 
@@ -2457,7 +2567,7 @@ fn item_name_and_kind(item: &Item) -> Option<(&Spanned<String>, ItemKind)> {
     match item {
         Item::Function(function) => Some((&function.name, ItemKind::Function)),
         Item::Task(task) => Some((&task.name, ItemKind::Task)),
-        Item::MarkerRule(_) => None,
+        Item::MarkerFamily(_) | Item::MarkerRule(_) => None,
     }
 }
 
