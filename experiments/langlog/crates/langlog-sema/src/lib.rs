@@ -2464,7 +2464,16 @@ fn item_name_and_kind(item: &Item) -> Option<(&Spanned<String>, ItemKind)> {
 fn is_builtin_companion_rule(name: &str) -> bool {
     matches!(
         name,
-        "Equal" | "LessThan" | "GreaterThan" | "LessOrEqual" | "GreaterOrEqual" | "Sub"
+        "Equal"
+            | "LessThan"
+            | "GreaterThan"
+            | "LessOrEqual"
+            | "GreaterOrEqual"
+            | "Add"
+            | "Sub"
+            | "Mul"
+            | "Div"
+            | "Rem"
     )
 }
 

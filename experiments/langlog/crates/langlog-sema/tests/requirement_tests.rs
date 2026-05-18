@@ -975,12 +975,16 @@ mark LessThan(a: place, b: place, result: place) {
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
-//# This marker slice MUST accept builtin comparison companion rule names and the checked-subtraction companion rule name `Sub`.
+//# This marker slice MUST accept builtin comparison companion rule names and the direct checked-arithmetic companion rule names `Add`, `Sub`, `Mul`, `Div`, and `Rem`.
 #[test]
-fn requirement_llg_mark_06_accepts_sub_companion_rule_name() {
-    let checked = analyze_ok("mark Sub(a: place, amount: place, result: place) {}");
+fn requirement_llg_mark_06_accepts_checked_arithmetic_companion_rule_names() {
+    for name in ["Add", "Sub", "Mul", "Div", "Rem"] {
+        let checked = analyze_ok(&format!(
+            "mark {name}(a: place, amount: place, result: place) {{}}"
+        ));
 
-    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+        assert!(!checked.has_errors(), "{name}: {:#?}", checked.diagnostics);
+    }
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
@@ -998,14 +1002,18 @@ fn requirement_llg_mark_06_rejects_unknown_companion_rule_names() {
 //= type=test
 //# Each accepted builtin companion marker rule name MUST use exactly three `place` parameters.
 #[test]
-fn requirement_llg_mark_06_rejects_wrong_sub_companion_rule_arity() {
-    let checked = analyze_ok("mark Sub(a: place, result: place) {}");
+fn requirement_llg_mark_06_rejects_wrong_checked_arithmetic_companion_rule_arity() {
+    for name in ["Add", "Sub", "Mul", "Div", "Rem"] {
+        let checked = analyze_ok(&format!("mark {name}(a: place, result: place) {{}}"));
 
-    assert!(checked.has_errors());
-    assert_diagnostic_message_contains(
-        &checked,
-        "wrong number of parameters for companion marker rule `Sub`: expected 3, found 2",
-    );
+        assert!(checked.has_errors(), "{name}: expected arity error");
+        assert_diagnostic_message_contains(
+            &checked,
+            &format!(
+                "wrong number of parameters for companion marker rule `{name}`: expected 3, found 2"
+            ),
+        );
+    }
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
@@ -1017,14 +1025,26 @@ fn requirement_llg_mark_06_rejects_duplicate_source_companion_rules() {
         r#"
 mark LessThan(a: place, b: place, result: place) {}
 mark LessThan(a: place, b: place, result: place) {}
+mark Add(a: place, amount: place, result: place) {}
+mark Add(a: place, amount: place, result: place) {}
 mark Sub(a: place, amount: place, result: place) {}
 mark Sub(a: place, amount: place, result: place) {}
+mark Mul(a: place, amount: place, result: place) {}
+mark Mul(a: place, amount: place, result: place) {}
+mark Div(a: place, amount: place, result: place) {}
+mark Div(a: place, amount: place, result: place) {}
+mark Rem(a: place, amount: place, result: place) {}
+mark Rem(a: place, amount: place, result: place) {}
 "#,
     );
 
     assert!(checked.has_errors());
     assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `LessThan`");
+    assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `Add`");
     assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `Sub`");
+    assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `Mul`");
+    assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `Div`");
+    assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `Rem`");
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules

@@ -678,19 +678,107 @@ fn main(values: [u32; 4], index: u32) {
 "#,
     );
     assert_eq!(restored_sub_fact.obligations, 1);
+
+    let (_, default_add_fact) = check_ok(
+        r#"
+fn main(left: u32, amount: u32) {
+    let fallback = 10;
+    unsafe { GreaterThan::mark(left, 1); }
+    unsafe { GreaterThan::mark(fallback, 1); }
+    let sum: u32 with GreaterThan(1) = left + amount or(err) fallback;
+}
+"#,
+    );
+    assert_eq!(default_add_fact.obligations, 1);
+
+    let (_, overridden_add_fact) = check_err(
+        r#"
+mark Add(a: place, amount: place, result: place) {}
+
+fn main(left: u32, amount: u32) {
+    let fallback = 10;
+    unsafe { GreaterThan::mark(left, 1); }
+    unsafe { GreaterThan::mark(fallback, 1); }
+    let sum: u32 with GreaterThan(1) = left + amount or(err) fallback;
+}
+"#,
+    );
+    assert_note_contains(&overridden_add_fact, "required marker: GreaterThan");
+
+    let (checked, overridden_div_fact) = check_err(
+        r#"
+mark Div(a: place, amount: place, result: place) {}
+
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let divided = index / 1 or(err) fallback;
+        values[divided];
+    }
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &overridden_div_fact,
+        "possible out-of-bounds indexing is not proven safe",
+        "divided",
+    );
+
+    let (checked, overridden_rem_fact) = check_err(
+        r#"
+mark Rem(a: place, amount: place, result: place) {}
+
+fn main(values: [u32; 4], index: u32) {
+    let fallback = 0;
+    unsafe { LessThan::mark(fallback, 4); }
+    let reduced = index % 4 or(err) fallback;
+    values[reduced];
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &overridden_rem_fact,
+        "possible out-of-bounds indexing is not proven safe",
+        "reduced",
+    );
+
+    let (_, overridden_mul_fact) = check_ok(
+        r#"
+mark Mul(a: place, amount: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let product = index * 1 or(err) fallback;
+        values[product];
+    }
+}
+"#,
+    );
+    assert_eq!(overridden_mul_fact.obligations, 1);
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
-//# The trusted builtin `Sub` companion rule MUST preserve `LessThan(result, bound)` from `LessThan(a, bound)` for the successful checked subtraction payload.
+//# The trusted builtin `Sub` companion rule MUST preserve upper-bound relation markers, `LessThan` and `LessOrEqual`, from the left operand to the successful checked subtraction payload.
 #[test]
-fn requirement_llg_mark_06_trusted_sub_rule_preserves_success_bounds() {
+fn requirement_llg_mark_06_trusted_sub_rule_preserves_success_upper_bounds() {
     let (_, proof) = check_ok(
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
         let fallback = 0;
+        unsafe { LessOrEqual::mark(index, 3); }
         unsafe { LessThan::mark(fallback, 4); }
+        unsafe { LessOrEqual::mark(fallback, 3); }
         let smaller = index - 1 or(err) fallback;
         values[smaller];
     }
@@ -703,38 +791,163 @@ fn main(values: [u32; 4], index: u32) {
         fact.source == MarkerFactSource::CompanionRule
             && matches!(fact.marker, MarkerPattern::LessThan { .. })
     }));
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessOrEqual { .. })
+    }));
 }
 
-//= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
+//= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
-//# Checked subtraction lowers to a successful payload place that can receive marker facts from the active `Sub` companion rule.
+//# The trusted builtin `Add` companion rule MUST preserve lower-bound relation markers, `GreaterThan` and `GreaterOrEqual`, from either operand to the successful checked addition payload.
 #[test]
-fn requirement_llg_pir_03_checked_sub_lowers_success_payload_place() {
+fn requirement_llg_mark_06_trusted_add_rule_preserves_success_lower_bounds() {
     let (_, proof) = check_ok(
         r#"
-fn main(index: u32) {
-    let fallback = 0;
-    let smaller = index - 1 or(err) fallback;
+fn main(left: u32, right: u32) {
+    let fallback = 10;
+    unsafe { GreaterThan::mark(left, 1); }
+    unsafe { GreaterOrEqual::mark(right, 2); }
+    unsafe { GreaterThan::mark(fallback, 1); }
+    unsafe { GreaterOrEqual::mark(fallback, 2); }
+    let sum = left + right or(err) fallback;
+    sum;
 }
 "#,
     );
 
-    assert!(proof_entries(&proof).iter().any(|entry| {
-        matches!(
-            entry,
-            ProofEntry::Recover {
-                result: ProofExpr {
-                    kind: ProofExprKind::Binary {
-                        op: langlog_syntax::ast::BinaryOp::Sub,
-                        success_place: Some(_),
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::RecoveryMerge
+            && matches!(fact.marker, MarkerPattern::GreaterThan { .. })
+    }));
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::RecoveryMerge
+            && matches!(fact.marker, MarkerPattern::GreaterOrEqual { .. })
+    }));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# The trusted builtin `Div` companion rule MUST preserve upper-bound relation markers, `LessThan` and `LessOrEqual`, from the dividend to the successful checked division payload.
+#[test]
+fn requirement_llg_mark_06_trusted_div_rule_preserves_success_upper_bounds() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessOrEqual::mark(index, 3); }
+        unsafe { LessThan::mark(fallback, 4); }
+        unsafe { LessOrEqual::mark(fallback, 3); }
+        let divided = index / 1 or(err) fallback;
+        values[divided];
+    }
+}
+"#,
+    );
+
+    assert_eq!(proof.obligations, 1);
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })
+    }));
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessOrEqual { .. })
+    }));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# The trusted builtin `Rem` companion rule MUST emit `LessThan(result, amount)` for the successful checked remainder payload.
+#[test]
+fn requirement_llg_mark_06_trusted_rem_rule_emits_success_bound() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(values: [u32; 4], raw: u32) {
+    let fallback = 0;
+    unsafe { LessThan::mark(fallback, 4); }
+    let reduced = raw % 4 or(err) fallback;
+    values[reduced];
+}
+"#,
+    );
+
+    assert_eq!(proof.obligations, 1);
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })
+    }));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# The trusted builtin `Mul` companion rule MUST emit no marker facts by default.
+#[test]
+fn requirement_llg_mark_06_trusted_mul_rule_emits_no_facts_by_default() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let product = index * 1 or(err) fallback;
+        values[product];
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "product",
+    );
+}
+
+//= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
+//= type=test
+//# Direct checked `u32` arithmetic lowers to a successful payload place that can receive marker facts from the active arithmetic companion rule.
+#[test]
+fn requirement_llg_pir_03_direct_checked_arithmetic_lowers_success_payload_place() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(index: u32) {
+    let fallback = 0;
+    let added = index + 1 or(err) fallback;
+    let smaller = index - 1 or(err) fallback;
+    let product = index * 1 or(err) fallback;
+    let divided = index / 1 or(err) fallback;
+    let reduced = index % 1 or(err) fallback;
+}
+"#,
+    );
+
+    for expected in [
+        langlog_syntax::ast::BinaryOp::Add,
+        langlog_syntax::ast::BinaryOp::Sub,
+        langlog_syntax::ast::BinaryOp::Mul,
+        langlog_syntax::ast::BinaryOp::Div,
+        langlog_syntax::ast::BinaryOp::Rem,
+    ] {
+        assert!(proof_entries(&proof).iter().any(|entry| {
+            matches!(
+                entry,
+                ProofEntry::Recover {
+                    result: ProofExpr {
+                        kind: ProofExprKind::Binary {
+                            op,
+                            success_place: Some(_),
+                            ..
+                        },
                         ..
                     },
                     ..
-                },
-                ..
-            }
-        )
-    }));
+                } if *op == expected
+            )
+        }));
+    }
 }
 
 //= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
@@ -768,9 +981,9 @@ fn main(values: [u32; 4], index: u32) {
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
-//# `Sub` marker transfer MUST apply only to direct checked `u32 - u32` subtraction success payloads in this slice.
+//# Direct checked-arithmetic marker transfer MUST apply only to direct checked `u32` arithmetic success payloads for `+`, `-`, `*`, `/`, and `%` in this slice.
 #[test]
-fn requirement_llg_mark_06_sub_transfer_excludes_result_lifted_subtraction() {
+fn requirement_llg_mark_06_direct_arithmetic_transfer_excludes_result_lifted_operands() {
     let (checked, proof) = check_err(
         r#"
 fn main(values: [u32; 4], index: u32) {
@@ -791,6 +1004,39 @@ fn main(values: [u32; 4], index: u32) {
         "possible out-of-bounds indexing is not proven safe",
         "smaller",
     );
+
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], raw: u32) {
+    let checked: Result<u32, ArithmeticError> = ok(raw);
+    let fallback = 0;
+    unsafe { LessThan::mark(fallback, 4); }
+    let reduced = checked % 4 or(err) fallback;
+    values[reduced];
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "reduced",
+    );
+
+    let (_, proof) = check_err(
+        r#"
+fn main(left: u32, amount: u32) {
+    let checked: Result<u32, ArithmeticError> = ok(left);
+    let fallback = 10;
+    unsafe { GreaterThan::mark(left, 1); }
+    unsafe { GreaterThan::mark(fallback, 1); }
+    let sum: u32 with GreaterThan(1) = checked + amount or(err) fallback;
+}
+"#,
+    );
+
+    assert_note_contains(&proof, "required marker: GreaterThan");
 }
 
 //= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources

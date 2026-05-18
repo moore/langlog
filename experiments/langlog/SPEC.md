@@ -323,7 +323,8 @@ facts produced by that operator. Companion marker rules MUST use `mark`, `place`
 `implies`, and marker-pattern bindings such as `?bound`.
 
 This marker slice MUST accept builtin comparison companion rule names and the
-checked-subtraction companion rule name `Sub`.
+direct checked-arithmetic companion rule names `Add`, `Sub`, `Mul`, `Div`, and
+`Rem`.
 Unknown companion marker rule names MUST be rejected.
 Each accepted builtin companion marker rule name MUST use exactly three
 `place` parameters.
@@ -376,8 +377,8 @@ mark LessThan(a: place, b: place, result: place) {
 }
 ```
 
-For value-producing operators, implications apply to the successful result of
-the operation:
+For value-producing direct checked `u32` arithmetic operators, implications
+apply to the successful `Ok(u32)` payload of the operation:
 
 ```llg
 mark Sub(a: place, amount: place, result: place) {
@@ -387,10 +388,21 @@ mark Sub(a: place, amount: place, result: place) {
 }
 ```
 
-The trusted builtin `Sub` companion rule MUST preserve `LessThan(result, bound)`
-from `LessThan(a, bound)` for the successful checked subtraction payload.
-`Sub` marker transfer MUST apply only to direct checked `u32 - u32` subtraction
-success payloads in this slice.
+The trusted builtin `Add` companion rule MUST preserve lower-bound relation
+markers, `GreaterThan` and `GreaterOrEqual`, from either operand to the
+successful checked addition payload.
+The trusted builtin `Sub` companion rule MUST preserve upper-bound relation
+markers, `LessThan` and `LessOrEqual`, from the left operand to the successful
+checked subtraction payload.
+The trusted builtin `Div` companion rule MUST preserve upper-bound relation
+markers, `LessThan` and `LessOrEqual`, from the dividend to the successful
+checked division payload.
+The trusted builtin `Rem` companion rule MUST emit `LessThan(result, amount)`
+for the successful checked remainder payload.
+The trusted builtin `Mul` companion rule MUST emit no marker facts by default.
+Direct checked-arithmetic marker transfer MUST apply only to direct checked
+`u32` arithmetic success payloads for `+`, `-`, `*`, `/`, and `%` in this
+slice.
 
 If no companion marker rule applies, the operation MUST NOT preserve the input
 marker facts onto the result.

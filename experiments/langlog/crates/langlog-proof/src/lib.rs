@@ -806,7 +806,7 @@ impl ProofLowerer {
                 let left = self.lower_expr(left, entries)?;
                 let right = self.lower_expr(right, entries)?;
                 let value = eval_binary_value(*op, left.value(self), right.value(self));
-                let success_place = self.checked_sub_success_place(expr, *op, &left, &right);
+                let success_place = self.checked_arithmetic_success_place(expr, *op, &left, &right);
                 let place = self.new_temp(expr.ty.clone(), expr.span, value);
                 (
                     ProofExprKind::Binary {
@@ -905,14 +905,17 @@ impl ProofLowerer {
         })
     }
 
-    fn checked_sub_success_place(
+    fn checked_arithmetic_success_place(
         &mut self,
         expr: &HirExpr,
         op: BinaryOp,
         left: &ProofExpr,
         right: &ProofExpr,
     ) -> Option<PlaceId> {
-        if op != BinaryOp::Sub || left.ty != HirType::U32 || right.ty != HirType::U32 {
+        if !is_checked_arithmetic_companion_op(op)
+            || left.ty != HirType::U32
+            || right.ty != HirType::U32
+        {
             return None;
         }
         let HirType::Result { ok, err } = &expr.ty else {
@@ -921,12 +924,7 @@ impl ProofLowerer {
         if **ok != HirType::U32 || **err != HirType::ArithmeticError {
             return None;
         }
-        let value = match (left.value(self), right.value(self)) {
-            (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => {
-                left.checked_sub(right).map(PlaceValue::U32)
-            }
-            _ => None,
-        };
+        let value = checked_arithmetic_value(op, left.value(self), right.value(self));
         Some(self.new_temp(HirType::U32, expr.span, value))
     }
 
@@ -1826,16 +1824,19 @@ impl<'a> Checker<'a> {
 
     fn apply_recovery_success_companions(&mut self, env: &mut MarkerEnv, result: &ProofExpr) {
         if let ProofExprKind::Binary {
-            op: BinaryOp::Sub,
+            op,
             left,
             right,
             success_place: Some(success_place),
         } = &result.kind
         {
+            let Some(name) = arithmetic_companion_name(*op) else {
+                return;
+            };
             self.apply_companion_rule(
                 env,
                 CompanionInvocation {
-                    name: "Sub",
+                    name,
                     places: vec![left.place, right.place, *success_place],
                     origin_span: result.span,
                 },
@@ -1845,11 +1846,7 @@ impl<'a> Checker<'a> {
 
     fn recovery_success_place(&self, result: &ProofExpr) -> Option<PlaceId> {
         match &result.kind {
-            ProofExprKind::Binary {
-                op: BinaryOp::Sub,
-                success_place,
-                ..
-            } => *success_place,
+            ProofExprKind::Binary { success_place, .. } => *success_place,
             _ => None,
         }
     }
@@ -2578,6 +2575,21 @@ fn comparison_invocation(
     observe_invocation(op, left, right, result, origin_span)
 }
 
+fn arithmetic_companion_name(op: BinaryOp) -> Option<&'static str> {
+    match op {
+        BinaryOp::Add => Some("Add"),
+        BinaryOp::Sub => Some("Sub"),
+        BinaryOp::Mul => Some("Mul"),
+        BinaryOp::Div => Some("Div"),
+        BinaryOp::Rem => Some("Rem"),
+        _ => None,
+    }
+}
+
+fn is_checked_arithmetic_companion_op(op: BinaryOp) -> bool {
+    arithmetic_companion_name(op).is_some()
+}
+
 fn observe_invocation(
     op: ObserveOp,
     left: PlaceId,
@@ -2603,6 +2615,7 @@ fn observe_invocation(
 fn builtin_companion_rules() -> HashMap<String, ProofMarkerRule> {
     [
         builtin_equal_rule(),
+        builtin_add_rule(),
         builtin_order_rule(
             "LessThan",
             HirMarkerFamily::LessThan,
@@ -2631,7 +2644,10 @@ fn builtin_companion_rules() -> HashMap<String, ProofMarkerRule> {
             HirMarkerFamily::LessThan,
             HirMarkerFamily::GreaterThan,
         ),
+        builtin_mul_rule(),
         builtin_sub_rule(),
+        builtin_div_rule(),
+        builtin_rem_rule(),
     ]
     .into_iter()
     .map(|rule| (rule.name.clone(), rule))
@@ -2694,35 +2710,75 @@ fn builtin_order_rule(
     )
 }
 
+fn builtin_add_rule() -> ProofMarkerRule {
+    builtin_rule(
+        "Add",
+        vec![
+            preserve_relation_from_subject("a", HirMarkerFamily::GreaterThan),
+            preserve_relation_from_subject("a", HirMarkerFamily::GreaterOrEqual),
+            preserve_relation_from_subject("b", HirMarkerFamily::GreaterThan),
+            preserve_relation_from_subject("b", HirMarkerFamily::GreaterOrEqual),
+        ],
+    )
+}
+
 fn builtin_sub_rule() -> ProofMarkerRule {
     builtin_rule(
         "Sub",
-        vec![ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
-            subject: "a".to_owned(),
-            marker: marker_template(
-                HirMarkerFamily::LessThan,
-                vec![
-                    ProofMarkerTemplateArg::Place("a".to_owned()),
-                    ProofMarkerTemplateArg::Binding("bound".to_owned()),
-                ],
-            ),
-            body: ProofMarkerRuleBlock {
-                statements: vec![ProofMarkerRuleStmt::Implies(ProofMarkerImplication {
-                    marker: marker_template(
-                        HirMarkerFamily::LessThan,
-                        vec![
-                            ProofMarkerTemplateArg::Place("result".to_owned()),
-                            ProofMarkerTemplateArg::Place("bound".to_owned()),
-                        ],
-                    ),
-                    target: "result".to_owned(),
-                    span: empty_span(),
-                })],
-                span: empty_span(),
-            },
-            span: empty_span(),
-        })],
+        vec![
+            preserve_relation_from_subject("a", HirMarkerFamily::LessThan),
+            preserve_relation_from_subject("a", HirMarkerFamily::LessOrEqual),
+        ],
     )
+}
+
+fn builtin_mul_rule() -> ProofMarkerRule {
+    builtin_rule("Mul", Vec::new())
+}
+
+fn builtin_div_rule() -> ProofMarkerRule {
+    builtin_rule(
+        "Div",
+        vec![
+            preserve_relation_from_subject("a", HirMarkerFamily::LessThan),
+            preserve_relation_from_subject("a", HirMarkerFamily::LessOrEqual),
+        ],
+    )
+}
+
+fn builtin_rem_rule() -> ProofMarkerRule {
+    builtin_rule(
+        "Rem",
+        vec![implies(HirMarkerFamily::LessThan, "result", "b", "result")],
+    )
+}
+
+fn preserve_relation_from_subject(subject: &str, family: HirMarkerFamily) -> ProofMarkerRuleStmt {
+    ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
+        subject: subject.to_owned(),
+        marker: marker_template(
+            family,
+            vec![
+                ProofMarkerTemplateArg::Place(subject.to_owned()),
+                ProofMarkerTemplateArg::Binding("bound".to_owned()),
+            ],
+        ),
+        body: ProofMarkerRuleBlock {
+            statements: vec![ProofMarkerRuleStmt::Implies(ProofMarkerImplication {
+                marker: marker_template(
+                    family,
+                    vec![
+                        ProofMarkerTemplateArg::Place("result".to_owned()),
+                        ProofMarkerTemplateArg::Place("bound".to_owned()),
+                    ],
+                ),
+                target: "result".to_owned(),
+                span: empty_span(),
+            })],
+            span: empty_span(),
+        },
+        span: empty_span(),
+    })
 }
 
 fn builtin_rule(name: &str, statements: Vec<ProofMarkerRuleStmt>) -> ProofMarkerRule {
@@ -2801,6 +2857,25 @@ fn eval_binary_value(
         }
         _ => None,
     }
+}
+
+fn checked_arithmetic_value(
+    op: BinaryOp,
+    left: Option<PlaceValue>,
+    right: Option<PlaceValue>,
+) -> Option<PlaceValue> {
+    let (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) = (left, right) else {
+        return None;
+    };
+    match op {
+        BinaryOp::Add => left.checked_add(right),
+        BinaryOp::Sub => left.checked_sub(right),
+        BinaryOp::Mul => left.checked_mul(right),
+        BinaryOp::Div if right != 0 => Some(left / right),
+        BinaryOp::Rem if right != 0 => Some(left % right),
+        _ => None,
+    }
+    .map(PlaceValue::U32)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

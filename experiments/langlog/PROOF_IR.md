@@ -49,8 +49,8 @@ This document complements, but does not replace, the main language spec:
   implications, assignment identity, and immutable marker carry-forward.
 - Comparison-based control-flow tests MUST lower to truth-marker facts on the
   condition result place.
-- Checked subtraction lowers to a successful payload place that can receive
-  marker facts from the active `Sub` companion rule.
+- Direct checked `u32` arithmetic lowers to a successful payload place that can
+  receive marker facts from the active arithmetic companion rule.
 - Result recovery lowers to separate success and fallback marker paths, and the
   recovered place receives only marker facts proven on both paths.
 - Marker facts that survive result recovery merging MUST use a recovery-merge
@@ -234,8 +234,8 @@ The first HIR-to-Proof-IR lowering is expected to follow these rules:
   marker environment after branch or observe truth facts have been introduced.
 - Source companion marker rules MAY override trusted builtin companion rules in
   the active Proof IR rule set.
-- Checked subtraction lowers to a successful payload place that can receive
-  marker facts from the active `Sub` companion rule.
+- Direct checked `u32` arithmetic lowers to a successful payload place that can
+  receive marker facts from the active arithmetic companion rule.
 - Result recovery lowers to separate success and fallback marker paths, and the
   recovered place receives only marker facts proven on both paths.
 - Marker facts that survive result recovery merging MUST use a recovery-merge
