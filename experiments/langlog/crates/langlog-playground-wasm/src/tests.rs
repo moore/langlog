@@ -161,6 +161,8 @@ fn requirement_llg_wasm_06_playground_examples_include_finite_task_state_cycle()
     let result = build_result(source, true);
 
     assert!(source.contains("exit"));
+    assert!(source.contains("Event::mark"));
+    assert!(!source.contains("read_u32()"));
     assert!(result.success, "cycle example should build");
     assert!(result.can_run, "cycle example should be runnable");
 }

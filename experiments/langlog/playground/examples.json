@@ -5,7 +5,7 @@
   },
   {
     "name": "02 - Task State Loop",
-    "source": "// go transitions replace primitive forever loops.\ntask main() -> u32 {\n    state start() {\n        go count(0);\n    }\n\n    state count(value: u32) {\n        if value == 42 {\n            exit value;\n        }\n\n        let pulse = read_u32();\n        go count(value + 1 or(err) 0);\n    }\n}\n"
+    "source": "// go transitions replace primitive forever loops.\ntask main() -> u32 {\n    state start() {\n        go count(0);\n    }\n\n    state count(value: u32) {\n        if value == 42 {\n            exit value;\n        }\n\n        let pulse: u32 with Event = unsafe { Event::mark(value) };\n        go count(pulse + 1 or(err) 0);\n    }\n}\n"
   },
   {
     "name": "03 - Task Go",
@@ -13,11 +13,11 @@
   },
   {
     "name": "04 - Cyclic Task Countdown",
-    "source": "// Cyclic go transitions are bounded by the dispatcher state bank.\ntask main() -> u32 {\n    state start() {\n        go count(3);\n    }\n\n    state count(value: u32) {\n        if value == 0 {\n            exit 42;\n        } else {\n            let pulse = read_u32();\n            go count(value - 1 or(err) 0);\n        }\n    }\n}\n"
+    "source": "// Cyclic go transitions are bounded by the dispatcher state bank.\ntask main() -> u32 {\n    state start() {\n        go count(3);\n    }\n\n    state count(value: u32) {\n        if value == 0 {\n            exit 42;\n        } else {\n            let pulse: u32 with Event = unsafe { Event::mark(value) };\n            go count(pulse - 1 or(err) 0);\n        }\n    }\n}\n"
   },
   {
     "name": "05 - Go Argument State",
-    "source": "// go arguments are evaluated before active state arguments are replaced.\ntask main() -> u32 {\n    state start() {\n        go swap(7, 42);\n    }\n\n    state swap(first: u32, second: u32) {\n        if first == 42 {\n            exit second;\n        } else {\n            let pulse = read_u32();\n            go swap(second, first);\n        }\n    }\n}\n"
+    "source": "// go arguments are evaluated before active state arguments are replaced.\ntask main() -> u32 {\n    state start() {\n        go swap(7, 42);\n    }\n\n    state swap(first: u32, second: u32) {\n        if first == 42 {\n            exit second;\n        } else {\n            let fresh_first: u32 with Event = unsafe { Event::mark(first) };\n            go swap(second, fresh_first);\n        }\n    }\n}\n"
   },
   {
     "name": "06 - Functions",
