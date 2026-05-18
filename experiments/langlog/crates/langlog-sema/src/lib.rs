@@ -551,8 +551,6 @@ impl<'a> Analyzer<'a> {
             Stmt::Observe(stmt) => {
                 self.analyze_expr(&stmt.left, scopes, context);
                 self.analyze_expr(&stmt.right, scopes, context);
-                self.check_observe_expr_stability(&stmt.left, scopes);
-                self.check_observe_expr_stability(&stmt.right, scopes);
                 self.analyze_block(&stmt.else_block, scopes, context);
                 if !is_terminal_block(&stmt.else_block, terminal_kind(context.item.kind)) {
                     self.report_non_terminal_observe_else(stmt.else_block.span);
@@ -960,72 +958,6 @@ impl<'a> Analyzer<'a> {
                 Label::primary(target_span, "mark this binding `mut` to assign to it"),
             ),
         );
-    }
-
-    fn report_mutable_observe_binding(&mut self, binding_span: Span) {
-        self.diagnostics.push(
-            Diagnostic::error("mutable bindings are not allowed in `observe` proof expressions")
-                .with_label(Label::primary(
-                    binding_span,
-                    "proof expressions must not reference `mut` bindings",
-                )),
-        );
-    }
-
-    fn check_observe_expr_stability(&mut self, expr: &Expr, scopes: &ScopeStack) {
-        match &expr.kind {
-            ExprKind::Int(_) | ExprKind::Bool(_) => {}
-            ExprKind::Name(name) => {
-                if scopes
-                    .lookup(name.value.as_str())
-                    .or_else(|| self.items.get(name.value.as_str()).copied())
-                    .is_some_and(|binding| binding.mutable)
-                {
-                    self.report_mutable_observe_binding(name.span);
-                }
-            }
-            ExprKind::Tuple(elements) | ExprKind::Array(elements) => {
-                for element in elements {
-                    self.check_observe_expr_stability(element, scopes);
-                }
-            }
-            ExprKind::Block(block) => {
-                for statement in &block.statements {
-                    if let Stmt::Expr(stmt) = statement {
-                        self.check_observe_expr_stability(&stmt.expr, scopes);
-                    }
-                }
-                if let Some(expr) = &block.trailing_expr {
-                    self.check_observe_expr_stability(expr, scopes);
-                }
-            }
-            ExprKind::Unary { expr, .. } | ExprKind::Grouped(expr) => {
-                self.check_observe_expr_stability(expr, scopes);
-            }
-            ExprKind::Binary { left, right, .. } => {
-                self.check_observe_expr_stability(left, scopes);
-                self.check_observe_expr_stability(right, scopes);
-            }
-            ExprKind::Recover { expr, fallback, .. } => {
-                self.check_observe_expr_stability(expr, scopes);
-                self.check_observe_expr_stability(fallback, scopes);
-            }
-            ExprKind::Call { callee, args } => {
-                self.check_observe_expr_stability(callee, scopes);
-                for arg in args {
-                    self.check_observe_expr_stability(arg, scopes);
-                }
-            }
-            ExprKind::Index { target, index } => {
-                self.check_observe_expr_stability(target, scopes);
-                self.check_observe_expr_stability(index, scopes);
-            }
-            ExprKind::UnsafeMarker(construction) => {
-                for arg in &construction.args {
-                    self.check_observe_expr_stability(arg, scopes);
-                }
-            }
-        }
     }
 }
 

@@ -504,8 +504,8 @@ help: add a receive, timer, or unsafe Event::mark-backed operation in the cycle
 ## LLG-SEMA-03 Mutability And Stable Facts
 
 - The semantic phase MUST reject assignment to immutable bindings.
-- In phase 1, the semantic phase MUST reject `observe` proof expressions that
-  directly reference mutable bindings.
+- The semantic phase MUST allow `observe` proof expressions to reference
+  mutable bindings; marker validity is enforced by SSA place versioning.
 
 ## LLG-SEMA-04 Initial Type Checking
 

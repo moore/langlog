@@ -850,6 +850,24 @@ fn main(values: [u32; 4]) {
         mutable_safe.diagnostics
     );
 
+    let (_, mutable_observe_safe) = check_ok(
+        r#"
+fn main(values: [u32; 4]) {
+    let mut index = 0;
+    observe index < 4 else {
+        return;
+    }
+    values[index];
+}
+"#,
+    );
+    assert_eq!(mutable_observe_safe.obligations, 1);
+    assert!(mutable_observe_safe
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::Observe
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })));
+
     let (checked, stale_after_assignment) = check_err(
         r#"
 fn main(values: [u32; 4]) {
@@ -871,6 +889,29 @@ fn main(values: [u32; 4]) {
     assert_note_contains(&stale_after_assignment, "known near-miss marker");
     assert_note_contains(&stale_after_assignment, "index#1");
     assert!(!stale_after_assignment.has_warnings());
+
+    let (checked, stale_after_observe_assignment) = check_err(
+        r#"
+fn main(values: [u32; 4]) {
+    let mut index = 0;
+    observe index < 4 else {
+        return;
+    }
+    index = 4;
+    values[index];
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &stale_after_observe_assignment,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+    assert_note_contains(&stale_after_observe_assignment, "known near-miss marker");
+    assert_note_contains(&stale_after_observe_assignment, "index#1");
+    assert!(!stale_after_observe_assignment.has_warnings());
 }
 
 //= SPEC.md#llg-mark-02-function-boundaries

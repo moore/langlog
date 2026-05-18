@@ -891,10 +891,9 @@ fn main(param: u32) {
 
 //= SPEC.md#llg-sema-03-mutability-and-stable-facts
 //= type=test
-//# In phase 1, the semantic phase MUST reject `observe` proof expressions that directly reference mutable bindings.
+//# The semantic phase MUST allow `observe` proof expressions to reference mutable bindings; marker validity is enforced by SSA place versioning.
 #[test]
-fn requirement_llg_sema_03_rejects_observe_proof_expressions_that_directly_reference_mutable_bindings(
-) {
+fn requirement_llg_sema_03_allows_observe_proof_expressions_that_reference_mutable_bindings() {
     let checked = analyze_ok(
         r#"
 fn main(limit: u32) {
@@ -914,27 +913,21 @@ fn main(limit: u32) {
 }
 "#,
     );
-    assert!(checked.has_errors());
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
 
     let main = function(&checked, "main");
-
-    // Reject a proof expression that directly mentions a mutable binding.
-    assert_primary_diagnostic(
-        &checked,
-        "mutable bindings are not allowed in `observe` proof expressions",
-        name_span(&observe_stmt(&main.body, 3).left),
+    assert!(
+        checked
+            .resolution(name_span(&observe_stmt(&main.body, 3).left))
+            .is_some(),
+        "expected mutable `total` observe to resolve"
     );
-
-    // Accept an immutable snapshot of a mutable value in phase 1.
     assert!(
         checked
             .resolution(name_span(&observe_stmt(&main.body, 4).left))
             .is_some(),
-        "expected `snapshot` observe to remain valid"
+        "expected immutable `snapshot` observe to resolve"
     );
-
-    // The immutable snapshot and immutable parameter binding should not add more errors.
-    assert_eq!(checked.diagnostics.len(), 1);
 }
 
 //= SPEC.md#llg-sema-04-initial-type-checking
