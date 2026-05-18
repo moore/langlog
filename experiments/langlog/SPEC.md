@@ -322,7 +322,11 @@ Each syntax operator MAY have a companion marker rule that describes marker
 facts produced by that operator. Companion marker rules MUST use `mark`, `place`,
 `implies`, and marker-pattern bindings such as `?bound`.
 
-This marker slice MUST accept only builtin comparison companion rule names.
+This marker slice MUST accept builtin comparison companion rule names and the
+checked-subtraction companion rule name `Sub`.
+Unknown companion marker rule names MUST be rejected.
+Each accepted builtin companion marker rule name MUST use exactly three
+`place` parameters.
 Companion marker rules MUST reject unknown marker families in refinements and
 implications.
 Companion marker rules MUST lower refinement-pattern bindings and implications
@@ -330,7 +334,7 @@ into Proof IR marker-rule templates.
 Control-flow comparison marker facts MUST be emitted as companion-rule
 implications.
 Trusted builtin comparison companion rules MUST be active by default.
-A source companion marker rule with a builtin comparison name MUST override the
+A source companion marker rule with a builtin companion name MUST override the
 trusted builtin rule with the same name.
 Companion marker rules MUST be evaluated during marker checking against the
 current marker environment.
@@ -382,6 +386,11 @@ mark Sub(a: place, amount: place, result: place) {
     }
 }
 ```
+
+The trusted builtin `Sub` companion rule MUST preserve `LessThan(result, bound)`
+from `LessThan(a, bound)` for the successful checked subtraction payload.
+`Sub` marker transfer MUST apply only to direct checked `u32 - u32` subtraction
+success payloads in this slice.
 
 If no companion marker rule applies, the operation MUST NOT preserve the input
 marker facts onto the result.

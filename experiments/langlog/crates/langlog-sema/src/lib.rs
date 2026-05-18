@@ -2300,7 +2300,7 @@ impl<'a> TypeChecker<'a> {
             Diagnostic::error(format!("unknown companion marker rule `{name}`")).with_label(
                 Label::primary(
                     span,
-                    "expected a builtin comparison companion rule name here",
+                    "expected a builtin comparison or checked-arithmetic companion rule name here",
                 ),
             ),
         );
@@ -2464,7 +2464,7 @@ fn item_name_and_kind(item: &Item) -> Option<(&Spanned<String>, ItemKind)> {
 fn is_builtin_companion_rule(name: &str) -> bool {
     matches!(
         name,
-        "Equal" | "LessThan" | "GreaterThan" | "LessOrEqual" | "GreaterOrEqual"
+        "Equal" | "LessThan" | "GreaterThan" | "LessOrEqual" | "GreaterOrEqual" | "Sub"
     )
 }
 

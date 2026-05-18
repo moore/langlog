@@ -62,6 +62,7 @@ pub enum MarkerFactSource {
     ControlFlowFalse,
     CompanionRule,
     AssignmentIdentity,
+    RecoveryMerge,
     ImmutableCarryForward,
     TrustedBuiltin,
     UnsafeConstruction,
@@ -256,6 +257,12 @@ pub enum ProofEntry {
         else_block: ProofBlock,
         span: Span,
     },
+    Recover {
+        result: ProofExpr,
+        fallback: ProofRecoveryArm,
+        recovered: PlaceId,
+        span: Span,
+    },
     For {
         iterable: ProofExpr,
         membership: Option<ProofSetMembership>,
@@ -284,12 +291,19 @@ impl ProofEntry {
             | Self::Assign { span, .. }
             | Self::Branch { span, .. }
             | Self::Observe { span, .. }
+            | Self::Recover { span, .. }
             | Self::For { span, .. }
             | Self::Obligation { span, .. }
             | Self::Eval { span, .. }
             | Self::Scope { span, .. } => *span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofRecoveryArm {
+    pub block: ProofBlock,
+    pub value: ProofExpr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +337,11 @@ pub enum ProofExprKind {
         op: BinaryOp,
         left: Box<ProofExpr>,
         right: Box<ProofExpr>,
+        success_place: Option<PlaceId>,
+    },
+    Recover {
+        result: Box<ProofExpr>,
+        fallback: Box<ProofExpr>,
     },
     Call {
         callee: Box<ProofExpr>,
@@ -787,20 +806,39 @@ impl ProofLowerer {
                 let left = self.lower_expr(left, entries)?;
                 let right = self.lower_expr(right, entries)?;
                 let value = eval_binary_value(*op, left.value(self), right.value(self));
+                let success_place = self.checked_sub_success_place(expr, *op, &left, &right);
                 let place = self.new_temp(expr.ty.clone(), expr.span, value);
                 (
                     ProofExprKind::Binary {
                         op: *op,
                         left: Box::new(left),
                         right: Box::new(right),
+                        success_place,
                     },
                     place,
                 )
             }
-            HirExprKind::Recover { expr, fallback, .. } => {
-                self.lower_expr(expr, entries);
-                self.lower_expr(fallback, entries);
-                return None;
+            HirExprKind::Recover {
+                expr: result,
+                fallback,
+                ..
+            } => {
+                let result = self.lower_expr(result, entries)?;
+                let fallback = self.lower_recovery_arm(fallback)?;
+                let recovered = self.new_temp(expr.ty.clone(), expr.span, None);
+                entries.push(ProofEntry::Recover {
+                    result: result.clone(),
+                    fallback: fallback.clone(),
+                    recovered,
+                    span: expr.span,
+                });
+                (
+                    ProofExprKind::Recover {
+                        result: Box::new(result),
+                        fallback: Box::new(fallback.value),
+                    },
+                    recovered,
+                )
             }
             HirExprKind::Call { callee, args } => {
                 let callee = self.lower_expr(callee, entries)?;
@@ -865,6 +903,80 @@ impl ProofLowerer {
             span: expr.span,
             place,
         })
+    }
+
+    fn checked_sub_success_place(
+        &mut self,
+        expr: &HirExpr,
+        op: BinaryOp,
+        left: &ProofExpr,
+        right: &ProofExpr,
+    ) -> Option<PlaceId> {
+        if op != BinaryOp::Sub || left.ty != HirType::U32 || right.ty != HirType::U32 {
+            return None;
+        }
+        let HirType::Result { ok, err } = &expr.ty else {
+            return None;
+        };
+        if **ok != HirType::U32 || **err != HirType::ArithmeticError {
+            return None;
+        }
+        let value = match (left.value(self), right.value(self)) {
+            (Some(PlaceValue::U32(left)), Some(PlaceValue::U32(right))) => {
+                left.checked_sub(right).map(PlaceValue::U32)
+            }
+            _ => None,
+        };
+        Some(self.new_temp(HirType::U32, expr.span, value))
+    }
+
+    fn lower_recovery_arm(&mut self, expr: &HirExpr) -> Option<ProofRecoveryArm> {
+        let saved_places = self.binding_places.clone();
+        let saved_versions = self.binding_versions.clone();
+        let (block, value) = match &expr.kind {
+            HirExprKind::Block(block) => self.lower_recovery_block(block),
+            _ => {
+                let mut entries = Vec::new();
+                let value = self.lower_expr(expr, &mut entries)?;
+                (
+                    ProofBlock {
+                        entries,
+                        span: expr.span,
+                    },
+                    value,
+                )
+            }
+        };
+        self.binding_places = saved_places;
+        self.binding_versions = saved_versions;
+        Some(ProofRecoveryArm { block, value })
+    }
+
+    fn lower_recovery_block(&mut self, block: &HirBlock) -> (ProofBlock, ProofExpr) {
+        let mut entries = Vec::new();
+        for statement in &block.statements {
+            self.lower_statement(statement, &mut entries);
+        }
+        let value = block
+            .result
+            .as_ref()
+            .and_then(|result| self.lower_expr(result, &mut entries))
+            .unwrap_or_else(|| {
+                let place = self.new_temp(HirType::Unit, block.span, None);
+                ProofExpr {
+                    kind: ProofExprKind::Tuple(Vec::new()),
+                    ty: HirType::Unit,
+                    span: block.span,
+                    place,
+                }
+            });
+        (
+            ProofBlock {
+                entries,
+                span: block.span,
+            },
+            value,
+        )
     }
 
     fn insert_trailing_return_marker_obligations(&mut self, body: &mut ProofBlock) {
@@ -1285,6 +1397,7 @@ impl ProofLowerer {
                 op: BinaryOp::And,
                 left,
                 right,
+                ..
             } if truth => {
                 facts.extend(self.condition_facts(left, true, left.span));
                 facts.extend(self.condition_facts(right, true, right.span));
@@ -1518,6 +1631,12 @@ impl<'a> Checker<'a> {
                 self.add_facts(env, facts);
                 self.apply_observe_companion(env, left, *op, right, *result, *span);
             }
+            ProofEntry::Recover {
+                result,
+                fallback,
+                recovered,
+                span,
+            } => self.check_recover(env, result, fallback, *recovered, *span),
             ProofEntry::For {
                 membership, body, ..
             } => {
@@ -1624,6 +1743,7 @@ impl<'a> Checker<'a> {
                 op: BinaryOp::And,
                 left,
                 right,
+                ..
             } if truth => {
                 self.apply_condition_companions(env, left, true);
                 self.apply_condition_companions(env, right, true);
@@ -1631,7 +1751,9 @@ impl<'a> Checker<'a> {
             ProofExprKind::Binary {
                 op: BinaryOp::Or, ..
             } => {}
-            ProofExprKind::Binary { op, left, right } => {
+            ProofExprKind::Binary {
+                op, left, right, ..
+            } => {
                 if let Some(invocation) = comparison_invocation(
                     *op,
                     left.place,
@@ -1660,6 +1782,99 @@ impl<'a> Checker<'a> {
         {
             self.apply_companion_rule(env, invocation);
         }
+    }
+
+    fn check_recover(
+        &mut self,
+        env: &mut MarkerEnv,
+        result: &ProofExpr,
+        fallback: &ProofRecoveryArm,
+        recovered: PlaceId,
+        span: Span,
+    ) {
+        let mut success_env = env.clone();
+        self.apply_recovery_success_companions(&mut success_env, result);
+        let success_place = self.recovery_success_place(result);
+        let success_markers = success_place
+            .map(|place| self.substituted_facts_for_place(&success_env, place, recovered, span))
+            .unwrap_or_default();
+
+        let mut fallback_env = env.clone();
+        for entry in &fallback.block.entries {
+            self.check_entry(entry, &mut fallback_env);
+        }
+        let fallback_markers =
+            self.substituted_facts_for_place(&fallback_env, fallback.value.place, recovered, span);
+
+        for success in success_markers {
+            if fallback_markers.iter().any(|fallback| {
+                self.marker_matches(&success.marker, &fallback.marker)
+                    && self.marker_matches(&fallback.marker, &success.marker)
+            }) {
+                self.add_fact(
+                    env,
+                    MarkerFact {
+                        target: recovered,
+                        marker: success.marker,
+                        source: MarkerFactSource::RecoveryMerge,
+                        origin_span: span,
+                    },
+                );
+            }
+        }
+    }
+
+    fn apply_recovery_success_companions(&mut self, env: &mut MarkerEnv, result: &ProofExpr) {
+        if let ProofExprKind::Binary {
+            op: BinaryOp::Sub,
+            left,
+            right,
+            success_place: Some(success_place),
+        } = &result.kind
+        {
+            self.apply_companion_rule(
+                env,
+                CompanionInvocation {
+                    name: "Sub",
+                    places: vec![left.place, right.place, *success_place],
+                    origin_span: result.span,
+                },
+            );
+        }
+    }
+
+    fn recovery_success_place(&self, result: &ProofExpr) -> Option<PlaceId> {
+        match &result.kind {
+            ProofExprKind::Binary {
+                op: BinaryOp::Sub,
+                success_place,
+                ..
+            } => *success_place,
+            _ => None,
+        }
+    }
+
+    fn substituted_facts_for_place(
+        &self,
+        env: &MarkerEnv,
+        source: PlaceId,
+        destination: PlaceId,
+        origin_span: Span,
+    ) -> Vec<MarkerFact> {
+        env.facts
+            .iter()
+            .filter(|fact| fact.target == source)
+            .filter_map(|fact| {
+                substitute_marker_place(&fact.marker, source, destination).map(|marker| {
+                    MarkerFact {
+                        target: destination,
+                        marker,
+                        source: MarkerFactSource::RecoveryMerge,
+                        origin_span,
+                    }
+                })
+            })
+            .collect()
     }
 
     fn apply_companion_rule(&mut self, env: &mut MarkerEnv, invocation: CompanionInvocation) {
@@ -2416,6 +2631,7 @@ fn builtin_companion_rules() -> HashMap<String, ProofMarkerRule> {
             HirMarkerFamily::LessThan,
             HirMarkerFamily::GreaterThan,
         ),
+        builtin_sub_rule(),
     ]
     .into_iter()
     .map(|rule| (rule.name.clone(), rule))
@@ -2475,6 +2691,37 @@ fn builtin_order_rule(
                 span: empty_span(),
             }),
         ],
+    )
+}
+
+fn builtin_sub_rule() -> ProofMarkerRule {
+    builtin_rule(
+        "Sub",
+        vec![ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
+            subject: "a".to_owned(),
+            marker: marker_template(
+                HirMarkerFamily::LessThan,
+                vec![
+                    ProofMarkerTemplateArg::Place("a".to_owned()),
+                    ProofMarkerTemplateArg::Binding("bound".to_owned()),
+                ],
+            ),
+            body: ProofMarkerRuleBlock {
+                statements: vec![ProofMarkerRuleStmt::Implies(ProofMarkerImplication {
+                    marker: marker_template(
+                        HirMarkerFamily::LessThan,
+                        vec![
+                            ProofMarkerTemplateArg::Place("result".to_owned()),
+                            ProofMarkerTemplateArg::Place("bound".to_owned()),
+                        ],
+                    ),
+                    target: "result".to_owned(),
+                    span: empty_span(),
+                })],
+                span: empty_span(),
+            },
+            span: empty_span(),
+        })],
     )
 }
 

@@ -76,6 +76,7 @@ fn collect_entries<'a>(block: &'a ProofBlock, entries: &mut Vec<&'a ProofEntry>)
                 }
             }
             ProofEntry::Observe { else_block, .. } => collect_entries(else_block, entries),
+            ProofEntry::Recover { fallback, .. } => collect_entries(&fallback.block, entries),
             ProofEntry::For { body, .. } | ProofEntry::Scope { block: body, .. } => {
                 collect_entries(body, entries);
             }
@@ -117,6 +118,10 @@ fn assert_expr_spans(expr: &ProofExpr) {
         ProofExprKind::Binary { left, right, .. } => {
             assert_expr_spans(left);
             assert_expr_spans(right);
+        }
+        ProofExprKind::Recover { result, fallback } => {
+            assert_expr_spans(result);
+            assert_expr_spans(fallback);
         }
         ProofExprKind::Call { callee, args } => {
             assert_expr_spans(callee);
@@ -187,6 +192,10 @@ fn assert_expr_well_formed(expr: &ProofExpr, proof: &CheckedProof) {
         ProofExprKind::Binary { left, right, .. } => {
             assert_expr_well_formed(left, proof);
             assert_expr_well_formed(right, proof);
+        }
+        ProofExprKind::Recover { result, fallback } => {
+            assert_expr_well_formed(result, proof);
+            assert_expr_well_formed(fallback, proof);
         }
         ProofExprKind::Call { callee, args } => {
             assert_expr_well_formed(callee, proof);
@@ -353,6 +362,13 @@ fn main(values: [u32; 4], index: u32) {
                 for fact in facts {
                     assert_non_empty_span(fact.origin_span, "MarkerFact origin");
                 }
+            }
+            ProofEntry::Recover {
+                result, fallback, ..
+            } => {
+                assert_expr_spans(result);
+                assert_expr_spans(&fallback.value);
+                assert_non_empty_span(fallback.block.span, "ProofBlock");
             }
             ProofEntry::For { iterable, .. } | ProofEntry::Eval { expr: iterable, .. } => {
                 assert_expr_spans(iterable);
@@ -580,7 +596,7 @@ fn main(values: [u32; 4], index: u32) {
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
-//# A source companion marker rule with a builtin comparison name MUST override the trusted builtin rule with the same name.
+//# A source companion marker rule with a builtin companion name MUST override the trusted builtin rule with the same name.
 #[test]
 fn requirement_llg_mark_06_source_companion_rules_override_builtin_rules() {
     let (checked, missing_direct_fact) = check_err(
@@ -621,6 +637,184 @@ fn main(values: [u32; 4], index: u32) {
 "#,
     );
     assert_eq!(restored_direct_fact.obligations, 1);
+
+    let (checked, missing_sub_fact) = check_err(
+        r#"
+mark Sub(a: place, amount: place, result: place) {}
+
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let smaller = index - 1 or(err) fallback;
+        values[smaller];
+    }
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &missing_sub_fact,
+        "possible out-of-bounds indexing is not proven safe",
+        "smaller",
+    );
+
+    let (_, restored_sub_fact) = check_ok(
+        r#"
+mark Sub(a: place, amount: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let smaller = index - 1 or(err) fallback;
+        values[smaller];
+    }
+}
+"#,
+    );
+    assert_eq!(restored_sub_fact.obligations, 1);
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# The trusted builtin `Sub` companion rule MUST preserve `LessThan(result, bound)` from `LessThan(a, bound)` for the successful checked subtraction payload.
+#[test]
+fn requirement_llg_mark_06_trusted_sub_rule_preserves_success_bounds() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let smaller = index - 1 or(err) fallback;
+        values[smaller];
+    }
+}
+"#,
+    );
+
+    assert_eq!(proof.obligations, 1);
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })
+    }));
+}
+
+//= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
+//= type=test
+//# Checked subtraction lowers to a successful payload place that can receive marker facts from the active `Sub` companion rule.
+#[test]
+fn requirement_llg_pir_03_checked_sub_lowers_success_payload_place() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(index: u32) {
+    let fallback = 0;
+    let smaller = index - 1 or(err) fallback;
+}
+"#,
+    );
+
+    assert!(proof_entries(&proof).iter().any(|entry| {
+        matches!(
+            entry,
+            ProofEntry::Recover {
+                result: ProofExpr {
+                    kind: ProofExprKind::Binary {
+                        op: langlog_syntax::ast::BinaryOp::Sub,
+                        success_place: Some(_),
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }
+        )
+    }));
+}
+
+//= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
+//= type=test
+//# Result recovery lowers to separate success and fallback marker paths, and the recovered place receives only marker facts proven on both paths.
+#[test]
+fn requirement_llg_pir_03_recovery_keeps_only_common_success_and_fallback_markers() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        let smaller = index - 1 or(err) fallback;
+        values[smaller];
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "smaller",
+    );
+    assert!(!proof
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::RecoveryMerge));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# `Sub` marker transfer MUST apply only to direct checked `u32 - u32` subtraction success payloads in this slice.
+#[test]
+fn requirement_llg_mark_06_sub_transfer_excludes_result_lifted_subtraction() {
+    let (checked, proof) = check_err(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let checked: Result<u32, ArithmeticError> = ok(index);
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let smaller = checked - 1 or(err) fallback;
+        values[smaller];
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "smaller",
+    );
+}
+
+//= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
+//= type=test
+//# Marker facts that survive result recovery merging MUST use a recovery-merge fact source.
+#[test]
+fn requirement_llg_pir_03_recovery_merge_facts_use_recovery_merge_source() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        let fallback = 0;
+        unsafe { LessThan::mark(fallback, 4); }
+        let smaller = index - 1 or(err) fallback;
+        values[smaller];
+    }
+}
+"#,
+    );
+
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::RecoveryMerge
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })
+    }));
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
@@ -707,6 +901,12 @@ fn main(values: [u32; 4], index: u32) {
             ProofEntry::Observe { left, right, .. } => {
                 assert_expr_well_formed(left, &proof);
                 assert_expr_well_formed(right, &proof);
+            }
+            ProofEntry::Recover {
+                result, fallback, ..
+            } => {
+                assert_expr_well_formed(result, &proof);
+                assert_expr_well_formed(&fallback.value, &proof);
             }
             ProofEntry::For { iterable, .. } | ProofEntry::Eval { expr: iterable, .. } => {
                 assert_expr_well_formed(iterable, &proof);

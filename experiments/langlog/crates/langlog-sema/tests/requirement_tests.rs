@@ -975,13 +975,37 @@ mark LessThan(a: place, b: place, result: place) {
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
-//# This marker slice MUST accept only builtin comparison companion rule names.
+//# This marker slice MUST accept builtin comparison companion rule names and the checked-subtraction companion rule name `Sub`.
+#[test]
+fn requirement_llg_mark_06_accepts_sub_companion_rule_name() {
+    let checked = analyze_ok("mark Sub(a: place, amount: place, result: place) {}");
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Unknown companion marker rule names MUST be rejected.
 #[test]
 fn requirement_llg_mark_06_rejects_unknown_companion_rule_names() {
+    let checked = analyze_ok("mark Product(a: place, result: place) {}");
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "unknown companion marker rule `Product`");
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Each accepted builtin companion marker rule name MUST use exactly three `place` parameters.
+#[test]
+fn requirement_llg_mark_06_rejects_wrong_sub_companion_rule_arity() {
     let checked = analyze_ok("mark Sub(a: place, result: place) {}");
 
     assert!(checked.has_errors());
-    assert_diagnostic_message_contains(&checked, "unknown companion marker rule `Sub`");
+    assert_diagnostic_message_contains(
+        &checked,
+        "wrong number of parameters for companion marker rule `Sub`: expected 3, found 2",
+    );
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
@@ -993,11 +1017,14 @@ fn requirement_llg_mark_06_rejects_duplicate_source_companion_rules() {
         r#"
 mark LessThan(a: place, b: place, result: place) {}
 mark LessThan(a: place, b: place, result: place) {}
+mark Sub(a: place, amount: place, result: place) {}
+mark Sub(a: place, amount: place, result: place) {}
 "#,
     );
 
     assert!(checked.has_errors());
     assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `LessThan`");
+    assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `Sub`");
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
