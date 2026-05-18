@@ -40,8 +40,8 @@ allocation.
   --all-features -- -D warnings`, `cargo fmt --all -- --check`, `rumdl check .
   --respect-gitignore`, `cargo run -p langlog-xtask -- check-requirements`, and
   `duvet report --require-tests true` are expected to pass. The requirement
-  validator currently reports implemented requirement tests only; no ignored
-  `todo_*` placeholders are present yet.
+  validator reports both implemented requirement tests and explicit `todo_*`
+  placeholders for planned task-runtime requirements.
 - Documentation split:
   - `SPEC.md` remains the surface-language and user-visible behavior spec.
   - `HIR.md` defines AST-to-HIR elaboration plus HIR invariants.

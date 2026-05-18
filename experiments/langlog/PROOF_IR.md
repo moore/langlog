@@ -115,9 +115,14 @@ Future formalization should target this pipeline rather than full HIR alone:
 
 ## Current Implementation Status
 
-The current implementation still discharges obligations directly from HIR.
-This document defines the intended next internal boundary so marker reasoning,
-testing, and eventual formal semantics stop depending on the full HIR shape.
+The current implementation lowers checked HIR into a structured Proof IR before
+marker-obligation discharge. The checker now consumes that Proof IR, and
+requirement tests assert the lowering boundary for obligations, facts, source
+spans, recovery merges, and well-formed proof expressions.
+
+This document still defines a draft internal boundary: the first Proof IR is
+structured and close to current marker needs, while future MIR work should give
+execution its own backend-independent semantics.
 
 ## Design Goals
 

@@ -2,22 +2,26 @@ fn sum(values: [u32; 4]) -> u32 {
     let mut total: u32 = 0;
 
     for value in values {
-        total = total + value;
+        total = total + value or(err) total;
     }
 
     total
 }
 
 fn bounded(total: u32, limit: u32, one: u32) -> u32 {
-    observe total + one <= limit + one else {
+    observe total <= limit else {
         return total;
     }
 
-    if total > 100 {
-        observe total + 1 < 1001 else {
-            return total;
-        }
+    let next: u32 = total + one or(err) total;
+
+    if next > limit {
+        return total;
     }
 
-    return total;
+    next
+}
+
+fn main() -> u32 {
+    bounded(sum([1, 2, 3, 4]), 20, 1)
 }
