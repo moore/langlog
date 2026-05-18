@@ -1,7 +1,8 @@
 use langlog_proof::{
     check, CheckedProof, MarkerFactSource, MarkerPattern, ObligationSource, ProofBlock, ProofEntry,
-    ProofExpr, ProofExprKind, ProofProgram,
+    ProofExpr, ProofExprKind, ProofMarkerRuleStmt, ProofMarkerTemplateArg, ProofProgram,
 };
+use langlog_sema::HirMarkerFamily;
 use langlog_sema::{analyze, CheckedProgram, HirType};
 use langlog_syntax::{parse, LabelStyle, Severity};
 
@@ -431,8 +432,70 @@ fn main(value: u32) {
             ..
         } if then_facts.iter().any(|fact| fact.source == MarkerFactSource::ControlFlowTruth)
             && then_facts.iter().any(|fact| matches!(fact.marker, MarkerPattern::True { .. }))
-            && then_facts.iter().any(|fact| matches!(fact.marker, MarkerPattern::LessThan { .. }))
+            && then_facts.iter().any(|fact| fact.source == MarkerFactSource::CompanionRule
+                && matches!(fact.marker, MarkerPattern::LessThan { .. }))
     )));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Companion marker rules MUST lower refinement-pattern bindings and implications into Proof IR marker-rule templates.
+#[test]
+fn requirement_llg_mark_06_lowers_companion_rule_patterns_into_proof_ir() {
+    let (_, proof) = check_ok(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+"#,
+    );
+
+    let proof_ir = proof_ir(&proof);
+    assert_eq!(proof_ir.marker_rules.len(), 1);
+    let rule = &proof_ir.marker_rules[0];
+    assert_eq!(rule.name, "LessThan");
+
+    let [ProofMarkerRuleStmt::If(stmt)] = rule.body.statements.as_slice() else {
+        panic!("expected one marker refinement rule");
+    };
+    assert_eq!(stmt.subject, "a");
+    assert_eq!(stmt.marker.family, HirMarkerFamily::LessThan);
+    assert_eq!(
+        stmt.marker.args[1],
+        ProofMarkerTemplateArg::Binding("bound".to_owned())
+    );
+
+    let [ProofMarkerRuleStmt::Implies(implication)] = stmt.body.statements.as_slice() else {
+        panic!("expected one marker implication");
+    };
+    assert_eq!(implication.target, "result");
+    assert_eq!(
+        implication.marker.args[1],
+        ProofMarkerTemplateArg::Place("bound".to_owned())
+    );
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Control-flow comparison marker facts MUST be emitted as companion-rule implications.
+#[test]
+fn requirement_llg_mark_06_emits_comparison_facts_as_companion_rule_facts() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(left: u32, right: u32) {
+    if left < right {
+        left;
+    }
+}
+"#,
+    );
+
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })
+    }));
 }
 
 //= PROOF_IR.md#llg-pir-05-successful-proof-ir-well-formedness
@@ -590,7 +653,7 @@ fn main(values: [u32; 4], index: u32) {
 
     assert_eq!(proof.obligations, 1);
     assert!(proof.facts.iter().any(|fact| {
-        fact.source == MarkerFactSource::ControlFlowFalse
+        fact.source == MarkerFactSource::CompanionRule
             && matches!(fact.marker, MarkerPattern::LessThan { .. })
     }));
 }

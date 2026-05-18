@@ -1,9 +1,10 @@
 use crate::ast::{
     AssignStmt, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr, ExprKind, ExprStmt,
     ForStmt, ForeverStmt, Function, GenericArg, IfStmt, Item, LetStmt, MarkerAnnotation, MarkerArg,
-    MarkerArgKind, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern,
-    PatternKind, ReturnStmt, Stmt, Task, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction,
-    UnsafeMarkerStmt,
+    MarkerArgKind, MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock,
+    MarkerRuleIfStmt, MarkerRuleParam, MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module,
+    ObserveOp, ObserveStmt, Param, Pattern, PatternKind, ReturnStmt, Stmt, Task, Type, TypeKind,
+    UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -88,8 +89,14 @@ impl<'a> Parser<'a> {
         match self.current_tag() {
             TokenTag::Fn => self.parse_function().map(Item::Function),
             TokenTag::Task => self.parse_task().map(Item::Task),
+            TokenTag::Identifier if self.at_contextual_keyword("mark") => {
+                self.parse_marker_rule().map(Item::MarkerRule)
+            }
             _ => {
-                self.error_current("expected a top-level item", "expected `fn` or `task`");
+                self.error_current(
+                    "expected a top-level item",
+                    "expected `fn`, `task`, or `mark`",
+                );
                 None
             }
         }
@@ -133,6 +140,135 @@ impl<'a> Parser<'a> {
             params,
             return_type,
             body,
+        })
+    }
+
+    fn parse_marker_rule(&mut self) -> Option<MarkerRule> {
+        let start =
+            self.expect_contextual_keyword("mark", "expected `mark` to start a marker rule")?;
+        let name = self.expect_identifier("expected a marker rule name")?;
+        self.expect_tag(TokenTag::LParen, "expected `(` after marker rule name")?;
+        let params = self.parse_marker_rule_params()?;
+        let body = self.parse_marker_rule_block()?;
+        let span = start.span.cover(body.span).unwrap_or(start.span);
+
+        Some(MarkerRule {
+            span,
+            name,
+            params,
+            body,
+        })
+    }
+
+    fn parse_marker_rule_params(&mut self) -> Option<Vec<MarkerRuleParam>> {
+        let mut params = Vec::new();
+
+        if self.bump_if(TokenTag::RParen) {
+            return Some(params);
+        }
+
+        loop {
+            let name = self.expect_identifier("expected a marker rule parameter name")?;
+            self.expect_tag(
+                TokenTag::Colon,
+                "expected `:` after marker rule parameter name",
+            )?;
+            let place = self.expect_contextual_keyword(
+                "place",
+                "expected `place` as the marker rule parameter type",
+            )?;
+            let span = name.span.cover(place.span).unwrap_or(name.span);
+            params.push(MarkerRuleParam { span, name });
+
+            if self.bump_if(TokenTag::Comma) {
+                if self.bump_if(TokenTag::RParen) {
+                    break;
+                }
+            } else {
+                self.expect_tag(
+                    TokenTag::RParen,
+                    "expected `)` after marker rule parameters",
+                )?;
+                break;
+            }
+        }
+
+        Some(params)
+    }
+
+    fn parse_marker_rule_block(&mut self) -> Option<MarkerRuleBlock> {
+        let start = self.expect_tag(TokenTag::LBrace, "expected `{` to start marker rule body")?;
+        let mut statements = Vec::new();
+
+        while !self.at(TokenTag::RBrace) && !self.at(TokenTag::Eof) {
+            let start_cursor = self.cursor;
+            match self.parse_marker_rule_statement() {
+                Some(statement) => statements.push(statement),
+                None => self.synchronize_marker_rule_statement(),
+            }
+            if !self.ensure_progress(
+                start_cursor,
+                "parser made no progress while parsing a marker rule statement",
+            ) {
+                break;
+            }
+        }
+
+        let end = self.expect_tag(TokenTag::RBrace, "expected `}` to close marker rule body")?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+        Some(MarkerRuleBlock { span, statements })
+    }
+
+    fn parse_marker_rule_statement(&mut self) -> Option<MarkerRuleStmt> {
+        match self.current_tag() {
+            TokenTag::If => self
+                .parse_marker_rule_if_statement()
+                .map(MarkerRuleStmt::If),
+            TokenTag::Identifier if self.at_contextual_keyword("implies") => self
+                .parse_marker_implication_statement()
+                .map(MarkerRuleStmt::Implies),
+            _ => {
+                self.error_current(
+                    "expected a marker rule statement",
+                    "expected `if` or `implies`",
+                );
+                None
+            }
+        }
+    }
+
+    fn parse_marker_rule_if_statement(&mut self) -> Option<MarkerRuleIfStmt> {
+        let start = self.expect_tag(TokenTag::If, "expected `if`")?;
+        let subject = self.expect_identifier("expected a marker refinement place")?;
+        self.expect_tag(TokenTag::With, "expected `with` after refinement place")?;
+        let marker = self.parse_marker_annotation()?;
+        let body = self.parse_marker_rule_block()?;
+        let span = start.span.cover(body.span).unwrap_or(start.span);
+        let refinement_span = subject.span.cover(marker.span).unwrap_or(subject.span);
+
+        Some(MarkerRuleIfStmt {
+            span,
+            refinement: MarkerRefinement {
+                span: refinement_span,
+                subject,
+                marker,
+            },
+            body,
+        })
+    }
+
+    fn parse_marker_implication_statement(&mut self) -> Option<MarkerImplicationStmt> {
+        let start = self.expect_contextual_keyword("implies", "expected `implies`")?;
+        let marker = self.parse_marker_annotation()?;
+        self.expect_tag(TokenTag::For, "expected `for` after implied marker")?;
+        let target = self.expect_identifier("expected target place after `for`")?;
+        let end = self.expect_tag(TokenTag::Semi, "expected `;` after marker implication")?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+
+        Some(MarkerImplicationStmt {
+            span,
+            marker,
+            target,
         })
     }
 
@@ -263,6 +399,15 @@ impl<'a> Parser<'a> {
                     kind: MarkerArgKind::Name(base),
                 })
             }
+            TokenKind::Question => {
+                self.bump();
+                let name = self.expect_identifier("expected a marker-pattern binding name")?;
+                let span = token.span.cover(name.span).unwrap_or(token.span);
+                Some(MarkerArg {
+                    span,
+                    kind: MarkerArgKind::PatternBinding(name),
+                })
+            }
             TokenKind::IntLiteral(value) => {
                 self.bump();
                 Some(MarkerArg {
@@ -287,7 +432,7 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error_current(
                     "expected a marker argument",
-                    "expected a place name, field place, or literal here",
+                    "expected a place name, field place, marker-pattern binding, or literal here",
                 );
                 None
             }
@@ -858,6 +1003,25 @@ impl<'a> Parser<'a> {
         lhs = self.parse_postfix(lhs)?;
 
         loop {
+            if self.at(TokenTag::With) {
+                let left_bp = 7;
+                if left_bp < min_binding_power {
+                    break;
+                }
+
+                self.bump();
+                let marker = self.parse_marker_annotation()?;
+                let span = lhs.span.cover(marker.span).unwrap_or(lhs.span);
+                lhs = Expr::new(
+                    span,
+                    ExprKind::MarkerRefinement {
+                        subject: Box::new(lhs),
+                        marker,
+                    },
+                );
+                continue;
+            }
+
             if self.at(TokenTag::Or) {
                 let left_bp = 0;
                 if left_bp < min_binding_power {
@@ -1223,10 +1387,30 @@ impl<'a> Parser<'a> {
 
     fn synchronize_item(&mut self) {
         while !self.at(TokenTag::Eof) {
-            if self.at(TokenTag::Fn) || self.at(TokenTag::Task) {
+            if self.at(TokenTag::Fn)
+                || self.at(TokenTag::Task)
+                || self.at_contextual_keyword("mark")
+            {
                 break;
             }
             self.bump();
+        }
+    }
+
+    fn synchronize_marker_rule_statement(&mut self) {
+        while !self.at(TokenTag::Eof) {
+            match self.current_tag() {
+                TokenTag::Semi => {
+                    self.bump();
+                    break;
+                }
+                TokenTag::RBrace => break,
+                TokenTag::If => break,
+                TokenTag::Identifier if self.at_contextual_keyword("implies") => break,
+                _ => {
+                    self.bump();
+                }
+            }
         }
     }
 
@@ -1304,6 +1488,10 @@ impl<'a> Parser<'a> {
         self.current_tag() == tag
     }
 
+    fn at_contextual_keyword(&self, keyword: &str) -> bool {
+        matches!(&self.current().kind, TokenKind::Identifier(name) if name == keyword)
+    }
+
     fn bump_if(&mut self, tag: TokenTag) -> bool {
         if self.at(tag) {
             self.bump();
@@ -1319,6 +1507,15 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
         }
         token
+    }
+
+    fn expect_contextual_keyword(&mut self, keyword: &str, message: &str) -> Option<Token> {
+        if self.at_contextual_keyword(keyword) {
+            return Some(self.bump());
+        }
+
+        self.error_current(message, &format!("expected `{keyword}` here"));
+        None
     }
 }
 
@@ -1344,6 +1541,7 @@ fn observe_expr_is_phase1_proof_expr(expr: &Expr) -> bool {
         ExprKind::Index { target, index } => {
             observe_expr_is_phase1_proof_expr(target) && observe_expr_is_phase1_proof_expr(index)
         }
+        ExprKind::MarkerRefinement { .. } => false,
         ExprKind::UnsafeMarker(_) => false,
     }
 }

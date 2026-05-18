@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, ObserveOp, PatternKind, Stmt, Task,
-    TypeKind, UnaryOp,
+    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, MarkerRuleStmt, ObserveOp, PatternKind,
+    Stmt, Task, TypeKind, UnaryOp,
 };
 use crate::diagnostic::LabelStyle;
 use crate::lexer::lex;
@@ -210,7 +210,7 @@ fn requirement_llg_lex_04_marks_invalid_character_spans() {
 
 //= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A phase 1 source file MUST contain only function items and task items at the top level.
+//# A source file MUST contain only function items, task items, and marker companion-rule items at the top level.
 #[test]
 fn requirement_llg_syn_01_accepts_function_and_task_top_level_items() {
     let parsed = parse_ok(
@@ -229,7 +229,7 @@ task worker() -> u32 { exit 0; }
 
 //= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A non-function, non-task top-level item MUST be rejected with a syntax diagnostic.
+//# A non-function, non-task, non-marker-rule top-level item MUST be rejected with a syntax diagnostic.
 #[test]
 fn requirement_llg_syn_01_rejects_non_item_top_level_forms_with_a_syntax_diagnostic() {
     let parsed = parse_err("let value = 1;");
@@ -284,6 +284,67 @@ fn requirement_llg_syn_01_rejects_task_items_without_return_types() {
     let parsed = parse_err("task main() { exit 0; }");
 
     assert_diagnostic_contains(&parsed, "expected `->` before task return type");
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Companion marker rules MUST use `mark`, `place`, `implies`, and marker-pattern bindings such as `?bound`.
+#[test]
+fn requirement_llg_mark_06_preserves_companion_marker_rules_in_ast() {
+    let parsed = parse_ok(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if result with True() {
+        implies LessThan(a, b) for a;
+    }
+
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+"#,
+    );
+
+    assert_eq!(parsed.module.items.len(), 1);
+    let rule = match &parsed.module.items[0] {
+        Item::MarkerRule(rule) => rule,
+        other => panic!("expected marker rule item, got {other:?}"),
+    };
+
+    assert_eq!(rule.name.value, "LessThan");
+    assert_eq!(rule.params.len(), 3);
+    assert_eq!(rule.body.statements.len(), 2);
+
+    let MarkerRuleStmt::If(first_if) = &rule.body.statements[0] else {
+        panic!("expected first marker rule statement to be an if");
+    };
+    assert_eq!(first_if.refinement.subject.value, "result");
+    assert_eq!(first_if.refinement.marker.name.value, "True");
+    assert!(first_if.refinement.marker.args.is_empty());
+    assert!(matches!(
+        first_if.body.statements.as_slice(),
+        [MarkerRuleStmt::Implies(_)]
+    ));
+
+    let MarkerRuleStmt::If(second_if) = &rule.body.statements[1] else {
+        panic!("expected second marker rule statement to be an if");
+    };
+    assert_eq!(second_if.refinement.subject.value, "a");
+    assert_eq!(second_if.refinement.marker.name.value, "LessThan");
+    assert!(matches!(
+        second_if.refinement.marker.args[1].kind,
+        crate::ast::MarkerArgKind::PatternBinding(_)
+    ));
+
+    let [MarkerRuleStmt::Implies(implication)] = second_if.body.statements.as_slice() else {
+        panic!("expected a marker implication");
+    };
+    assert_eq!(implication.marker.name.value, "LessThan");
+    assert_eq!(implication.target.value, "result");
+    assert!(matches!(
+        implication.marker.args[1].kind,
+        crate::ast::MarkerArgKind::Name(_)
+    ));
 }
 
 //= SPEC.md#llg-syn-02-statements

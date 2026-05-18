@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use langlog_sema::{
     CheckedProgram, HirBinding, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind,
-    HirFunction, HirItemId, HirMarkerFamily, HirMarkerPlace, HirMarkerRequirement, HirMatchBody,
-    HirPattern, HirPatternKind, HirProgram, HirStmt, HirType, HostBuiltin,
+    HirFunction, HirItemId, HirMarkerFamily, HirMarkerPlace, HirMarkerRequirement, HirMarkerRule,
+    HirMarkerRuleStmt, HirMarkerTemplateArg, HirMatchBody, HirPattern, HirPatternKind, HirProgram,
+    HirStmt, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp};
 use langlog_syntax::{Diagnostic, Label, Severity, Span};
@@ -148,12 +149,69 @@ pub fn check(program: &CheckedProgram) -> CheckedProof {
 pub struct ProofProgram {
     pub places: Vec<ProofPlace>,
     pub functions: Vec<ProofFunction>,
+    pub marker_rules: Vec<ProofMarkerRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofFunction {
     pub body: ProofBlock,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofMarkerRule {
+    pub name: String,
+    pub params: Vec<ProofMarkerRuleParam>,
+    pub body: ProofMarkerRuleBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofMarkerRuleParam {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofMarkerRuleBlock {
+    pub statements: Vec<ProofMarkerRuleStmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofMarkerRuleStmt {
+    If(ProofMarkerRuleIfStmt),
+    Implies(ProofMarkerImplication),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofMarkerRuleIfStmt {
+    pub subject: String,
+    pub marker: ProofMarkerTemplate,
+    pub body: ProofMarkerRuleBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofMarkerImplication {
+    pub marker: ProofMarkerTemplate,
+    pub target: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofMarkerTemplate {
+    pub family: HirMarkerFamily,
+    pub args: Vec<ProofMarkerTemplateArg>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofMarkerTemplateArg {
+    Place(String),
+    Binding(String),
+    U32(u64),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +366,70 @@ type BindingPlaceMap = HashMap<HirBindingId, PlaceId>;
 type BindingVersionMap = HashMap<HirBindingId, u32>;
 type BranchStateRef<'a> = (&'a BindingPlaceMap, &'a BindingVersionMap);
 
+fn lower_marker_rule(rule: &HirMarkerRule) -> ProofMarkerRule {
+    ProofMarkerRule {
+        name: rule.name.clone(),
+        params: rule
+            .params
+            .iter()
+            .map(|param| ProofMarkerRuleParam {
+                name: param.name.clone(),
+                span: param.span,
+            })
+            .collect(),
+        body: lower_marker_rule_block(&rule.body),
+        span: rule.span,
+    }
+}
+
+fn lower_marker_rule_block(block: &langlog_sema::HirMarkerRuleBlock) -> ProofMarkerRuleBlock {
+    ProofMarkerRuleBlock {
+        statements: block
+            .statements
+            .iter()
+            .map(lower_marker_rule_statement)
+            .collect(),
+        span: block.span,
+    }
+}
+
+fn lower_marker_rule_statement(statement: &HirMarkerRuleStmt) -> ProofMarkerRuleStmt {
+    match statement {
+        HirMarkerRuleStmt::If(stmt) => ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
+            subject: stmt.refinement.subject.clone(),
+            marker: lower_marker_template(&stmt.refinement.marker),
+            body: lower_marker_rule_block(&stmt.body),
+            span: stmt.span,
+        }),
+        HirMarkerRuleStmt::Implies(stmt) => ProofMarkerRuleStmt::Implies(ProofMarkerImplication {
+            marker: lower_marker_template(&stmt.marker),
+            target: stmt.target.clone(),
+            span: stmt.span,
+        }),
+    }
+}
+
+fn lower_marker_template(template: &langlog_sema::HirMarkerTemplate) -> ProofMarkerTemplate {
+    ProofMarkerTemplate {
+        family: template.family,
+        args: template
+            .args
+            .iter()
+            .map(lower_marker_template_arg)
+            .collect(),
+        span: template.span,
+    }
+}
+
+fn lower_marker_template_arg(arg: &HirMarkerTemplateArg) -> ProofMarkerTemplateArg {
+    match arg {
+        HirMarkerTemplateArg::Place(name) => ProofMarkerTemplateArg::Place(name.clone()),
+        HirMarkerTemplateArg::Binding(name) => ProofMarkerTemplateArg::Binding(name.clone()),
+        HirMarkerTemplateArg::U32(value) => ProofMarkerTemplateArg::U32(*value),
+        HirMarkerTemplateArg::Bool(value) => ProofMarkerTemplateArg::Bool(*value),
+    }
+}
+
 impl ProofLowerer {
     fn new(
         binding_info: HashMap<HirBindingId, BindingInfo>,
@@ -362,6 +484,7 @@ impl ProofLowerer {
         ProofProgram {
             places: self.places,
             functions,
+            marker_rules: hir.marker_rules.iter().map(lower_marker_rule).collect(),
         }
     }
 
@@ -1185,7 +1308,7 @@ impl ProofLowerer {
                     left,
                     right,
                     truth,
-                    source,
+                    MarkerFactSource::CompanionRule,
                     origin_span,
                 ));
             }

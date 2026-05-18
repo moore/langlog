@@ -96,10 +96,10 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-SYN-01 Top-Level Items
 
-- A phase 1 source file MUST contain only function items and task items at the
-  top level.
-- A non-function, non-task top-level item MUST be rejected with a syntax
-  diagnostic.
+- A source file MUST contain only function items, task items, and marker
+  companion-rule items at the top level.
+- A non-function, non-task, non-marker-rule top-level item MUST be rejected
+  with a syntax diagnostic.
 - A function item MUST use Rust-like syntax with `fn`, a name, a parameter list,
   and a block body.
 - The current parser allows the return type to be omitted in phase 1.
@@ -108,6 +108,8 @@ properties that should be enforced structurally rather than by convention:
 - A task item MUST be treated as orchestration code rather than an ordinary
   total function.
 - An executable task program MUST use `task main() -> u32` as its root task.
+- A marker companion-rule item MUST use `mark Name(param: place, ...) { ... }`
+  and MUST be proof-only metadata rather than executable code.
 - Future root task configuration MAY allow other root task names or signatures.
 
 ## LLG-SYN-02 Statements
@@ -320,10 +322,22 @@ Each syntax operator MAY have a companion marker rule that describes marker
 facts produced by that operator. Companion marker rules MUST use `mark`, `place`,
 `implies`, and marker-pattern bindings such as `?bound`.
 
+This marker slice MUST accept only builtin comparison companion rule names.
+Companion marker rules MUST reject unknown marker families in refinements and
+implications.
+Companion marker rules MUST lower refinement-pattern bindings and implications
+into Proof IR marker-rule templates.
+Control-flow comparison marker facts MUST be emitted as companion-rule
+implications.
+
 Marker-rule conditions of the form `a with Marker(...)` MUST be marker
 refinement patterns. The condition succeeds only if the current marker
 environment already contains a matching marker attached to `a`; it MUST NOT
 create the marker.
+
+Marker refinement patterns MUST be accepted only inside marker companion-rule
+bodies. The same `place with Marker(...)` spelling in ordinary function or task
+code MUST be rejected because it has no runtime value.
 
 Marker-pattern bindings MUST use `?name` at the binding site. In
 `a with LessThan(a, ?bound)`, the compiler searches for an existing marker

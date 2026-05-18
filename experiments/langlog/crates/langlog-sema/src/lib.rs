@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MarkerAnnotation,
-    MarkerArg, MarkerArgKind, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type,
-    TypeKind, UnaryOp,
+    MarkerArg, MarkerArgKind, MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock,
+    MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type, TypeKind,
+    UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -332,20 +333,21 @@ impl<'a> Analyzer<'a> {
 
     fn collect_items(&mut self) {
         for item in &self.parsed.module.items {
-            let (name, kind) = item_name_and_kind(item);
-            if HostBuiltin::from_name(name.value.as_str()).is_some() {
-                self.report_reserved_host_builtin_name(name);
-                continue;
+            if let Some((name, kind)) = item_name_and_kind(item) {
+                if HostBuiltin::from_name(name.value.as_str()).is_some() {
+                    self.report_reserved_host_builtin_name(name);
+                    continue;
+                }
+                self.items.entry(name.value.clone()).or_insert(Binding {
+                    kind: match kind {
+                        ItemKind::Function => BindingKind::Item,
+                        ItemKind::Task => BindingKind::TaskItem,
+                    },
+                    span: name.span,
+                    loop_bound: false,
+                    mutable: false,
+                });
             }
-            self.items.entry(name.value.clone()).or_insert(Binding {
-                kind: match kind {
-                    ItemKind::Function => BindingKind::Item,
-                    ItemKind::Task => BindingKind::TaskItem,
-                },
-                span: name.span,
-                loop_bound: false,
-                mutable: false,
-            });
         }
     }
 
@@ -354,6 +356,7 @@ impl<'a> Analyzer<'a> {
             match item {
                 Item::Function(function) => self.analyze_function(function),
                 Item::Task(task) => self.analyze_task(task),
+                Item::MarkerRule(rule) => self.analyze_marker_rule(rule),
             }
         }
 
@@ -381,6 +384,59 @@ impl<'a> Analyzer<'a> {
             name_span: task.name.span,
         };
         self.analyze_callable(&task.params, Some(&task.return_type), &task.body, context);
+    }
+
+    fn analyze_marker_rule(&mut self, rule: &MarkerRule) {
+        let mut scopes = ScopeStack::default();
+        scopes.push();
+        for param in &rule.params {
+            scopes.insert(
+                param.name.value.clone(),
+                Binding {
+                    kind: BindingKind::Local,
+                    span: param.name.span,
+                    loop_bound: false,
+                    mutable: false,
+                },
+            );
+        }
+        self.analyze_marker_rule_block(&rule.body, &mut scopes);
+    }
+
+    fn analyze_marker_rule_block(&mut self, block: &MarkerRuleBlock, scopes: &mut ScopeStack) {
+        scopes.push();
+        for statement in &block.statements {
+            match statement {
+                MarkerRuleStmt::If(stmt) => {
+                    self.resolve_name(
+                        stmt.refinement.subject.value.as_str(),
+                        stmt.refinement.subject.span,
+                        scopes,
+                    );
+                    self.analyze_marker_annotation_args(&stmt.refinement.marker, scopes);
+                    let bindings = marker_pattern_bindings(&stmt.refinement.marker);
+                    scopes.push();
+                    for binding in bindings {
+                        scopes.insert(
+                            binding.value.clone(),
+                            Binding {
+                                kind: BindingKind::Local,
+                                span: binding.span,
+                                loop_bound: false,
+                                mutable: false,
+                            },
+                        );
+                    }
+                    self.analyze_marker_rule_block(&stmt.body, scopes);
+                    scopes.pop();
+                }
+                MarkerRuleStmt::Implies(stmt) => {
+                    self.analyze_marker_annotation_args(&stmt.marker, scopes);
+                    self.resolve_name(stmt.target.value.as_str(), stmt.target.span, scopes);
+                }
+            }
+        }
+        scopes.pop();
     }
 
     fn analyze_callable(
@@ -671,6 +727,11 @@ impl<'a> Analyzer<'a> {
                 self.analyze_expr(index, scopes, context);
                 None
             }
+            ExprKind::MarkerRefinement { subject, marker } => {
+                self.analyze_expr(subject, scopes, context);
+                self.analyze_marker_annotation_args(marker, scopes);
+                None
+            }
             ExprKind::UnsafeMarker(construction) => {
                 for arg in &construction.args {
                     self.analyze_expr(arg, scopes, context);
@@ -707,6 +768,12 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    fn analyze_marker_annotation_args(&mut self, marker: &MarkerAnnotation, scopes: &ScopeStack) {
+        for arg in &marker.args {
+            self.analyze_marker_arg(arg, scopes);
+        }
+    }
+
     fn analyze_marker_arg(&mut self, arg: &MarkerArg, scopes: &ScopeStack) {
         match &arg.kind {
             MarkerArgKind::Name(name) => {
@@ -719,7 +786,7 @@ impl<'a> Analyzer<'a> {
                     self.require_marker_place_binding(base.span, binding);
                 }
             }
-            MarkerArgKind::Int(_) | MarkerArgKind::Bool(_) => {}
+            MarkerArgKind::PatternBinding(_) | MarkerArgKind::Int(_) | MarkerArgKind::Bool(_) => {}
         }
     }
 
@@ -887,6 +954,7 @@ impl<'a> Analyzer<'a> {
             | ExprKind::Unary { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
+            | ExprKind::MarkerRefinement { .. }
             | ExprKind::UnsafeMarker(_) => Some(false),
             ExprKind::Binary { .. } => Some(false),
             ExprKind::Recover { .. } => Some(false),
@@ -980,21 +1048,22 @@ impl<'a> TypeChecker<'a> {
             .module
             .items
             .iter()
-            .map(|item| match item {
-                Item::Function(function) => (
+            .filter_map(|item| match item {
+                Item::Function(function) => Some((
                     function.name.value.clone(),
                     ItemSignature {
                         kind: ItemKind::Function,
                         signature: function_signature(function),
                     },
-                ),
-                Item::Task(task) => (
+                )),
+                Item::Task(task) => Some((
                     task.name.value.clone(),
                     ItemSignature {
                         kind: ItemKind::Task,
                         signature: task_signature(task),
                     },
-                ),
+                )),
+                Item::MarkerRule(_) => None,
             })
             .collect();
 
@@ -1012,6 +1081,7 @@ impl<'a> TypeChecker<'a> {
             match item {
                 Item::Function(function) => self.check_function(function),
                 Item::Task(task) => self.check_task(task),
+                Item::MarkerRule(rule) => self.check_marker_rule(rule),
             }
         }
     }
@@ -1070,6 +1140,133 @@ impl<'a> TypeChecker<'a> {
         }
 
         scopes.pop();
+    }
+
+    fn check_marker_rule(&mut self, rule: &MarkerRule) {
+        if !is_builtin_companion_rule(rule.name.value.as_str()) {
+            self.report_unknown_companion_rule(rule.name.span, rule.name.value.as_str());
+        }
+
+        let mut scopes = MarkerRuleScopeStack::default();
+        scopes.push();
+        for param in &rule.params {
+            scopes.insert_place(param.name.value.clone());
+        }
+        self.check_marker_rule_block(&rule.body, &mut scopes);
+        scopes.pop();
+    }
+
+    fn check_marker_rule_block(
+        &mut self,
+        block: &MarkerRuleBlock,
+        scopes: &mut MarkerRuleScopeStack,
+    ) {
+        scopes.push();
+        for statement in &block.statements {
+            match statement {
+                MarkerRuleStmt::If(stmt) => self.check_marker_rule_if(stmt, scopes),
+                MarkerRuleStmt::Implies(stmt) => self.check_marker_implication(stmt, scopes),
+            }
+        }
+        scopes.pop();
+    }
+
+    fn check_marker_rule_if(
+        &mut self,
+        stmt: &langlog_syntax::ast::MarkerRuleIfStmt,
+        scopes: &mut MarkerRuleScopeStack,
+    ) {
+        self.require_marker_rule_place(
+            stmt.refinement.subject.span,
+            stmt.refinement.subject.value.as_str(),
+            scopes,
+        );
+        let bindings = self.check_marker_refinement(&stmt.refinement, scopes);
+        scopes.push();
+        for binding in bindings {
+            scopes.insert_place(binding.value);
+        }
+        self.check_marker_rule_block(&stmt.body, scopes);
+        scopes.pop();
+    }
+
+    fn check_marker_implication(
+        &mut self,
+        stmt: &MarkerImplicationStmt,
+        scopes: &MarkerRuleScopeStack,
+    ) {
+        self.check_marker_rule_annotation(&stmt.marker, scopes, MarkerRuleMarkerContext::Implied);
+        self.require_marker_rule_place(stmt.target.span, stmt.target.value.as_str(), scopes);
+    }
+
+    fn check_marker_refinement(
+        &mut self,
+        refinement: &MarkerRefinement,
+        scopes: &MarkerRuleScopeStack,
+    ) -> Vec<Spanned<String>> {
+        self.check_marker_rule_annotation(
+            &refinement.marker,
+            scopes,
+            MarkerRuleMarkerContext::Refinement,
+        );
+        marker_pattern_bindings(&refinement.marker)
+    }
+
+    fn check_marker_rule_annotation(
+        &mut self,
+        marker: &MarkerAnnotation,
+        scopes: &MarkerRuleScopeStack,
+        context: MarkerRuleMarkerContext,
+    ) {
+        let Some(family) = lower_marker_family(&marker.name.value) else {
+            self.report_unknown_marker(marker.name.span, marker.name.value.as_str());
+            return;
+        };
+
+        if !self.marker_rule_arity_is_valid(family, marker.args.len()) {
+            self.report_marker_arity(marker.name.span, marker.name.value.as_str());
+        }
+
+        for arg in &marker.args {
+            match &arg.kind {
+                MarkerArgKind::Name(name) => {
+                    self.require_marker_rule_place(name.span, name.value.as_str(), scopes);
+                }
+                MarkerArgKind::PatternBinding(name) => {
+                    if context != MarkerRuleMarkerContext::Refinement {
+                        self.report_marker_pattern_binding_outside_refinement(name.span);
+                    }
+                }
+                MarkerArgKind::Field { field, .. } => {
+                    self.report_marker_rule_field_place(field.span);
+                }
+                MarkerArgKind::Int(_) | MarkerArgKind::Bool(_) => {}
+            }
+        }
+    }
+
+    fn marker_rule_arity_is_valid(&self, family: HirMarkerFamily, arity: usize) -> bool {
+        match family {
+            HirMarkerFamily::Event => arity == 0,
+            HirMarkerFamily::True | HirMarkerFamily::False => arity == 0,
+            HirMarkerFamily::Equal
+            | HirMarkerFamily::LessThan
+            | HirMarkerFamily::GreaterThan
+            | HirMarkerFamily::LessOrEqual
+            | HirMarkerFamily::GreaterOrEqual
+            | HirMarkerFamily::MemberOf => arity == 2,
+        }
+    }
+
+    fn require_marker_rule_place(&mut self, span: Span, name: &str, scopes: &MarkerRuleScopeStack) {
+        if scopes.contains(name) {
+            return;
+        }
+
+        self.diagnostics.push(
+            Diagnostic::error(format!("unknown marker rule place `{name}`"))
+                .with_label(Label::primary(span, "place is not in scope here")),
+        );
     }
 
     fn check_block(
@@ -1317,6 +1514,12 @@ impl<'a> TypeChecker<'a> {
                 let index_type = self.check_expr(index, scopes);
                 self.check_index_expr(expr.span, &target_type, index.span, &index_type)
             }
+            ExprKind::MarkerRefinement { subject, marker } => {
+                self.check_expr(subject, scopes);
+                self.check_marker_annotation(marker, scopes);
+                self.report_runtime_marker_refinement(expr.span);
+                SemanticType::Bool
+            }
             ExprKind::UnsafeMarker(construction) => self.check_unsafe_marker_construction(
                 construction.marker.span,
                 construction.marker.value.as_str(),
@@ -1396,6 +1599,9 @@ impl<'a> TypeChecker<'a> {
         match &arg.kind {
             MarkerArgKind::Name(name) => {
                 scopes.lookup(name.value.as_str());
+            }
+            MarkerArgKind::PatternBinding(name) => {
+                self.report_marker_pattern_binding_outside_refinement(name.span);
             }
             MarkerArgKind::Field { base, field } => {
                 if field.value != "length" {
@@ -2056,6 +2262,45 @@ impl<'a> TypeChecker<'a> {
                 .with_label(Label::primary(span, "this place is not an array")),
         );
     }
+
+    fn report_unknown_companion_rule(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("unknown companion marker rule `{name}`")).with_label(
+                Label::primary(
+                    span,
+                    "expected a builtin comparison companion rule name here",
+                ),
+            ),
+        );
+    }
+
+    fn report_marker_pattern_binding_outside_refinement(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("marker-pattern bindings are only allowed in marker refinements")
+                .with_label(Label::primary(
+                    span,
+                    "`?name` binds a place only in `with` patterns",
+                )),
+        );
+    }
+
+    fn report_marker_rule_field_place(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("marker rule places must be named rule places").with_label(
+                Label::primary(span, "field places are not supported in marker rules"),
+            ),
+        );
+    }
+
+    fn report_runtime_marker_refinement(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("marker refinements are only allowed inside marker rules")
+                .with_label(Label::primary(
+                    span,
+                    "this proof-only query has no runtime value",
+                )),
+        );
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2087,6 +2332,38 @@ impl TypeScopeStack {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerRuleMarkerContext {
+    Refinement,
+    Implied,
+}
+
+#[derive(Debug, Default)]
+struct MarkerRuleScopeStack {
+    scopes: Vec<HashSet<String>>,
+}
+
+impl MarkerRuleScopeStack {
+    fn push(&mut self) {
+        self.scopes.push(HashSet::new());
+    }
+
+    fn pop(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn insert_place(&mut self, name: String) {
+        self.scopes
+            .last_mut()
+            .expect("marker rule scope stack must not be empty")
+            .insert(name);
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| scope.contains(name))
+    }
+}
+
 fn name_span(expr: &Expr) -> Span {
     match &expr.kind {
         ExprKind::Name(name) => name.span,
@@ -2110,11 +2387,33 @@ fn arithmetic_result(ok: SemanticType) -> SemanticType {
     }
 }
 
-fn item_name_and_kind(item: &Item) -> (&Spanned<String>, ItemKind) {
+fn item_name_and_kind(item: &Item) -> Option<(&Spanned<String>, ItemKind)> {
     match item {
-        Item::Function(function) => (&function.name, ItemKind::Function),
-        Item::Task(task) => (&task.name, ItemKind::Task),
+        Item::Function(function) => Some((&function.name, ItemKind::Function)),
+        Item::Task(task) => Some((&task.name, ItemKind::Task)),
+        Item::MarkerRule(_) => None,
     }
+}
+
+fn is_builtin_companion_rule(name: &str) -> bool {
+    matches!(
+        name,
+        "Equal" | "LessThan" | "GreaterThan" | "LessOrEqual" | "GreaterOrEqual"
+    )
+}
+
+fn marker_pattern_bindings(marker: &MarkerAnnotation) -> Vec<Spanned<String>> {
+    marker
+        .args
+        .iter()
+        .filter_map(|arg| match &arg.kind {
+            MarkerArgKind::PatternBinding(name) => Some(name.clone()),
+            MarkerArgKind::Name(_)
+            | MarkerArgKind::Field { .. }
+            | MarkerArgKind::Int(_)
+            | MarkerArgKind::Bool(_) => None,
+        })
+        .collect()
 }
 
 fn function_signature(function: &Function) -> FunctionType {

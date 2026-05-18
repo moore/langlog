@@ -1,6 +1,7 @@
 use langlog_sema::{
     analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction,
-    HirFunctionKind, HirStmt, HirType, HostBuiltin,
+    HirFunctionKind, HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirStmt, HirType,
+    HostBuiltin,
 };
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt, Task};
 use langlog_syntax::{parse, LabelStyle, Span};
@@ -927,6 +928,118 @@ fn main(limit: u32) {
             .resolution(name_span(&observe_stmt(&main.body, 4).left))
             .is_some(),
         "expected immutable `snapshot` observe to resolve"
+    );
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Marker-rule conditions of the form `a with Marker(...)` MUST be marker refinement patterns.
+#[test]
+fn requirement_llg_mark_06_lowers_marker_refinement_patterns_into_hir() {
+    let checked = analyze_ok(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(result, bound) for result;
+    }
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = checked.hir.as_ref().expect("expected lowered HIR");
+    assert_eq!(hir.marker_rules.len(), 1);
+    let rule = &hir.marker_rules[0];
+    assert_eq!(rule.name, "LessThan");
+
+    let [HirMarkerRuleStmt::If(stmt)] = rule.body.statements.as_slice() else {
+        panic!("expected one marker refinement rule");
+    };
+    assert_eq!(stmt.refinement.subject, "a");
+    assert_eq!(stmt.refinement.marker.family, HirMarkerFamily::LessThan);
+    assert_eq!(
+        stmt.refinement.marker.args[1],
+        HirMarkerTemplateArg::Binding("bound".to_owned())
+    );
+
+    let [HirMarkerRuleStmt::Implies(implication)] = stmt.body.statements.as_slice() else {
+        panic!("expected one marker implication");
+    };
+    assert_eq!(implication.target, "result");
+    assert_eq!(implication.marker.family, HirMarkerFamily::LessThan);
+    assert_eq!(
+        implication.marker.args[1],
+        HirMarkerTemplateArg::Place("bound".to_owned())
+    );
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# This marker slice MUST accept only builtin comparison companion rule names.
+#[test]
+fn requirement_llg_mark_06_rejects_unknown_companion_rule_names() {
+    let checked = analyze_ok("mark Sub(a: place, result: place) {}");
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "unknown companion marker rule `Sub`");
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Companion marker rules MUST reject unknown marker families in refinements and implications.
+#[test]
+fn requirement_llg_mark_06_rejects_unknown_marker_families_in_rules() {
+    let checked = analyze_ok(
+        r#"
+mark LessThan(a: place, b: place) {
+    implies Unknown(a, b) for a;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "unknown marker `Unknown`");
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Marker-pattern bindings MUST use `?name` at the binding site.
+#[test]
+fn requirement_llg_mark_06_rejects_marker_pattern_bindings_outside_refinements() {
+    let checked = analyze_ok(
+        r#"
+fn main(value: u32) {
+    let copy: u32 with LessThan(value, ?bound) = value;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "marker-pattern bindings are only allowed in marker refinements",
+    );
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Marker refinement patterns MUST be accepted only inside marker companion-rule bodies.
+#[test]
+fn requirement_llg_mark_06_rejects_marker_refinements_in_runtime_code() {
+    let checked = analyze_ok(
+        r#"
+fn main(value: u32) {
+    if value with Event {
+        return;
+    }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "marker refinements are only allowed inside marker rules",
     );
 }
 

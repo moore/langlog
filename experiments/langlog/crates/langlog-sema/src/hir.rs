@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MarkerAnnotation, MarkerArg,
-    MarkerArgKind, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type, TypeKind, UnaryOp,
+    MarkerArgKind, MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock,
+    MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type, TypeKind,
+    UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -23,6 +25,7 @@ pub struct HirBindingId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirProgram {
     pub functions: Vec<HirFunction>,
+    pub marker_rules: Vec<HirMarkerRule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +55,68 @@ pub struct HirBinding {
     pub ty: HirType,
     pub markers: Vec<HirMarkerRequirement>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerRule {
+    pub name: String,
+    pub params: Vec<HirMarkerRuleParam>,
+    pub body: HirMarkerRuleBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerRuleParam {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerRuleBlock {
+    pub statements: Vec<HirMarkerRuleStmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirMarkerRuleStmt {
+    If(HirMarkerRuleIfStmt),
+    Implies(HirMarkerImplication),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerRuleIfStmt {
+    pub refinement: HirMarkerRefinement,
+    pub body: HirMarkerRuleBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerRefinement {
+    pub subject: String,
+    pub marker: HirMarkerTemplate,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerImplication {
+    pub marker: HirMarkerTemplate,
+    pub target: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerTemplate {
+    pub family: HirMarkerFamily,
+    pub args: Vec<HirMarkerTemplateArg>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirMarkerTemplateArg {
+    Place(String),
+    Binding(String),
+    U32(u64),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,9 +400,19 @@ pub(crate) fn lower_program(
             .module
             .items
             .iter()
-            .map(|item| match item {
-                Item::Function(function) => lowerer.lower_function(function),
-                Item::Task(task) => lowerer.lower_task(task),
+            .filter_map(|item| match item {
+                Item::Function(function) => Some(lowerer.lower_function(function)),
+                Item::Task(task) => Some(lowerer.lower_task(task)),
+                Item::MarkerRule(_) => None,
+            })
+            .collect(),
+        marker_rules: parsed
+            .module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::MarkerRule(rule) => Some(lowerer.lower_marker_rule(rule)),
+                Item::Function(_) | Item::Task(_) => None,
             })
             .collect(),
     }
@@ -416,6 +491,92 @@ impl<'a> HirLowerer<'a> {
             return_markers: self.lower_marker_requirements(&task.return_type),
             body: self.lower_block(&task.body),
             span: task.span,
+        }
+    }
+
+    fn lower_marker_rule(&self, rule: &MarkerRule) -> HirMarkerRule {
+        HirMarkerRule {
+            name: rule.name.value.clone(),
+            params: rule
+                .params
+                .iter()
+                .map(|param| HirMarkerRuleParam {
+                    name: param.name.value.clone(),
+                    span: param.span,
+                })
+                .collect(),
+            body: self.lower_marker_rule_block(&rule.body),
+            span: rule.span,
+        }
+    }
+
+    fn lower_marker_rule_block(&self, block: &MarkerRuleBlock) -> HirMarkerRuleBlock {
+        HirMarkerRuleBlock {
+            statements: block
+                .statements
+                .iter()
+                .map(|statement| self.lower_marker_rule_statement(statement))
+                .collect(),
+            span: block.span,
+        }
+    }
+
+    fn lower_marker_rule_statement(&self, statement: &MarkerRuleStmt) -> HirMarkerRuleStmt {
+        match statement {
+            MarkerRuleStmt::If(stmt) => HirMarkerRuleStmt::If(HirMarkerRuleIfStmt {
+                refinement: self.lower_marker_refinement(&stmt.refinement),
+                body: self.lower_marker_rule_block(&stmt.body),
+                span: stmt.span,
+            }),
+            MarkerRuleStmt::Implies(stmt) => {
+                HirMarkerRuleStmt::Implies(self.lower_marker_implication(stmt))
+            }
+        }
+    }
+
+    fn lower_marker_refinement(&self, refinement: &MarkerRefinement) -> HirMarkerRefinement {
+        HirMarkerRefinement {
+            subject: refinement.subject.value.clone(),
+            marker: self.lower_marker_template(&refinement.marker),
+            span: refinement.span,
+        }
+    }
+
+    fn lower_marker_implication(
+        &self,
+        implication: &MarkerImplicationStmt,
+    ) -> HirMarkerImplication {
+        HirMarkerImplication {
+            marker: self.lower_marker_template(&implication.marker),
+            target: implication.target.value.clone(),
+            span: implication.span,
+        }
+    }
+
+    fn lower_marker_template(&self, marker: &MarkerAnnotation) -> HirMarkerTemplate {
+        HirMarkerTemplate {
+            family: lower_marker_family(&marker.name.value)
+                .expect("checked marker rules must use builtin marker families"),
+            args: marker
+                .args
+                .iter()
+                .map(|arg| self.lower_marker_template_arg(arg))
+                .collect(),
+            span: marker.span,
+        }
+    }
+
+    fn lower_marker_template_arg(&self, arg: &MarkerArg) -> HirMarkerTemplateArg {
+        match &arg.kind {
+            MarkerArgKind::Name(name) => HirMarkerTemplateArg::Place(name.value.clone()),
+            MarkerArgKind::PatternBinding(name) => {
+                HirMarkerTemplateArg::Binding(name.value.clone())
+            }
+            MarkerArgKind::Field { base, field } => {
+                HirMarkerTemplateArg::Place(format!("{}.{}", base.value, field.value))
+            }
+            MarkerArgKind::Int(value) => HirMarkerTemplateArg::U32(*value),
+            MarkerArgKind::Bool(value) => HirMarkerTemplateArg::Bool(*value),
         }
     }
 
@@ -691,6 +852,9 @@ impl<'a> HirLowerer<'a> {
                 ty,
                 span: expr.span,
             },
+            ExprKind::MarkerRefinement { .. } => {
+                unreachable!("marker refinements are rejected before HIR lowering")
+            }
             ExprKind::Grouped(inner) => {
                 let mut lowered = self.lower_expr(inner);
                 lowered.span = expr.span;
@@ -778,6 +942,7 @@ impl<'a> HirLowerer<'a> {
     fn lower_marker_arg(&self, arg: &MarkerArg) -> Option<HirMarkerPlace> {
         match &arg.kind {
             MarkerArgKind::Name(name) => self.marker_binding_place(name.span),
+            MarkerArgKind::PatternBinding(_) => None,
             MarkerArgKind::Field { base, field } if field.value == "length" => self
                 .marker_binding_place(base.span)
                 .and_then(|place| match place {

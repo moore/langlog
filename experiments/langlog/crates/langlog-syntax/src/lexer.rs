@@ -59,6 +59,7 @@ impl Lexer {
                 '[' => self.push_simple(TokenKind::LBracket, 1),
                 ']' => self.push_simple(TokenKind::RBracket, 1),
                 ',' => self.push_simple(TokenKind::Comma, 1),
+                '?' => self.push_simple(TokenKind::Question, 1),
                 ':' => {
                     if self.peek_next(':') {
                         self.push_compound(TokenKind::PathSep, 2);

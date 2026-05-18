@@ -9,6 +9,7 @@ pub struct Module {
 pub enum Item {
     Function(Function),
     Task(Task),
+    MarkerRule(MarkerRule),
 }
 
 impl Item {
@@ -16,6 +17,7 @@ impl Item {
         match self {
             Self::Function(function) => function.span,
             Self::Task(task) => task.span,
+            Self::MarkerRule(rule) => rule.span,
         }
     }
 }
@@ -36,6 +38,62 @@ pub struct Task {
     pub params: Vec<Param>,
     pub return_type: Type,
     pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRule {
+    pub span: Span,
+    pub name: Spanned<String>,
+    pub params: Vec<MarkerRuleParam>,
+    pub body: MarkerRuleBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRuleParam {
+    pub span: Span,
+    pub name: Spanned<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRuleBlock {
+    pub span: Span,
+    pub statements: Vec<MarkerRuleStmt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerRuleStmt {
+    If(MarkerRuleIfStmt),
+    Implies(MarkerImplicationStmt),
+}
+
+impl MarkerRuleStmt {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::If(stmt) => stmt.span,
+            Self::Implies(stmt) => stmt.span,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRuleIfStmt {
+    pub span: Span,
+    pub refinement: MarkerRefinement,
+    pub body: MarkerRuleBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRefinement {
+    pub span: Span,
+    pub subject: Spanned<String>,
+    pub marker: MarkerAnnotation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerImplicationStmt {
+    pub span: Span,
+    pub marker: MarkerAnnotation,
+    pub target: Spanned<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +321,10 @@ pub enum ExprKind {
         target: Box<Expr>,
         index: Box<Expr>,
     },
+    MarkerRefinement {
+        subject: Box<Expr>,
+        marker: MarkerAnnotation,
+    },
     UnsafeMarker(UnsafeMarkerConstruction),
     Grouped(Box<Expr>),
 }
@@ -351,6 +413,7 @@ pub struct MarkerArg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkerArgKind {
     Name(Spanned<String>),
+    PatternBinding(Spanned<String>),
     Field {
         base: Spanned<String>,
         field: Spanned<String>,
