@@ -329,6 +329,15 @@ Companion marker rules MUST lower refinement-pattern bindings and implications
 into Proof IR marker-rule templates.
 Control-flow comparison marker facts MUST be emitted as companion-rule
 implications.
+Trusted builtin comparison companion rules MUST be active by default.
+A source companion marker rule with a builtin comparison name MUST override the
+trusted builtin rule with the same name.
+Companion marker rules MUST be evaluated during marker checking against the
+current marker environment.
+Observe comparisons MUST use the same companion rule semantics as `if`
+conditions.
+Duplicate source companion marker rules MUST be rejected.
+Duplicate marker rule parameter names MUST be rejected.
 
 Marker-rule conditions of the form `a with Marker(...)` MUST be marker
 refinement patterns. The condition succeeds only if the current marker
@@ -376,6 +385,11 @@ mark Sub(a: place, amount: place, result: place) {
 
 If no companion marker rule applies, the operation MUST NOT preserve the input
 marker facts onto the result.
+
+For `u32` literal bounds, the marker checker MAY normalize
+`LessOrEqual(left, N)` into `LessThan(left, N + 1)` when `N + 1` is
+representable and available as a place. This is a narrow builtin bounds rule,
+not general arithmetic solving.
 
 ## LLG-DIAG-01 Source Span Preservation
 

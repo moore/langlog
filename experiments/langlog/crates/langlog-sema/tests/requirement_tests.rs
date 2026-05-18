@@ -986,6 +986,33 @@ fn requirement_llg_mark_06_rejects_unknown_companion_rule_names() {
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
 //= type=test
+//# Duplicate source companion marker rules MUST be rejected.
+#[test]
+fn requirement_llg_mark_06_rejects_duplicate_source_companion_rules() {
+    let checked = analyze_ok(
+        r#"
+mark LessThan(a: place, b: place, result: place) {}
+mark LessThan(a: place, b: place, result: place) {}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "duplicate companion marker rule `LessThan`");
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Duplicate marker rule parameter names MUST be rejected.
+#[test]
+fn requirement_llg_mark_06_rejects_duplicate_marker_rule_parameter_names() {
+    let checked = analyze_ok("mark LessThan(a: place, a: place, result: place) {}");
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "duplicate marker rule parameter `a`");
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
 //# Companion marker rules MUST reject unknown marker families in refinements and implications.
 #[test]
 fn requirement_llg_mark_06_rejects_unknown_marker_families_in_rules() {

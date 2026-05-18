@@ -1077,11 +1077,24 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_module(&mut self) {
+        self.check_marker_rule_declarations();
         for item in &self.parsed.module.items {
             match item {
                 Item::Function(function) => self.check_function(function),
                 Item::Task(task) => self.check_task(task),
                 Item::MarkerRule(rule) => self.check_marker_rule(rule),
+            }
+        }
+    }
+
+    fn check_marker_rule_declarations(&mut self) {
+        let mut seen = HashMap::new();
+        for item in &self.parsed.module.items {
+            let Item::MarkerRule(rule) = item else {
+                continue;
+            };
+            if let Some(previous) = seen.insert(rule.name.value.clone(), rule.name.span) {
+                self.report_duplicate_companion_rule(rule.name.span, previous, &rule.name.value);
             }
         }
     }
@@ -1146,10 +1159,29 @@ impl<'a> TypeChecker<'a> {
         if !is_builtin_companion_rule(rule.name.value.as_str()) {
             self.report_unknown_companion_rule(rule.name.span, rule.name.value.as_str());
         }
+        let expected_params = companion_rule_param_count(rule.name.value.as_str());
+        if let Some(expected) = expected_params {
+            if rule.params.len() != expected {
+                self.report_companion_rule_param_count(
+                    rule.name.span,
+                    rule.name.value.as_str(),
+                    expected,
+                    rule.params.len(),
+                );
+            }
+        }
 
         let mut scopes = MarkerRuleScopeStack::default();
         scopes.push();
+        let mut seen_params = HashMap::new();
         for param in &rule.params {
+            if let Some(previous) = seen_params.insert(param.name.value.clone(), param.name.span) {
+                self.report_duplicate_marker_rule_param(
+                    param.name.span,
+                    previous,
+                    &param.name.value,
+                );
+            }
             scopes.insert_place(param.name.value.clone());
         }
         self.check_marker_rule_block(&rule.body, &mut scopes);
@@ -2274,6 +2306,40 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
+    fn report_duplicate_companion_rule(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate companion marker rule `{name}`"))
+                .with_label(Label::primary(span, "duplicate marker rule declared here"))
+                .with_label(Label::secondary(
+                    previous,
+                    "first marker rule declared here",
+                )),
+        );
+    }
+
+    fn report_companion_rule_param_count(
+        &mut self,
+        span: Span,
+        name: &str,
+        expected: usize,
+        found: usize,
+    ) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "wrong number of parameters for companion marker rule `{name}`: expected {expected}, found {found}"
+            ))
+            .with_label(Label::primary(span, "adjust this marker rule signature")),
+        );
+    }
+
+    fn report_duplicate_marker_rule_param(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate marker rule parameter `{name}`"))
+                .with_label(Label::primary(span, "duplicate parameter declared here"))
+                .with_label(Label::secondary(previous, "first parameter declared here")),
+        );
+    }
+
     fn report_marker_pattern_binding_outside_refinement(&mut self, span: Span) {
         self.diagnostics.push(
             Diagnostic::error("marker-pattern bindings are only allowed in marker refinements")
@@ -2400,6 +2466,10 @@ fn is_builtin_companion_rule(name: &str) -> bool {
         name,
         "Equal" | "LessThan" | "GreaterThan" | "LessOrEqual" | "GreaterOrEqual"
     )
+}
+
+fn companion_rule_param_count(name: &str) -> Option<usize> {
+    is_builtin_companion_rule(name).then_some(3)
 }
 
 fn marker_pattern_bindings(marker: &MarkerAnnotation) -> Vec<Spanned<String>> {

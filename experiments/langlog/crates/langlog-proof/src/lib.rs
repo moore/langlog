@@ -7,7 +7,7 @@ use langlog_sema::{
     HirStmt, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp};
-use langlog_syntax::{Diagnostic, Label, Severity, Span};
+use langlog_syntax::{ByteOffset, Diagnostic, FileId, Label, Severity, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlaceId {
@@ -251,6 +251,7 @@ pub enum ProofEntry {
         left: ProofExpr,
         op: ObserveOp,
         right: ProofExpr,
+        result: PlaceId,
         facts: Vec<MarkerFact>,
         else_block: ProofBlock,
         span: Span,
@@ -691,11 +692,13 @@ impl ProofLowerer {
                 ) else {
                     return;
                 };
-                let facts = self.observe_facts(&left, stmt.op, &right, stmt.span);
+                let result = self.new_temp(HirType::Bool, stmt.span, Some(PlaceValue::Bool(true)));
+                let facts = self.truth_facts(result, true, MarkerFactSource::Observe, stmt.span);
                 entries.push(ProofEntry::Observe {
                     left,
                     op: stmt.op,
                     right,
+                    result,
                     facts,
                     else_block: self.lower_block(&stmt.else_block),
                     span: stmt.span,
@@ -1275,20 +1278,7 @@ impl ProofLowerer {
         } else {
             MarkerFactSource::ControlFlowFalse
         };
-        let mut facts = vec![MarkerFact {
-            target: condition.place,
-            marker: if truth {
-                MarkerPattern::True {
-                    value: condition.place,
-                }
-            } else {
-                MarkerPattern::False {
-                    value: condition.place,
-                }
-            },
-            source,
-            origin_span,
-        }];
+        let mut facts = self.truth_facts(condition.place, truth, source, origin_span);
 
         match &condition.kind {
             ProofExprKind::Binary {
@@ -1302,185 +1292,30 @@ impl ProofLowerer {
             ProofExprKind::Binary {
                 op: BinaryOp::Or, ..
             } => {}
-            ProofExprKind::Binary { op, left, right } => {
-                facts.extend(self.binary_relation_facts(
-                    *op,
-                    left,
-                    right,
-                    truth,
-                    MarkerFactSource::CompanionRule,
-                    origin_span,
-                ));
-            }
+            ProofExprKind::Binary { .. } => {}
             _ => {}
         }
 
         facts
     }
 
-    fn observe_facts(
-        &mut self,
-        left: &ProofExpr,
-        op: ObserveOp,
-        right: &ProofExpr,
-        origin_span: Span,
-    ) -> Vec<MarkerFact> {
-        self.observe_relation_facts(
-            left,
-            op,
-            right,
-            true,
-            MarkerFactSource::Observe,
-            origin_span,
-        )
-    }
-
-    fn binary_relation_facts(
-        &mut self,
-        op: BinaryOp,
-        left: &ProofExpr,
-        right: &ProofExpr,
+    fn truth_facts(
+        &self,
+        value: PlaceId,
         truth: bool,
         source: MarkerFactSource,
         origin_span: Span,
     ) -> Vec<MarkerFact> {
-        let Some(op) = binary_to_observe_op(op) else {
-            return Vec::new();
-        };
-        self.observe_relation_facts(left, op, right, truth, source, origin_span)
-    }
-
-    fn observe_relation_facts(
-        &mut self,
-        left: &ProofExpr,
-        op: ObserveOp,
-        right: &ProofExpr,
-        truth: bool,
-        source: MarkerFactSource,
-        origin_span: Span,
-    ) -> Vec<MarkerFact> {
-        let mut facts = Vec::new();
-        match (op, truth) {
-            (ObserveOp::Eq, true) | (ObserveOp::NotEq, false) => {
-                facts.push(self.fact(
-                    left.place,
-                    MarkerPattern::Equal {
-                        left: left.place,
-                        right: right.place,
-                    },
-                    source,
-                    origin_span,
-                ));
-                facts.push(self.fact(
-                    right.place,
-                    MarkerPattern::Equal {
-                        left: right.place,
-                        right: left.place,
-                    },
-                    source,
-                    origin_span,
-                ));
-            }
-            (ObserveOp::Lt, true) | (ObserveOp::GtEq, false) => {
-                self.push_less_than_pair(&mut facts, left.place, right.place, source, origin_span);
-            }
-            (ObserveOp::LtEq, true) | (ObserveOp::Gt, false) => {
-                facts.push(self.fact(
-                    left.place,
-                    MarkerPattern::LessOrEqual {
-                        left: left.place,
-                        right: right.place,
-                    },
-                    source,
-                    origin_span,
-                ));
-                facts.push(self.fact(
-                    right.place,
-                    MarkerPattern::GreaterOrEqual {
-                        left: right.place,
-                        right: left.place,
-                    },
-                    source,
-                    origin_span,
-                ));
-                if let Some(bound) = self.successor_u32_place(right.place, right.span) {
-                    self.push_less_than_pair(&mut facts, left.place, bound, source, origin_span);
-                }
-            }
-            (ObserveOp::Gt, true) | (ObserveOp::LtEq, false) => {
-                self.push_less_than_pair(&mut facts, right.place, left.place, source, origin_span);
-            }
-            (ObserveOp::GtEq, true) | (ObserveOp::Lt, false) => {
-                facts.push(self.fact(
-                    left.place,
-                    MarkerPattern::GreaterOrEqual {
-                        left: left.place,
-                        right: right.place,
-                    },
-                    source,
-                    origin_span,
-                ));
-                facts.push(self.fact(
-                    right.place,
-                    MarkerPattern::LessOrEqual {
-                        left: right.place,
-                        right: left.place,
-                    },
-                    source,
-                    origin_span,
-                ));
-            }
-            (ObserveOp::NotEq, true) | (ObserveOp::Eq, false) => {}
-        }
-        facts
-    }
-
-    fn push_less_than_pair(
-        &mut self,
-        facts: &mut Vec<MarkerFact>,
-        left: PlaceId,
-        right: PlaceId,
-        source: MarkerFactSource,
-        origin_span: Span,
-    ) {
-        facts.push(self.fact(
-            left,
-            MarkerPattern::LessThan { left, right },
-            source,
-            origin_span,
-        ));
-        facts.push(self.fact(
-            right,
-            MarkerPattern::GreaterThan {
-                left: right,
-                right: left,
+        vec![MarkerFact {
+            target: value,
+            marker: if truth {
+                MarkerPattern::True { value }
+            } else {
+                MarkerPattern::False { value }
             },
             source,
             origin_span,
-        ));
-    }
-
-    fn successor_u32_place(&mut self, place: PlaceId, span: Span) -> Option<PlaceId> {
-        let value = match self.place_value(place)? {
-            PlaceValue::U32(value) if value < u32::MAX as u64 => value + 1,
-            _ => return None,
-        };
-        Some(self.u32_place(value, span))
-    }
-
-    fn fact(
-        &self,
-        target: PlaceId,
-        marker: MarkerPattern,
-        source: MarkerFactSource,
-        origin_span: Span,
-    ) -> MarkerFact {
-        MarkerFact {
-            target,
-            marker,
-            source,
-            origin_span,
-        }
+        }]
     }
 
     fn new_temp(&mut self, ty: HirType, span: Span, value: Option<PlaceValue>) -> PlaceId {
@@ -1565,8 +1400,35 @@ impl ProofExpr {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompanionRuleSet {
+    rules: HashMap<String, ProofMarkerRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompanionInvocation {
+    name: &'static str,
+    places: Vec<PlaceId>,
+    origin_span: Span,
+}
+
+impl CompanionRuleSet {
+    fn new(source_rules: &[ProofMarkerRule]) -> Self {
+        let mut rules = builtin_companion_rules();
+        for rule in source_rules {
+            rules.insert(rule.name.clone(), rule.clone());
+        }
+        Self { rules }
+    }
+
+    fn get(&self, name: &str) -> Option<&ProofMarkerRule> {
+        self.rules.get(name)
+    }
+}
+
 struct Checker<'a> {
     program: &'a ProofProgram,
+    companion_rules: CompanionRuleSet,
     obligations: usize,
     diagnostics: Vec<Diagnostic>,
     facts: Vec<MarkerFact>,
@@ -1576,6 +1438,7 @@ impl<'a> Checker<'a> {
     fn new(program: &'a ProofProgram) -> Self {
         Self {
             program,
+            companion_rules: CompanionRuleSet::new(&program.marker_rules),
             obligations: 0,
             diagnostics: Vec::new(),
             facts: Vec::new(),
@@ -1618,6 +1481,7 @@ impl<'a> Checker<'a> {
                 self.copy_marker_facts(env, *value, *new_place, *span);
             }
             ProofEntry::Branch {
+                condition,
                 then_facts,
                 else_facts,
                 then_block,
@@ -1626,23 +1490,33 @@ impl<'a> Checker<'a> {
             } => {
                 let snapshot = env.facts.len();
                 self.add_facts(env, then_facts);
+                self.apply_condition_companions(env, condition, true);
                 self.check_block(then_block, env);
                 env.facts.truncate(snapshot);
 
                 if let Some(else_block) = else_block {
                     let snapshot = env.facts.len();
                     self.add_facts(env, else_facts);
+                    self.apply_condition_companions(env, condition, false);
                     self.check_block(else_block, env);
                     env.facts.truncate(snapshot);
                 }
             }
             ProofEntry::Observe {
-                facts, else_block, ..
+                left,
+                op,
+                right,
+                result,
+                facts,
+                else_block,
+                span,
+                ..
             } => {
                 let snapshot = env.facts.len();
                 self.check_block(else_block, env);
                 env.facts.truncate(snapshot);
                 self.add_facts(env, facts);
+                self.apply_observe_companion(env, left, *op, right, *result, *span);
             }
             ProofEntry::For {
                 membership, body, ..
@@ -1680,8 +1554,38 @@ impl<'a> Checker<'a> {
     }
 
     fn add_fact(&mut self, env: &mut MarkerEnv, fact: MarkerFact) {
+        let normalized = self.normalized_less_than_fact(&fact);
         env.facts.push(fact.clone());
         self.facts.push(fact);
+        if let Some(normalized) = normalized {
+            env.facts.push(normalized.clone());
+            self.facts.push(normalized);
+        }
+    }
+
+    fn normalized_less_than_fact(&self, fact: &MarkerFact) -> Option<MarkerFact> {
+        let MarkerPattern::LessOrEqual { left, right } = fact.marker else {
+            return None;
+        };
+        let right = self.successor_literal_place(right)?;
+        Some(MarkerFact {
+            target: left,
+            marker: MarkerPattern::LessThan { left, right },
+            source: MarkerFactSource::TrustedBuiltin,
+            origin_span: fact.origin_span,
+        })
+    }
+
+    fn successor_literal_place(&self, place: PlaceId) -> Option<PlaceId> {
+        let PlaceValue::U32(value) = self.literal_value(place)? else {
+            return None;
+        };
+        let successor = value.checked_add(1)?;
+        self.program
+            .places
+            .iter()
+            .find(|candidate| self.literal_value(candidate.id) == Some(PlaceValue::U32(successor)))
+            .map(|place| place.id)
     }
 
     fn copy_marker_facts(
@@ -1707,6 +1611,265 @@ impl<'a> Checker<'a> {
             })
             .collect();
         self.add_facts(env, &copied);
+    }
+
+    fn apply_condition_companions(
+        &mut self,
+        env: &mut MarkerEnv,
+        condition: &ProofExpr,
+        truth: bool,
+    ) {
+        match &condition.kind {
+            ProofExprKind::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } if truth => {
+                self.apply_condition_companions(env, left, true);
+                self.apply_condition_companions(env, right, true);
+            }
+            ProofExprKind::Binary {
+                op: BinaryOp::Or, ..
+            } => {}
+            ProofExprKind::Binary { op, left, right } => {
+                if let Some(invocation) = comparison_invocation(
+                    *op,
+                    left.place,
+                    right.place,
+                    condition.place,
+                    condition.span,
+                ) {
+                    self.apply_companion_rule(env, invocation);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_observe_companion(
+        &mut self,
+        env: &mut MarkerEnv,
+        left: &ProofExpr,
+        op: ObserveOp,
+        right: &ProofExpr,
+        result: PlaceId,
+        origin_span: Span,
+    ) {
+        if let Some(invocation) =
+            observe_invocation(op, left.place, right.place, result, origin_span)
+        {
+            self.apply_companion_rule(env, invocation);
+        }
+    }
+
+    fn apply_companion_rule(&mut self, env: &mut MarkerEnv, invocation: CompanionInvocation) {
+        let Some(rule) = self.companion_rules.get(invocation.name).cloned() else {
+            return;
+        };
+        if rule.params.len() != invocation.places.len() {
+            return;
+        }
+
+        let mut bindings = HashMap::new();
+        for (param, place) in rule.params.iter().zip(invocation.places.iter().copied()) {
+            bindings.insert(param.name.clone(), place);
+        }
+        self.apply_companion_rule_block(env, &rule.body, &bindings, invocation.origin_span);
+    }
+
+    fn apply_companion_rule_block(
+        &mut self,
+        env: &mut MarkerEnv,
+        block: &ProofMarkerRuleBlock,
+        bindings: &HashMap<String, PlaceId>,
+        origin_span: Span,
+    ) {
+        for statement in &block.statements {
+            match statement {
+                ProofMarkerRuleStmt::If(stmt) => {
+                    for refined in self.match_marker_refinement(env, stmt, bindings) {
+                        self.apply_companion_rule_block(env, &stmt.body, &refined, origin_span);
+                    }
+                }
+                ProofMarkerRuleStmt::Implies(implication) => {
+                    if let Some(fact) =
+                        self.instantiate_implication(implication, bindings, origin_span)
+                    {
+                        self.add_fact(env, fact);
+                    }
+                }
+            }
+        }
+    }
+
+    fn match_marker_refinement(
+        &self,
+        env: &MarkerEnv,
+        stmt: &ProofMarkerRuleIfStmt,
+        bindings: &HashMap<String, PlaceId>,
+    ) -> Vec<HashMap<String, PlaceId>> {
+        let Some(subject) = bindings.get(&stmt.subject).copied() else {
+            return Vec::new();
+        };
+
+        env.facts
+            .iter()
+            .filter(|fact| fact.target == subject)
+            .filter_map(|fact| {
+                let mut refined = bindings.clone();
+                self.match_marker_template(&stmt.marker, subject, &fact.marker, &mut refined)
+                    .then_some(refined)
+            })
+            .collect()
+    }
+
+    fn match_marker_template(
+        &self,
+        template: &ProofMarkerTemplate,
+        subject: PlaceId,
+        actual: &MarkerPattern,
+        bindings: &mut HashMap<String, PlaceId>,
+    ) -> bool {
+        match (template.family, actual) {
+            (HirMarkerFamily::True, MarkerPattern::True { value })
+            | (HirMarkerFamily::False, MarkerPattern::False { value }) => {
+                self.same_place(subject, *value) && template.args.is_empty()
+            }
+            (HirMarkerFamily::Event, MarkerPattern::Event) => template.args.is_empty(),
+            (HirMarkerFamily::Equal, MarkerPattern::Equal { left, right })
+            | (HirMarkerFamily::LessThan, MarkerPattern::LessThan { left, right })
+            | (HirMarkerFamily::GreaterThan, MarkerPattern::GreaterThan { left, right })
+            | (HirMarkerFamily::LessOrEqual, MarkerPattern::LessOrEqual { left, right })
+            | (HirMarkerFamily::GreaterOrEqual, MarkerPattern::GreaterOrEqual { left, right }) => {
+                self.match_two_place_template(&template.args, *left, *right, bindings)
+            }
+            (HirMarkerFamily::MemberOf, MarkerPattern::MemberOf { key, map }) => {
+                self.match_two_place_template(&template.args, *key, *map, bindings)
+            }
+            _ => false,
+        }
+    }
+
+    fn match_two_place_template(
+        &self,
+        args: &[ProofMarkerTemplateArg],
+        left: PlaceId,
+        right: PlaceId,
+        bindings: &mut HashMap<String, PlaceId>,
+    ) -> bool {
+        let [left_arg, right_arg] = args else {
+            return false;
+        };
+        self.match_template_arg(left_arg, left, bindings)
+            && self.match_template_arg(right_arg, right, bindings)
+    }
+
+    fn match_template_arg(
+        &self,
+        arg: &ProofMarkerTemplateArg,
+        actual: PlaceId,
+        bindings: &mut HashMap<String, PlaceId>,
+    ) -> bool {
+        match arg {
+            ProofMarkerTemplateArg::Place(name) => bindings
+                .get(name)
+                .is_some_and(|expected| self.same_place_or_literal(*expected, actual)),
+            ProofMarkerTemplateArg::Binding(name) => match bindings.get(name).copied() {
+                Some(expected) => self.same_place_or_literal(expected, actual),
+                None => {
+                    bindings.insert(name.clone(), actual);
+                    true
+                }
+            },
+            ProofMarkerTemplateArg::U32(_) | ProofMarkerTemplateArg::Bool(_) => false,
+        }
+    }
+
+    fn instantiate_implication(
+        &self,
+        implication: &ProofMarkerImplication,
+        bindings: &HashMap<String, PlaceId>,
+        origin_span: Span,
+    ) -> Option<MarkerFact> {
+        let target = bindings.get(&implication.target).copied()?;
+        let marker = self.instantiate_marker_template(&implication.marker, target, bindings)?;
+        Some(MarkerFact {
+            target,
+            marker,
+            source: MarkerFactSource::CompanionRule,
+            origin_span,
+        })
+    }
+
+    fn instantiate_marker_template(
+        &self,
+        template: &ProofMarkerTemplate,
+        target: PlaceId,
+        bindings: &HashMap<String, PlaceId>,
+    ) -> Option<MarkerPattern> {
+        match template.family {
+            HirMarkerFamily::Event => Some(MarkerPattern::Event),
+            HirMarkerFamily::True if template.args.is_empty() => {
+                Some(MarkerPattern::True { value: target })
+            }
+            HirMarkerFamily::False if template.args.is_empty() => {
+                Some(MarkerPattern::False { value: target })
+            }
+            HirMarkerFamily::Equal
+            | HirMarkerFamily::LessThan
+            | HirMarkerFamily::GreaterThan
+            | HirMarkerFamily::LessOrEqual
+            | HirMarkerFamily::GreaterOrEqual
+            | HirMarkerFamily::MemberOf => {
+                let (left, right) = self.instantiate_two_template_args(&template.args, bindings)?;
+                match template.family {
+                    HirMarkerFamily::Equal => Some(MarkerPattern::Equal { left, right }),
+                    HirMarkerFamily::LessThan => Some(MarkerPattern::LessThan { left, right }),
+                    HirMarkerFamily::GreaterThan => {
+                        Some(MarkerPattern::GreaterThan { left, right })
+                    }
+                    HirMarkerFamily::LessOrEqual => {
+                        Some(MarkerPattern::LessOrEqual { left, right })
+                    }
+                    HirMarkerFamily::GreaterOrEqual => {
+                        Some(MarkerPattern::GreaterOrEqual { left, right })
+                    }
+                    HirMarkerFamily::MemberOf => Some(MarkerPattern::MemberOf {
+                        key: left,
+                        map: right,
+                    }),
+                    HirMarkerFamily::Event | HirMarkerFamily::True | HirMarkerFamily::False => None,
+                }
+            }
+            HirMarkerFamily::True | HirMarkerFamily::False => None,
+        }
+    }
+
+    fn instantiate_two_template_args(
+        &self,
+        args: &[ProofMarkerTemplateArg],
+        bindings: &HashMap<String, PlaceId>,
+    ) -> Option<(PlaceId, PlaceId)> {
+        let [left, right] = args else {
+            return None;
+        };
+        Some((
+            self.instantiate_template_arg(left, bindings)?,
+            self.instantiate_template_arg(right, bindings)?,
+        ))
+    }
+
+    fn instantiate_template_arg(
+        &self,
+        arg: &ProofMarkerTemplateArg,
+        bindings: &HashMap<String, PlaceId>,
+    ) -> Option<PlaceId> {
+        match arg {
+            ProofMarkerTemplateArg::Place(name) | ProofMarkerTemplateArg::Binding(name) => {
+                bindings.get(name).copied()
+            }
+            ProofMarkerTemplateArg::U32(_) | ProofMarkerTemplateArg::Bool(_) => None,
+        }
     }
 
     fn obligation_is_satisfied(
@@ -2187,6 +2350,179 @@ fn binary_to_observe_op(op: BinaryOp) -> Option<ObserveOp> {
         BinaryOp::GtEq => Some(ObserveOp::GtEq),
         _ => None,
     }
+}
+
+fn comparison_invocation(
+    op: BinaryOp,
+    left: PlaceId,
+    right: PlaceId,
+    result: PlaceId,
+    origin_span: Span,
+) -> Option<CompanionInvocation> {
+    let op = binary_to_observe_op(op)?;
+    observe_invocation(op, left, right, result, origin_span)
+}
+
+fn observe_invocation(
+    op: ObserveOp,
+    left: PlaceId,
+    right: PlaceId,
+    result: PlaceId,
+    origin_span: Span,
+) -> Option<CompanionInvocation> {
+    let name = match op {
+        ObserveOp::Eq => "Equal",
+        ObserveOp::Lt => "LessThan",
+        ObserveOp::LtEq => "LessOrEqual",
+        ObserveOp::Gt => "GreaterThan",
+        ObserveOp::GtEq => "GreaterOrEqual",
+        ObserveOp::NotEq => return None,
+    };
+    Some(CompanionInvocation {
+        name,
+        places: vec![left, right, result],
+        origin_span,
+    })
+}
+
+fn builtin_companion_rules() -> HashMap<String, ProofMarkerRule> {
+    [
+        builtin_equal_rule(),
+        builtin_order_rule(
+            "LessThan",
+            HirMarkerFamily::LessThan,
+            HirMarkerFamily::GreaterThan,
+            HirMarkerFamily::GreaterOrEqual,
+            HirMarkerFamily::LessOrEqual,
+        ),
+        builtin_order_rule(
+            "GreaterThan",
+            HirMarkerFamily::GreaterThan,
+            HirMarkerFamily::LessThan,
+            HirMarkerFamily::LessOrEqual,
+            HirMarkerFamily::GreaterOrEqual,
+        ),
+        builtin_order_rule(
+            "LessOrEqual",
+            HirMarkerFamily::LessOrEqual,
+            HirMarkerFamily::GreaterOrEqual,
+            HirMarkerFamily::GreaterThan,
+            HirMarkerFamily::LessThan,
+        ),
+        builtin_order_rule(
+            "GreaterOrEqual",
+            HirMarkerFamily::GreaterOrEqual,
+            HirMarkerFamily::LessOrEqual,
+            HirMarkerFamily::LessThan,
+            HirMarkerFamily::GreaterThan,
+        ),
+    ]
+    .into_iter()
+    .map(|rule| (rule.name.clone(), rule))
+    .collect()
+}
+
+fn builtin_equal_rule() -> ProofMarkerRule {
+    builtin_rule(
+        "Equal",
+        vec![ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
+            subject: "result".to_owned(),
+            marker: marker_template(HirMarkerFamily::True, Vec::new()),
+            body: ProofMarkerRuleBlock {
+                statements: vec![
+                    implies(HirMarkerFamily::Equal, "a", "b", "a"),
+                    implies(HirMarkerFamily::Equal, "b", "a", "b"),
+                ],
+                span: empty_span(),
+            },
+            span: empty_span(),
+        })],
+    )
+}
+
+fn builtin_order_rule(
+    name: &str,
+    true_left: HirMarkerFamily,
+    true_right: HirMarkerFamily,
+    false_left: HirMarkerFamily,
+    false_right: HirMarkerFamily,
+) -> ProofMarkerRule {
+    builtin_rule(
+        name,
+        vec![
+            ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
+                subject: "result".to_owned(),
+                marker: marker_template(HirMarkerFamily::True, Vec::new()),
+                body: ProofMarkerRuleBlock {
+                    statements: vec![
+                        implies(true_left, "a", "b", "a"),
+                        implies(true_right, "b", "a", "b"),
+                    ],
+                    span: empty_span(),
+                },
+                span: empty_span(),
+            }),
+            ProofMarkerRuleStmt::If(ProofMarkerRuleIfStmt {
+                subject: "result".to_owned(),
+                marker: marker_template(HirMarkerFamily::False, Vec::new()),
+                body: ProofMarkerRuleBlock {
+                    statements: vec![
+                        implies(false_left, "a", "b", "a"),
+                        implies(false_right, "b", "a", "b"),
+                    ],
+                    span: empty_span(),
+                },
+                span: empty_span(),
+            }),
+        ],
+    )
+}
+
+fn builtin_rule(name: &str, statements: Vec<ProofMarkerRuleStmt>) -> ProofMarkerRule {
+    ProofMarkerRule {
+        name: name.to_owned(),
+        params: ["a", "b", "result"]
+            .into_iter()
+            .map(|name| ProofMarkerRuleParam {
+                name: name.to_owned(),
+                span: empty_span(),
+            })
+            .collect(),
+        body: ProofMarkerRuleBlock {
+            statements,
+            span: empty_span(),
+        },
+        span: empty_span(),
+    }
+}
+
+fn implies(family: HirMarkerFamily, left: &str, right: &str, target: &str) -> ProofMarkerRuleStmt {
+    ProofMarkerRuleStmt::Implies(ProofMarkerImplication {
+        marker: marker_template(
+            family,
+            vec![
+                ProofMarkerTemplateArg::Place(left.to_owned()),
+                ProofMarkerTemplateArg::Place(right.to_owned()),
+            ],
+        ),
+        target: target.to_owned(),
+        span: empty_span(),
+    })
+}
+
+fn marker_template(
+    family: HirMarkerFamily,
+    args: Vec<ProofMarkerTemplateArg>,
+) -> ProofMarkerTemplate {
+    ProofMarkerTemplate {
+        family,
+        args,
+        span: empty_span(),
+    }
+}
+
+fn empty_span() -> Span {
+    Span::new(FileId::new(0), ByteOffset::new(0), ByteOffset::new(0))
 }
 
 fn two_places(args: &[PlaceId]) -> Option<(PlaceId, PlaceId)> {

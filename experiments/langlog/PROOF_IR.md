@@ -224,6 +224,10 @@ The first HIR-to-Proof-IR lowering is expected to follow these rules:
 - Companion marker rules lower to marker-producing entries that preserve the
   source span of the operator application and the source span of the rule that
   emitted the marker.
+- Proof checking MUST evaluate active companion marker rules against the current
+  marker environment after branch or observe truth facts have been introduced.
+- Source companion marker rules MAY override trusted builtin companion rules in
+  the active Proof IR rule set.
 - Assignment lowers as marker identity propagation.
 - Mutation lowers as a new `PlaceId` for the new SSA version of the mutated
   value.

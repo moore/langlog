@@ -432,9 +432,11 @@ fn main(value: u32) {
             ..
         } if then_facts.iter().any(|fact| fact.source == MarkerFactSource::ControlFlowTruth)
             && then_facts.iter().any(|fact| matches!(fact.marker, MarkerPattern::True { .. }))
-            && then_facts.iter().any(|fact| fact.source == MarkerFactSource::CompanionRule
-                && matches!(fact.marker, MarkerPattern::LessThan { .. }))
     )));
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(fact.marker, MarkerPattern::LessThan { .. })
+    }));
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
@@ -496,6 +498,191 @@ fn main(left: u32, right: u32) {
         fact.source == MarkerFactSource::CompanionRule
             && matches!(fact.marker, MarkerPattern::LessThan { .. })
     }));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Trusted builtin comparison companion rules MUST be active by default.
+#[test]
+fn requirement_llg_mark_06_uses_trusted_builtin_companion_rules_by_default() {
+    let (_, less_than) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        values[index];
+    }
+}
+"#,
+    );
+    assert_eq!(less_than.obligations, 1);
+
+    let (_, inverted_else) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index >= 4 {
+        return;
+    } else {
+        values[index];
+    }
+}
+"#,
+    );
+    assert_eq!(inverted_else.obligations, 1);
+
+    let (_, normalized_less_or_equal) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index <= 3 {
+        values[index];
+    }
+}
+"#,
+    );
+    assert_eq!(normalized_less_or_equal.obligations, 1);
+
+    let (_, observed) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    observe index < 4 else {
+        return;
+    }
+    values[index];
+}
+"#,
+    );
+    assert_eq!(observed.obligations, 1);
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# For `u32` literal bounds, the marker checker MAY normalize `LessOrEqual(left, N)` into `LessThan(left, N + 1)` when `N + 1` is representable and available as a place.
+#[test]
+fn requirement_llg_mark_06_normalizes_less_or_equal_successor_bounds() {
+    let (_, proof) = check_ok(
+        r#"
+fn main(values: [u32; 4], index: u32) {
+    if index <= 3 {
+        values[index];
+    }
+}
+"#,
+    );
+
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::TrustedBuiltin
+            && matches!(
+                fact.marker,
+                MarkerPattern::LessThan { right, .. }
+                    if proof_ir(&proof).places[right.index].value == Some(langlog_proof::PlaceValue::U32(4))
+            )
+    }));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# A source companion marker rule with a builtin comparison name MUST override the trusted builtin rule with the same name.
+#[test]
+fn requirement_llg_mark_06_source_companion_rules_override_builtin_rules() {
+    let (checked, missing_direct_fact) = check_err(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if result with True() {
+        implies GreaterThan(b, a) for b;
+    }
+}
+
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        values[index];
+    }
+}
+"#,
+    );
+    assert_primary_diagnostic(
+        &checked,
+        &missing_direct_fact,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+
+    let (_, restored_direct_fact) = check_ok(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if result with True() {
+        implies LessThan(a, b) for a;
+    }
+}
+
+fn main(values: [u32; 4], index: u32) {
+    if index < 4 {
+        values[index];
+    }
+}
+"#,
+    );
+    assert_eq!(restored_direct_fact.obligations, 1);
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# The condition succeeds only if the current marker environment already contains a matching marker attached to `a`; it MUST NOT create the marker.
+#[test]
+fn requirement_llg_mark_06_evaluates_marker_pattern_bindings_in_source_rules() {
+    let (_, proof) = check_ok(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if a with LessThan(a, ?bound) {
+        implies LessThan(a, bound) for a;
+    }
+}
+
+fn main(index: u32) {
+    unsafe { LessThan::mark(index, 4); }
+    if index < 10 {
+        index;
+    }
+}
+"#,
+    );
+
+    assert!(proof.facts.iter().any(|fact| {
+        fact.source == MarkerFactSource::CompanionRule
+            && matches!(
+                fact.marker,
+                MarkerPattern::LessThan { right, .. }
+                    if proof_ir(&proof).places[right.index].value == Some(langlog_proof::PlaceValue::U32(4))
+            )
+    }));
+}
+
+//= SPEC.md#llg-mark-06-companion-marker-rules
+//= type=test
+//# Observe comparisons MUST use the same companion rule semantics as `if` conditions.
+#[test]
+fn requirement_llg_mark_06_observe_uses_overridden_companion_rules() {
+    let (checked, proof) = check_err(
+        r#"
+mark LessThan(a: place, b: place, result: place) {
+    if result with True() {
+        implies GreaterThan(b, a) for b;
+    }
+}
+
+fn main(values: [u32; 4], index: u32) {
+    observe index < 4 else {
+        return;
+    }
+    values[index];
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
 }
 
 //= PROOF_IR.md#llg-pir-05-successful-proof-ir-well-formedness
@@ -928,7 +1115,7 @@ fn main(values: [u32; 4]) {
     assert!(mutable_observe_safe
         .facts
         .iter()
-        .any(|fact| fact.source == MarkerFactSource::Observe
+        .any(|fact| fact.source == MarkerFactSource::CompanionRule
             && matches!(fact.marker, MarkerPattern::LessThan { .. })));
 
     let (checked, stale_after_assignment) = check_err(
