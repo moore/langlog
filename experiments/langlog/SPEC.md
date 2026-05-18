@@ -88,6 +88,8 @@ properties that should be enforced structurally rather than by convention:
   `place`, `implies`, and `unsafe` in marker syntax positions.
 - Marker syntax words MAY remain contextual outside marker syntax positions
   when doing so is unambiguous.
+- The target task-state syntax MUST recognize `state` and `go` as contextual
+  task-syntax words.
 
 ## LLG-LEX-04 Lexical Error Diagnostics
 
@@ -121,8 +123,8 @@ properties that should be enforced structurally rather than by convention:
   `return`, and `observe` statements.
 - The parser MUST preserve accepted statement forms and their nested expression
   shapes in the AST.
-- The task-orchestration parser MUST additionally accept `forever`, `exit`, and
-  `delegate` statements.
+- Task state bodies MUST additionally accept `exit` and contextual `go`
+  statements.
 - The current parser allows a `let` statement to include `mut`, a type
   annotation, and an initializer.
 - A statement form that requires a semicolon MUST reject the form if the
@@ -180,9 +182,27 @@ properties that should be enforced structurally rather than by convention:
 
 ## LLG-SYN-07 Task Orchestration Statements
 
-- A `forever` statement MUST use the form `forever { ... }`.
+The accepted task orchestration surface is the target task-state model.
+`forever` and `delegate` are legacy tokens retained only so implementations can
+issue direct diagnostics for obsolete source.
+
 - An `exit` statement MUST use the form `exit <expr>;`.
-- A `delegate` statement MUST use the form `delegate name(args...);`.
+- Legacy `forever` and `delegate` statements MUST be rejected by target task
+  implementations.
+
+## LLG-SYN-08 Target Task State Syntax
+
+- The target task-state syntax MUST allow
+  `state name(param: Type, ...) { ... }` items nested directly inside task
+  bodies.
+- The target task-state syntax MUST allow task field declarations as top-level
+  `let` declarations inside task bodies.
+- A `go` statement MUST use the form `go state(args...);`.
+- The AST for a `go` statement MUST preserve the target state name and argument
+  expressions.
+- In the target task-state model, `forever` MUST NOT be part of task-state
+  syntax; infinite behavior is represented by cycles in the `go` transition
+  graph.
 
 ## LLG-TYPE-01 Phase 1 Types
 
@@ -609,60 +629,68 @@ help: add a receive, timer, or unsafe Event::mark-backed operation in the cycle
 - The semantic phase MUST require `observe` equality operands to have matching
   types and ordering operands to use `u32`.
 
-## LLG-SEMA-05 Task Orchestration Semantics
+## LLG-SEMA-05 Legacy Task Statement Rejection
 
 - The semantic phase MUST reject ordinary functions that call task items.
-- A `forever` statement MUST appear only inside a task body.
-- A nested `forever` statement MUST be rejected.
-- An `exit` statement MUST appear only inside a task body.
-- A `delegate` statement MUST appear only inside a task body.
-- A `return` statement MUST be rejected inside a task body.
-- A task body MAY call ordinary functions, and ordinary function calls from a
-  task body MUST return to the task normally.
-- A task body MAY transfer to another task only with a terminal `delegate`
-  statement.
-- A `delegate` statement MUST target a task item.
-- In the initial task-orchestration surface, `delegate` MUST NOT target an
-  ordinary function.
-- A `delegate` statement MUST NOT return to the current task.
-- A `delegate` statement MUST have a callee return type that exactly matches the
-  caller task return type.
-- A task item MUST NOT be callable through ordinary call expression syntax,
-  including as a subexpression, initializer, call argument, expression
-  statement, or any other non-`delegate` expression.
-- A task instance MUST be representable as a finite tagged union of task
+- An `exit` statement MUST appear only inside a task state body.
+- `forever` MUST be rejected as legacy syntax that is not part of target task
   states.
-- Each task-state variant MUST represent one task item in the reachable
-  delegation set for that task instance.
-- At runtime, exactly one task-state variant MUST be active per task instance.
-- A `delegate` statement MUST evaluate its arguments before replacing the
-  current task state with the target task-state variant.
-- A `delegate` statement MUST discard the caller task-local state and MUST NOT
-  create or retain a task stack frame.
-- Cyclic task delegation MUST be accepted when every delegate in the cycle
-  otherwise type-checks, because repeated delegation is a bounded state
-  transition rather than stack growth.
-- The static memory bound for task-local state MUST be the maximum storage
-  required by any reachable task-state variant plus tag overhead.
+- A nested `forever` statement MUST be rejected.
+- `delegate` MUST be rejected as legacy syntax that is not part of target task
+  states.
+- A `return` statement MUST be rejected inside a task state body.
+- A task state body MAY call ordinary functions, and ordinary function calls
+  from a task state body MUST return to the state normally.
+- A task item MUST NOT be callable through ordinary call expression syntax,
+  including as a subexpression, initializer, call argument, or expression
+  statement.
 - An `exit` statement MUST type check its expression against the enclosing task
   return type.
 - An `exit` statement MUST exit the program with the checked value.
-- A task body MUST NOT fall through accidentally. Every reachable task control
-  path MUST end in an `exit` statement, a same-return-type `delegate`
-  statement, or a non-nested `forever` statement.
-- A bare `forever { ... }` task body MUST be accepted as a valid crash-only or
-  externally terminated task shape.
+- A task state body MUST NOT fall through accidentally; every reachable state
+  control path MUST end in `exit` or same-task `go`.
 
 The task memory model specifies required behavior, not an exact ABI layout.
 Large external resources such as buffers should be represented in task state by
 handles or leases rather than forced inline by this memory model.
 
+## LLG-SEMA-06 Target Task State Semantics
+
+- A task MUST declare exactly one state named `start`, and `start` MUST be the
+  task entry state.
+- The task entry state's parameter list MUST match the enclosing task parameter
+  list in arity and type.
+- Task fields MUST be visible to every state in the same task.
+- A state body MUST contain only bounded ordinary Langlog work before its
+  terminal `go` or `exit` path.
+- Every reachable state control path MUST end in an `exit` statement or a
+  same-task terminal `go` statement.
+- A state body with a reachable fallthrough path MUST be rejected.
+- A `go` statement MUST target a state in the same task.
+- A `go` target that is not declared in the same task MUST be rejected.
+- A `go` statement MUST NOT return, push a stack frame, or retain previous
+  state arguments.
+- HIR lowering MUST represent `go` as a task-state transition rather than an
+  ordinary function call.
+- A `go` statement MUST preserve task fields and replace only the active state
+  arguments with the evaluated target arguments.
+- A task instance MUST be representable as a finite tagged union of task
+  states.
+- Each task-state variant MUST represent one state item in the reachable
+  `go` graph for that task instance.
+- At runtime, exactly one task-state variant MUST be active per task instance.
+- The static memory bound for task-local state MUST be the maximum storage
+  required by any reachable task-state variant plus task fields and tag
+  overhead.
+
 ## LLG-PROOF-01 Marker-Required Operations
 
 - The marker-aware proof phase MUST reject an operation whose marker obligation
   is not discharged.
-- Marker checking MUST traverse task bodies, including `forever` bodies, `exit`
-  values, and `delegate` arguments.
+- In the target task-state model, marker checking MUST traverse state bodies,
+  `exit` values, and `go` arguments.
+- Marker checking MUST evaluate marker-required operations in `go` arguments
+  before the transition.
 - Array indexing MUST require a marker obligation equivalent to
   `index with LessThan(index, array.length)`.
 - Map indexing or map-presence-sensitive lookup MUST require a marker
@@ -696,13 +724,15 @@ handles or leases rather than forced inline by this memory model.
 
 - `Event` MUST be the marker used to represent fresh external input or a fresh
   externally scheduled occurrence.
-- In a future explicit-state task model, every cyclic path through `go`
-  transitions MUST introduce an `Event` marker during execution of some state
-  body in the cycle.
-- An `Event` marker carried into a task argument or state argument MUST NOT by
-  itself satisfy the cycle obligation, because the event did not happen inside
-  the cycle.
-- This rule does not rewrite the current `forever`/`delegate` task syntax.
+- Every cyclic path through `go` transitions in the target task-state model MUST
+  introduce an `Event` marker during execution of at least one state body on
+  that path.
+- An `Event` marker carried into a task argument, task field, or state argument
+  MUST NOT by itself satisfy the cycle obligation, because the event did not
+  happen inside the cycle.
+- A self-loop with no fresh `Event` introduction MUST be rejected.
+- A cycle containing a state body that introduces a fresh `Event` marker MAY
+  satisfy the productivity obligation for that cycle.
 
 ## LLG-REL-01 Collections And Relations
 
@@ -718,8 +748,7 @@ Phase 1 does not attempt to provide:
 
 - unrestricted Rust compatibility;
 - general Turing completeness;
-- async or I/O handler syntax beyond the `task`/`forever`/`exit`/`delegate`
-  orchestration surface;
+- async or I/O handler syntax beyond the target task-state model;
 - modules, traits, generics beyond the current parser surface, or multi-file
   compilation;
 - implicit panics from arithmetic, indexing, or similar operations.
@@ -737,7 +766,6 @@ proof model evolve:
   first executable runtime;
 - root task configuration beyond the initial `task main() -> u32` executable
   entrypoint;
-- possible future use of `delegate` for explicit tail calls to ordinary
-  functions;
+- cross-task routing or scheduling syntax beyond intra-task `go` transitions;
 - the final async, I/O program, and handler surface syntax for the event-loop
   runtime.

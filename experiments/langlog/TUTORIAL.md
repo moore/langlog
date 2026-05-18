@@ -42,7 +42,9 @@ The smallest runnable program is a task:
 
 ```langlog
 task main() -> u32 {
-    exit 42;
+    state start() {
+        exit 42;
+    }
 }
 ```
 
@@ -50,10 +52,12 @@ Playground terminal I/O uses host builtins:
 
 ```langlog
 task main() -> u32 {
-    let value: u32 = read_u32();
-    print_u32(value);
-    print_newline();
-    exit value;
+    state start() {
+        let value: u32 = read_u32();
+        print_u32(value);
+        print_newline();
+        exit value;
+    }
 }
 ```
 
@@ -70,7 +74,7 @@ flattened non-collection values such as tuples, arrays, `Option<T>`,
 `Result<T, E>`, and `range<u32>`, plus locals, assignment, checked arithmetic,
 comparisons, structural equality, indexing, `if`, `match`, `for` over arrays
 and ranges, direct calls, recovery expressions, `observe`, task `exit`,
-`delegate`, finite `forever` examples, `return` inside ordinary functions, and
+explicit `state`/`go` transitions, `return` inside ordinary functions, and
 the playground host builtins. It still rejects Set/Map runtime values,
 first-class function values, indirect calls, non-local assignment targets, and
 unsupported root shapes.
@@ -324,13 +328,15 @@ fn choose(flag: bool) -> u32 {
 }
 
 task main() -> u32 {
-    let values: [u32; 4] = [1, 2, 3, 4];
-    let left: u32 = sum(values);
-    let right: u32 = bounded(10, 20);
-    let selected: u32 = choose(true);
-    let subtotal: u32 = left + right or(err) 0;
+    state start() {
+        let values: [u32; 4] = [1, 2, 3, 4];
+        let left: u32 = sum(values);
+        let right: u32 = bounded(10, 20);
+        let selected: u32 = choose(true);
+        let subtotal: u32 = left + right or(err) 0;
 
-    exit subtotal + selected or(err) 0;
+        exit subtotal + selected or(err) 0;
+    }
 }
 ```
 

@@ -139,37 +139,37 @@ fn requirement_llg_wasm_06_playground_examples_use_task_roots() {
 
 //= WASM.md#llg-wasm-06-playground-adapter
 //= type=test
-//# The playground example programs MUST include a runnable finite `forever` task example.
+//# The playground example programs MUST include a runnable finite task-state cycle example.
 #[test]
-fn requirement_llg_wasm_06_playground_examples_include_finite_forever_task() {
+fn requirement_llg_wasm_06_playground_examples_include_finite_task_state_cycle() {
     let examples: serde_json::Value =
         serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
     let examples = examples.as_array().expect("examples should be an array");
-    let forever = examples
+    let cycle = examples
         .iter()
         .find(|example| {
             example
                 .get("source")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|source| source.contains("forever"))
+                .is_some_and(|source| source.contains("go count("))
         })
-        .expect("examples should include a forever task");
-    let source = forever
+        .expect("examples should include a state-cycle task");
+    let source = cycle
         .get("source")
         .and_then(serde_json::Value::as_str)
-        .expect("forever example should have a source");
+        .expect("cycle example should have a source");
     let result = build_result(source, true);
 
     assert!(source.contains("exit"));
-    assert!(result.success, "forever example should build");
-    assert!(result.can_run, "forever example should be runnable");
+    assert!(result.success, "cycle example should build");
+    assert!(result.can_run, "cycle example should be runnable");
 }
 
 //= WASM.md#llg-wasm-06-playground-adapter
 //= type=test
-//# The playground example programs MUST include a task delegation example.
+//# The playground example programs MUST include a task `go` transition example.
 #[test]
-fn requirement_llg_wasm_06_playground_examples_include_task_delegation() {
+fn requirement_llg_wasm_06_playground_examples_include_task_go_transition() {
     let examples: serde_json::Value =
         serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
     let examples = examples.as_array().expect("examples should be an array");
@@ -178,7 +178,7 @@ fn requirement_llg_wasm_06_playground_examples_include_task_delegation() {
         example
             .get("source")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|source| source.contains("delegate"))
+            .is_some_and(|source| source.contains("go worker("))
     }));
 }
 

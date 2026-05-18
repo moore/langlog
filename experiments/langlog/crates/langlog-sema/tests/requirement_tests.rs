@@ -1,6 +1,6 @@
 use langlog_sema::{
     analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction,
-    HirFunctionKind, HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirStmt, HirType,
+    HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirStmt, HirTask, HirType,
     HostBuiltin,
 };
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt, Task};
@@ -47,6 +47,17 @@ fn hir_function<'a>(checked: &'a CheckedProgram, name: &str) -> &'a HirFunction 
         .iter()
         .find(|function| function.name == name)
         .unwrap_or_else(|| panic!("missing HIR function {name:?}"))
+}
+
+fn hir_task<'a>(checked: &'a CheckedProgram, name: &str) -> &'a HirTask {
+    checked
+        .hir
+        .as_ref()
+        .expect("expected lowered HIR")
+        .tasks
+        .iter()
+        .find(|task| task.name == name)
+        .unwrap_or_else(|| panic!("missing HIR task {name:?}"))
 }
 
 fn name_span(expr: &Expr) -> Span {
@@ -2143,55 +2154,54 @@ fn main(left: u32, right: u32) {
         .is_some_and(|resolution| resolution.kind == BindingKind::Local));
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-06-target-task-state-semantics
 //= type=test
-//# A bare `forever { ... }` task body MUST be accepted as a valid crash-only or externally terminated task shape.
+//# Every reachable state control path MUST end in an `exit` statement or a same-task terminal `go` statement.
 #[test]
-fn requirement_llg_sema_05_accepts_terminal_task_forms_and_lowers_hir() {
+fn requirement_llg_sema_06_accepts_terminal_task_states_and_lowers_hir() {
     let checked = analyze_ok(
         r#"
-fn tick() {}
 fn id(value: u32) -> u32 { value }
 
-task exiting(value: u32) -> u32 {
-    exit id(value);
-}
+task main(value: u32) -> u32 {
+    let mut total: u32 = 0;
 
-task looping() -> u32 {
-    forever {
-        tick();
+    state start(value: u32) {
+        let next = id(value);
+        total = next;
+        go done(next);
     }
-}
 
-task setup() -> u32 {
-    delegate exiting(0);
+    state done(result: u32) {
+        exit result;
+    }
 }
 "#,
     );
 
     assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
-    let ast_exiting = task(&checked, "exiting");
-    let hir_exiting = hir_function(&checked, "exiting");
-    let hir_looping = hir_function(&checked, "looping");
-    let hir_setup = hir_function(&checked, "setup");
+    let ast_main = task(&checked, "main");
+    let hir_main = hir_task(&checked, "main");
 
-    assert_eq!(hir_exiting.kind, HirFunctionKind::Task);
-    assert_eq!(hir_looping.kind, HirFunctionKind::Task);
-    assert_eq!(hir_setup.kind, HirFunctionKind::Task);
-    assert_eq!(hir_exiting.return_type, HirType::U32);
-    assert!(matches!(hir_exiting.body.statements[0], HirStmt::Exit(_)));
+    assert_eq!(hir_main.return_type, HirType::U32);
+    assert_eq!(hir_main.fields.len(), 1);
+    assert_eq!(hir_main.states.len(), 2);
+    assert_eq!(hir_main.states[0].name, "start");
     assert!(matches!(
-        hir_looping.body.statements[0],
-        HirStmt::Forever(_)
+        hir_main.states[0].body.statements[2],
+        HirStmt::Go(_)
     ));
-    assert!(matches!(hir_setup.body.statements[0], HirStmt::Delegate(_)));
-    let exit_value = match &ast_exiting.body.statements[0] {
-        Stmt::Exit(stmt) => &stmt.value,
-        other => panic!("expected exit statement, got {other:?}"),
+    assert!(matches!(
+        hir_main.states[1].body.statements[0],
+        HirStmt::Exit(_)
+    ));
+    let next_value = match &ast_main.states[0].body.statements[0] {
+        Stmt::Let(stmt) => stmt.value.as_ref().expect("expected initializer"),
+        other => panic!("expected let statement, got {other:?}"),
     };
     assert_resolves_to(
         &checked,
-        call_callee(exit_value),
+        call_callee(next_value),
         BindingKind::Item,
         function(&checked, "id").name.span,
         "task ordinary function call",
@@ -2200,192 +2210,252 @@ task setup() -> u32 {
 
 //= HIR.md#llg-hir-06-task-runtime-lowering-support
 //= type=test
-//# HIR MUST preserve task item kind, task-local declarations, delegate target identity, and delegate argument values sufficiently for later task-state enum lowering.
+//# HIR MUST preserve task fields, task-local declarations, state identity, and `go` argument values sufficiently for later task-state enum lowering.
 #[test]
 fn requirement_llg_hir_06_preserves_task_state_lowering_inputs() {
     let checked = analyze_ok(
         r#"
-task alpha(value: u32) -> u32 {
-    let next = value;
-    delegate beta(next);
-}
+task main(value: u32) -> u32 {
+    let mut saved: u32 = value;
 
-task beta(value: u32) -> u32 {
-    exit value;
+    state start(value: u32) {
+        let next = value;
+        saved = next;
+        go beta(next);
+    }
+
+    state beta(value: u32) {
+        exit value;
+    }
 }
 "#,
     );
     assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
 
-    let alpha = task(&checked, "alpha");
-    let beta = task(&checked, "beta");
-    let local = match &alpha.body.statements[0] {
+    let main = task(&checked, "main");
+    let beta = &main.states[1];
+    let local = match &main.states[0].body.statements[0] {
         Stmt::Let(stmt) => stmt,
         other => panic!("expected task-local let, got {other:?}"),
     };
-    let hir_alpha = hir_function(&checked, "alpha");
+    let hir_main = hir_task(&checked, "main");
 
-    assert_eq!(hir_alpha.kind, HirFunctionKind::Task);
-    let HirStmt::Let(hir_local) = &hir_alpha.body.statements[0] else {
+    assert_eq!(checked.hir.as_ref().unwrap().functions.len(), 0);
+    let HirStmt::Let(hir_local) = &hir_main.states[0].body.statements[0] else {
         panic!("expected HIR task-local let");
     };
     assert_eq!(hir_local.binding.id.declaration_span, local.name.span);
 
-    let HirStmt::Delegate(delegate) = &hir_alpha.body.statements[1] else {
-        panic!("expected HIR delegate statement");
+    let HirStmt::Go(go) = &hir_main.states[0].body.statements[2] else {
+        panic!("expected HIR go statement");
     };
-    assert_eq!(delegate.target.declaration_span, beta.name.span);
-    let HirExprKind::Binding(arg_id) = delegate.args[0].kind else {
-        panic!("expected HIR delegate argument to resolve to local binding");
+    assert_eq!(go.target.declaration_span, beta.name.span);
+    let HirExprKind::Binding(arg_id) = go.args[0].kind else {
+        panic!("expected HIR go argument to resolve to local binding");
     };
     assert_eq!(arg_id.declaration_span, local.name.span);
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-06-target-task-state-semantics
 //= type=test
-//# A task item MUST NOT be callable through ordinary call expression syntax, including as a subexpression, initializer, call argument, expression statement, or any other non-`delegate` expression.
+//# A `go` statement MUST target a state in the same task.
 #[test]
-fn requirement_llg_sema_05_rejects_plain_task_calls_and_invalid_delegates() {
+fn requirement_llg_sema_06_rejects_plain_task_calls_and_invalid_go() {
     let checked = analyze_ok(
         r#"
-fn helper(value: u32) -> u32 { value }
-task worker(value: u32) -> u32 { exit value; }
-task flag() -> bool { exit true; }
+task worker(value: u32) -> u32 {
+    state start(value: u32) { exit value; }
+}
 
 fn function_calls_task() {
     worker(0);
 }
 
 task task_calls_task() -> u32 {
-    worker(0);
-    exit 0;
+    state start() {
+        worker(0);
+        go missing();
+    }
+
+    state target(value: u32) {
+        exit value;
+    }
 }
 
-task delegate_function() -> u32 {
-    delegate helper(0);
+task go_wrong_arity() -> u32 {
+    state start() { go target(); }
+    state target(value: u32) { exit value; }
 }
 
-task delegate_unknown() -> u32 {
-    delegate missing();
-}
-
-task delegate_wrong_arity() -> u32 {
-    delegate worker();
-}
-
-task delegate_wrong_arg() -> u32 {
-    delegate worker(true);
-}
-
-task delegate_wrong_return() -> u32 {
-    delegate flag();
-}
-
-task delegate_local() -> u32 {
-    let local = 0;
-    delegate local();
+task go_wrong_arg() -> u32 {
+    state start() { go target(true); }
+    state target(value: u32) { exit value; }
 }
 "#,
     );
 
     assert!(checked.has_errors());
-    assert_diagnostic_message_contains(&checked, "task items can only be used with `delegate`");
-    assert_diagnostic_message_contains(&checked, "`delegate` requires a task target");
-    assert_diagnostic_message_contains(&checked, "undefined binding `missing`");
+    assert_diagnostic_message_contains(&checked, "task items cannot be used as expressions");
+    assert_diagnostic_message_contains(&checked, "unknown task state `missing`");
     assert_diagnostic_message_contains(
         &checked,
-        "delegate arity mismatch: expected 1 argument(s), found 0",
+        "go arity mismatch: expected 1 argument(s), found 0",
     );
     assert_diagnostic_message_contains(&checked, "type mismatch: expected u32, found bool");
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-06-target-task-state-semantics
 //= type=test
-//# Cyclic task delegation MUST be accepted when every delegate in the cycle otherwise type-checks, because repeated delegation is a bounded state transition rather than stack growth.
+//# A `go` statement MUST NOT return, push a stack frame, or retain previous state arguments.
 #[test]
-fn requirement_llg_sema_05_accepts_cyclic_task_delegation() {
+fn requirement_llg_sema_06_accepts_cyclic_state_go() {
     let checked = analyze_ok(
         r#"
-task alpha() -> u32 {
-    delegate beta();
-}
+task main() -> u32 {
+    state start() {
+        go beta();
+    }
 
-task beta() -> u32 {
-    delegate alpha();
+    state beta() {
+        go start();
+    }
 }
 "#,
     );
 
     assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
     assert!(matches!(
-        hir_function(&checked, "alpha").body.statements[0],
-        HirStmt::Delegate(_)
+        hir_task(&checked, "main").states[0].body.statements[0],
+        HirStmt::Go(_)
     ));
     assert!(matches!(
-        hir_function(&checked, "beta").body.statements[0],
-        HirStmt::Delegate(_)
+        hir_task(&checked, "main").states[1].body.statements[0],
+        HirStmt::Go(_)
     ));
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
-//= type=todo
-//# A task instance MUST be representable as a finite tagged union of task states.
-#[test]
-fn todo_task_instance_tagged_union_runtime_lowering() {}
-
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
-//= type=todo
-//# Each task-state variant MUST represent one task item in the reachable delegation set for that task instance.
-#[test]
-fn todo_task_state_variants_for_reachable_tasks() {}
-
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
-//= type=todo
-//# At runtime, exactly one task-state variant MUST be active per task instance.
-#[test]
-fn todo_task_runtime_has_one_active_state_variant() {}
-
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
-//= type=todo
-//# A `delegate` statement MUST evaluate its arguments before replacing the current task state with the target task-state variant.
-#[test]
-fn todo_delegate_evaluates_args_before_state_replacement() {}
-
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
-//= type=todo
-//# A `delegate` statement MUST discard the caller task-local state and MUST NOT create or retain a task stack frame.
-#[test]
-fn todo_delegate_discards_caller_locals_without_stack_frame() {}
-
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
-//= type=todo
-//# The static memory bound for task-local state MUST be the maximum storage required by any reachable task-state variant plus tag overhead.
-#[test]
-fn todo_task_state_static_memory_bound_is_largest_variant() {}
-
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-06-target-task-state-semantics
 //= type=test
-//# A task body MUST NOT fall through accidentally. Every reachable task control path MUST end in an `exit` statement, a same-return-type `delegate` statement, or a non-nested `forever` statement.
+//# A task MUST declare exactly one state named `start`, and `start` MUST be the task entry state.
 #[test]
-fn requirement_llg_sema_05_rejects_task_fallthrough_paths() {
+fn requirement_llg_sema_06_requires_exactly_one_start_state() {
     let checked = analyze_ok(
         r#"
-fn tick() {}
+task missing() -> u32 {
+    state other() { exit 0; }
+}
 
+task duplicate() -> u32 {
+    state start() { exit 0; }
+    state start() { exit 1; }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "tasks must declare a `start` state");
+    assert_diagnostic_message_contains(&checked, "duplicate task state `start`");
+    assert_diagnostic_message_contains(&checked, "tasks must declare exactly one `start` state");
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# The task entry state's parameter list MUST match the enclosing task parameter list in arity and type.
+#[test]
+fn requirement_llg_sema_06_requires_start_params_to_match_task_params() {
+    let checked = analyze_ok(
+        r#"
+task wrong_arity(value: u32) -> u32 {
+    state start() { exit 0; }
+}
+
+task wrong_type(value: u32) -> u32 {
+    state start(value: bool) { exit 0; }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "`start` state arity mismatch");
+    assert_diagnostic_message_contains(
+        &checked,
+        "`start` state parameter 0 has type bool, expected u32",
+    );
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# Task fields MUST be visible to every state in the same task.
+#[test]
+fn requirement_llg_sema_06_task_fields_are_visible_to_states() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    let mut total: u32 = 1;
+
+    state start() {
+        total = total + 1 or(err) total;
+        go done();
+    }
+
+    state done() {
+        exit total;
+    }
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    assert_eq!(hir_task(&checked, "main").fields[0].binding.name, "total");
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# A state body MUST contain only bounded ordinary Langlog work before its terminal `go` or `exit` path.
+#[test]
+fn requirement_llg_sema_06_rejects_unbounded_state_work() {
+    let checked = analyze_ok(
+        r#"
+fn values() -> [u32; 2] { [1, 2] }
+
+task main(items: [u32; 2]) -> u32 {
+    state start(items: [u32; 2]) {
+        for value in values() {
+            exit value;
+        }
+        exit 0;
+    }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "unbounded iteration is not allowed in phase 1");
+}
+
+//= SPEC.md#llg-sema-05-legacy-task-statement-rejection
+//= type=test
+//# A task state body MUST NOT fall through accidentally; every reachable state control path MUST end in `exit` or same-task `go`.
+#[test]
+fn requirement_llg_sema_06_rejects_state_fallthrough_paths() {
+    let checked = analyze_ok(
+        r#"
 task direct() -> u32 {
-    let value = 0;
+    state start() { let value = 0; }
 }
 
 task branch(flag: bool) -> u32 {
-    if flag {
-        exit 0;
+    state start(flag: bool) {
+        if flag { exit 0; }
     }
 }
 
 task choose(flag: bool) -> u32 {
-    match flag {
-        true => { exit 0; },
-        false => { tick(); }
+    state start(flag: bool) {
+        match flag {
+            true => { exit 0; },
+            false => { let value = 1; }
+        }
     }
 }
 "#,
@@ -2395,14 +2465,185 @@ task choose(flag: bool) -> u32 {
     let fallthrough_count = checked
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.message == "task bodies must not fall through")
+        .filter(|diagnostic| diagnostic.message == "task states must not fall through")
         .count();
     assert_eq!(fallthrough_count, 3, "{:#?}", checked.diagnostics);
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-06-target-task-state-semantics
 //= type=test
-//# An `exit` statement MUST appear only inside a task body.
+//# A `go` target that is not declared in the same task MUST be rejected.
+#[test]
+fn requirement_llg_sema_06_go_targets_same_task_state() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    state start() { go other(); }
+}
+
+task other() -> u32 {
+    state start() { exit 0; }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "unknown task state `other`");
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# HIR lowering MUST represent `go` as a task-state transition rather than an ordinary function call.
+#[test]
+fn requirement_llg_sema_06_go_lowers_as_task_state_transition() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    state start() { go next(42); }
+    state next(value: u32) { exit value; }
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    assert!(checked.hir.as_ref().unwrap().functions.is_empty());
+    assert!(matches!(
+        hir_task(&checked, "main").states[0].body.statements[0],
+        HirStmt::Go(_)
+    ));
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# A `go` statement MUST preserve task fields and replace only the active state arguments with the evaluated target arguments.
+#[test]
+fn requirement_llg_sema_06_go_preserves_fields_and_replaces_state_args() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    let mut saved: u32 = 0;
+
+    state start() {
+        saved = 7;
+        go next(42);
+    }
+
+    state next(value: u32) {
+        exit saved + value or(err) 0;
+    }
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let task = hir_task(&checked, "main");
+    assert_eq!(task.fields[0].binding.name, "saved");
+    let HirStmt::Go(go) = &task.states[0].body.statements[1] else {
+        panic!("expected go");
+    };
+    assert_eq!(go.args.len(), 1);
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# A task instance MUST be representable as a finite tagged union of task states.
+#[test]
+fn requirement_llg_sema_06_hir_represents_task_as_finite_state_set() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    state start() { go done(); }
+    state done() { exit 0; }
+}
+"#,
+    );
+
+    assert_eq!(hir_task(&checked, "main").states.len(), 2);
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# Each task-state variant MUST represent one state item in the reachable `go` graph for that task instance.
+#[test]
+fn requirement_llg_sema_06_hir_state_variants_have_stable_ids() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    state start() { go done(); }
+    state done() { exit 0; }
+}
+"#,
+    );
+    let task = hir_task(&checked, "main");
+
+    assert_eq!(task.states[0].id.task, task.id);
+    assert_eq!(task.states[1].id.task, task.id);
+    assert_ne!(task.states[0].id, task.states[1].id);
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# At runtime, exactly one task-state variant MUST be active per task instance.
+#[test]
+fn requirement_llg_sema_06_hir_go_names_one_target_state_variant() {
+    let checked = analyze_ok(
+        r#"
+task main() -> u32 {
+    state start() { go done(); }
+    state done() { exit 0; }
+}
+"#,
+    );
+    let task = hir_task(&checked, "main");
+    let HirStmt::Go(go) = &task.states[0].body.statements[0] else {
+        panic!("expected go");
+    };
+
+    assert_eq!(go.target, task.states[1].id);
+}
+
+//= SPEC.md#llg-sema-06-target-task-state-semantics
+//= type=test
+//# A state body with a reachable fallthrough path MUST be rejected.
+#[test]
+fn requirement_llg_sema_05_rejects_task_fallthrough_paths() {
+    let checked = analyze_ok(
+        r#"
+fn tick() {}
+
+task direct() -> u32 {
+    state start() { let value = 0; }
+}
+
+task branch(flag: bool) -> u32 {
+    state start(flag: bool) {
+        if flag { exit 0; }
+    }
+}
+
+task choose(flag: bool) -> u32 {
+    state start(flag: bool) {
+        match flag {
+            true => { exit 0; },
+            false => { tick(); }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    let fallthrough_count = checked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message == "task states must not fall through")
+        .count();
+    assert_eq!(fallthrough_count, 3, "{:#?}", checked.diagnostics);
+}
+
+//= SPEC.md#llg-sema-05-legacy-task-statement-rejection
+//= type=test
+//# An `exit` statement MUST appear only inside a task state body.
 #[test]
 fn requirement_llg_sema_05_rejects_exit_outside_tasks() {
     let checked = analyze_ok(
@@ -2414,12 +2655,12 @@ fn bad_exit() {
     );
 
     assert!(checked.has_errors());
-    assert_diagnostic_message_contains(&checked, "`exit` is only allowed inside a task");
+    assert_diagnostic_message_contains(&checked, "`exit` is only valid inside task states");
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-05-legacy-task-statement-rejection
 //= type=test
-//# A `forever` statement MUST appear only inside a task body.
+//# A nested `forever` statement MUST be rejected.
 #[test]
 fn requirement_llg_sema_05_rejects_forever_outside_tasks() {
     let checked = analyze_ok(
@@ -2431,18 +2672,18 @@ fn bad_forever() {
     );
 
     assert!(checked.has_errors());
-    assert_diagnostic_message_contains(&checked, "`forever` is only allowed inside a task");
+    assert_diagnostic_message_contains(&checked, "`forever` is not part of target task states");
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-05-legacy-task-statement-rejection
 //= type=test
-//# A `delegate` statement MUST appear only inside a task body.
+//# `delegate` MUST be rejected as legacy syntax that is not part of target task states.
 #[test]
 fn requirement_llg_sema_05_rejects_delegate_outside_tasks() {
     let checked = analyze_ok(
         r#"
 task worker() -> u32 {
-    exit 0;
+    state start() { exit 0; }
 }
 
 fn bad_delegate() {
@@ -2452,18 +2693,18 @@ fn bad_delegate() {
     );
 
     assert!(checked.has_errors());
-    assert_diagnostic_message_contains(&checked, "`delegate` is only allowed inside a task");
+    assert_diagnostic_message_contains(&checked, "`delegate` is not part of target task states");
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-05-legacy-task-statement-rejection
 //= type=test
-//# A `return` statement MUST be rejected inside a task body.
+//# A `return` statement MUST be rejected inside a task state body.
 #[test]
 fn requirement_llg_sema_05_rejects_return_inside_tasks() {
     let checked = analyze_ok(
         r#"
 task bad_return() -> u32 {
-    return 0;
+    state start() { return 0; }
 }
 "#,
     );
@@ -2472,16 +2713,18 @@ task bad_return() -> u32 {
     assert_diagnostic_message_contains(&checked, "`return` is not allowed inside a task");
 }
 
-//= SPEC.md#llg-sema-05-task-orchestration-semantics
+//= SPEC.md#llg-sema-05-legacy-task-statement-rejection
 //= type=test
-//# A nested `forever` statement MUST be rejected.
+//# `forever` MUST be rejected as legacy syntax that is not part of target task states.
 #[test]
 fn requirement_llg_sema_05_rejects_nested_forever() {
     let checked = analyze_ok(
         r#"
 task bad_nested() -> u32 {
-    forever {
-        forever {}
+    state start() {
+        forever {
+            forever {}
+        }
     }
 }
 "#,

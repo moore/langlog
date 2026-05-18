@@ -26,6 +26,7 @@ pub struct HirBindingId {
 pub struct HirProgram {
     pub marker_families: Vec<HirMarkerFamilyDecl>,
     pub functions: Vec<HirFunction>,
+    pub tasks: Vec<HirTask>,
     pub marker_rules: Vec<HirMarkerRule>,
 }
 
@@ -56,6 +57,40 @@ pub struct HirFunction {
     pub params: Vec<HirBinding>,
     pub return_type: HirType,
     pub return_markers: Vec<HirMarkerRequirement>,
+    pub body: HirBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HirStateId {
+    pub task: HirItemId,
+    pub declaration_span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirTask {
+    pub id: HirItemId,
+    pub name: String,
+    pub params: Vec<HirBinding>,
+    pub fields: Vec<HirTaskField>,
+    pub states: Vec<HirTaskState>,
+    pub return_type: HirType,
+    pub return_markers: Vec<HirMarkerRequirement>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirTaskField {
+    pub binding: HirBinding,
+    pub value: HirExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirTaskState {
+    pub id: HirStateId,
+    pub name: String,
+    pub params: Vec<HirBinding>,
     pub body: HirBlock,
     pub span: Span,
 }
@@ -152,6 +187,7 @@ pub enum HirStmt {
     Forever(HirForeverStmt),
     Exit(HirExitStmt),
     Delegate(HirDelegateStmt),
+    Go(HirGoStmt),
     Observe(HirObserveStmt),
     UnsafeMarker(HirUnsafeMarkerStmt),
 }
@@ -169,6 +205,7 @@ impl HirStmt {
             Self::Forever(stmt) => stmt.span,
             Self::Exit(stmt) => stmt.span,
             Self::Delegate(stmt) => stmt.span,
+            Self::Go(stmt) => stmt.span,
             Self::Observe(stmt) => stmt.span,
             Self::UnsafeMarker(stmt) => stmt.span,
         }
@@ -259,6 +296,13 @@ pub struct HirExitStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirDelegateStmt {
     pub target: HirItemId,
+    pub args: Vec<HirExpr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirGoStmt {
+    pub target: HirStateId,
     pub args: Vec<HirExpr>,
     pub span: Span,
 }
@@ -427,8 +471,17 @@ pub(crate) fn lower_program(
             .iter()
             .filter_map(|item| match item {
                 Item::Function(function) => Some(lowerer.lower_function(function)),
-                Item::Task(task) => Some(lowerer.lower_task(task)),
+                Item::Task(_) => None,
                 Item::MarkerFamily(_) | Item::MarkerRule(_) => None,
+            })
+            .collect(),
+        tasks: parsed
+            .module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Task(task) => Some(lowerer.lower_task(task)),
+                Item::Function(_) | Item::MarkerFamily(_) | Item::MarkerRule(_) => None,
             })
             .collect(),
         marker_rules: parsed
@@ -530,12 +583,25 @@ impl<'a> HirLowerer<'a> {
         }
     }
 
-    fn lower_task(&self, task: &Task) -> HirFunction {
-        HirFunction {
-            kind: HirFunctionKind::Task,
-            id: HirItemId {
-                declaration_span: task.name.span,
-            },
+    fn lower_task(&self, task: &Task) -> HirTask {
+        let task_id = HirItemId {
+            declaration_span: task.name.span,
+        };
+        let state_ids: HashMap<_, _> = task
+            .states
+            .iter()
+            .map(|state| {
+                (
+                    state.name.value.clone(),
+                    HirStateId {
+                        task: task_id,
+                        declaration_span: state.name.span,
+                    },
+                )
+            })
+            .collect();
+        HirTask {
+            id: task_id,
             name: task.name.value.clone(),
             params: task
                 .params
@@ -549,9 +615,46 @@ impl<'a> HirLowerer<'a> {
                     )
                 })
                 .collect(),
+            fields: task
+                .fields
+                .iter()
+                .map(|field| HirTaskField {
+                    binding: self.lower_named_binding_with_type(
+                        &field.name,
+                        BindingKind::Local,
+                        field.mutable,
+                        Some(&field.ty),
+                    ),
+                    value: self.lower_expr(&field.value),
+                    span: field.span,
+                })
+                .collect(),
+            states: task
+                .states
+                .iter()
+                .map(|state| HirTaskState {
+                    id: *state_ids
+                        .get(state.name.value.as_str())
+                        .expect("state id map should include every state"),
+                    name: state.name.value.clone(),
+                    params: state
+                        .params
+                        .iter()
+                        .map(|param| {
+                            self.lower_named_binding_with_type(
+                                &param.name,
+                                BindingKind::Param,
+                                false,
+                                Some(&param.ty),
+                            )
+                        })
+                        .collect(),
+                    body: self.lower_task_block(&state.body, &state_ids),
+                    span: state.span,
+                })
+                .collect(),
             return_type: lower_ast_type(&task.return_type),
             return_markers: self.lower_marker_requirements(&task.return_type),
-            body: self.lower_block(&task.body),
             span: task.span,
         }
     }
@@ -644,11 +747,27 @@ impl<'a> HirLowerer<'a> {
     }
 
     fn lower_block(&self, block: &Block) -> HirBlock {
+        self.lower_block_with_task_states(block, None)
+    }
+
+    fn lower_task_block(
+        &self,
+        block: &Block,
+        task_states: &HashMap<String, HirStateId>,
+    ) -> HirBlock {
+        self.lower_block_with_task_states(block, Some(task_states))
+    }
+
+    fn lower_block_with_task_states(
+        &self,
+        block: &Block,
+        task_states: Option<&HashMap<String, HirStateId>>,
+    ) -> HirBlock {
         HirBlock {
             statements: block
                 .statements
                 .iter()
-                .map(|statement| self.lower_statement(statement))
+                .map(|statement| self.lower_statement_with_task_states(statement, task_states))
                 .collect(),
             result: block
                 .trailing_expr
@@ -658,7 +777,11 @@ impl<'a> HirLowerer<'a> {
         }
     }
 
-    fn lower_statement(&self, statement: &Stmt) -> HirStmt {
+    fn lower_statement_with_task_states(
+        &self,
+        statement: &Stmt,
+        task_states: Option<&HashMap<String, HirStateId>>,
+    ) -> HirStmt {
         match statement {
             Stmt::Let(stmt) => HirStmt::Let(HirLetStmt {
                 binding: self.lower_named_binding_with_type(
@@ -682,11 +805,11 @@ impl<'a> HirLowerer<'a> {
             }),
             Stmt::If(stmt) => HirStmt::If(HirIfStmt {
                 condition: self.lower_expr(&stmt.condition),
-                then_block: self.lower_block(&stmt.then_block),
+                then_block: self.lower_block_with_task_states(&stmt.then_block, task_states),
                 else_branch: stmt
                     .else_branch
                     .as_ref()
-                    .map(|branch| self.lower_else_branch(branch)),
+                    .map(|branch| self.lower_else_branch_with_task_states(branch, task_states)),
                 span: stmt.span,
             }),
             Stmt::Match(stmt) => HirStmt::Match(HirMatchStmt {
@@ -696,7 +819,7 @@ impl<'a> HirLowerer<'a> {
                     .iter()
                     .map(|arm| HirMatchArm {
                         pattern: self.lower_pattern(&arm.pattern),
-                        body: self.lower_match_body(&arm.body),
+                        body: self.lower_match_body_with_task_states(&arm.body, task_states),
                         span: arm.span,
                     })
                     .collect(),
@@ -705,7 +828,7 @@ impl<'a> HirLowerer<'a> {
             Stmt::For(stmt) => HirStmt::For(HirForStmt {
                 binding: self.lower_pattern(&stmt.binding),
                 iterable: self.lower_expr(&stmt.iterable),
-                body: self.lower_block(&stmt.body),
+                body: self.lower_block_with_task_states(&stmt.body, task_states),
                 span: stmt.span,
             }),
             Stmt::Return(stmt) => HirStmt::Return(HirReturnStmt {
@@ -713,7 +836,7 @@ impl<'a> HirLowerer<'a> {
                 span: stmt.span,
             }),
             Stmt::Forever(stmt) => HirStmt::Forever(HirForeverStmt {
-                body: self.lower_block(&stmt.body),
+                body: self.lower_block_with_task_states(&stmt.body, task_states),
                 span: stmt.span,
             }),
             Stmt::Exit(stmt) => HirStmt::Exit(HirExitStmt {
@@ -733,11 +856,18 @@ impl<'a> HirLowerer<'a> {
                     span: stmt.span,
                 })
             }
+            Stmt::Go(stmt) => HirStmt::Go(HirGoStmt {
+                target: *task_states
+                    .and_then(|states| states.get(stmt.target.value.as_str()))
+                    .expect("checked go targets must name a state in the current task"),
+                args: stmt.args.iter().map(|arg| self.lower_expr(arg)).collect(),
+                span: stmt.span,
+            }),
             Stmt::Observe(stmt) => HirStmt::Observe(HirObserveStmt {
                 left: self.lower_expr(&stmt.left),
                 op: stmt.op,
                 right: self.lower_expr(&stmt.right),
-                else_block: self.lower_block(&stmt.else_block),
+                else_block: self.lower_block_with_task_states(&stmt.else_block, task_states),
                 span: stmt.span,
             }),
             Stmt::UnsafeMarker(stmt) => HirStmt::UnsafeMarker(HirUnsafeMarkerStmt {
@@ -755,24 +885,36 @@ impl<'a> HirLowerer<'a> {
         }
     }
 
-    fn lower_else_branch(&self, branch: &ElseBranch) -> HirElseBranch {
+    fn lower_else_branch_with_task_states(
+        &self,
+        branch: &ElseBranch,
+        task_states: Option<&HashMap<String, HirStateId>>,
+    ) -> HirElseBranch {
         match branch {
-            ElseBranch::Block(block) => HirElseBranch::Block(self.lower_block(block)),
+            ElseBranch::Block(block) => {
+                HirElseBranch::Block(self.lower_block_with_task_states(block, task_states))
+            }
             ElseBranch::If(stmt) => HirElseBranch::If(Box::new(HirIfStmt {
                 condition: self.lower_expr(&stmt.condition),
-                then_block: self.lower_block(&stmt.then_block),
+                then_block: self.lower_block_with_task_states(&stmt.then_block, task_states),
                 else_branch: stmt
                     .else_branch
                     .as_ref()
-                    .map(|nested| self.lower_else_branch(nested)),
+                    .map(|nested| self.lower_else_branch_with_task_states(nested, task_states)),
                 span: stmt.span,
             })),
         }
     }
 
-    fn lower_match_body(&self, body: &MatchBody) -> HirMatchBody {
+    fn lower_match_body_with_task_states(
+        &self,
+        body: &MatchBody,
+        task_states: Option<&HashMap<String, HirStateId>>,
+    ) -> HirMatchBody {
         match body {
-            MatchBody::Block(block) => HirMatchBody::Block(self.lower_block(block)),
+            MatchBody::Block(block) => {
+                HirMatchBody::Block(self.lower_block_with_task_states(block, task_states))
+            }
             MatchBody::Expr(expr) => HirMatchBody::Expr(self.lower_expr(expr)),
         }
     }

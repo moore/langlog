@@ -34,11 +34,13 @@ fn choose(flag: bool) -> u32 {
 }
 
 task main() -> u32 {
-    let values: [u32; 4] = [1, 2, 3, 4];
-    let left: u32 = sum(values);
-    let right: u32 = bounded(10, 20);
-    let selected: u32 = choose(true);
-    let subtotal: u32 = left + right or(err) 0;
+    state start() {
+        let values: [u32; 4] = [1, 2, 3, 4];
+        let left: u32 = sum(values);
+        let right: u32 = bounded(10, 20);
+        let selected: u32 = choose(true);
+        let subtotal: u32 = left + right or(err) 0;
 
-    exit subtotal + selected or(err) 0;
+        exit subtotal + selected or(err) 0;
+    }
 }

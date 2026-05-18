@@ -52,9 +52,8 @@ This document complements, but does not replace, the main language spec:
 
 ## LLG-HIR-06 Task Runtime Lowering Support
 
-- HIR MUST preserve task item kind, task-local declarations, delegate target
-  identity, and delegate argument values sufficiently for later task-state enum
-  lowering.
+- HIR MUST preserve task fields, task-local declarations, state identity, and
+  `go` argument values sufficiently for later task-state enum lowering.
 - HIR does not need to be the task-state enum representation; that enum is the
   required executable task-runtime lowering shape.
 

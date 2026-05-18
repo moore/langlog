@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use langlog_sema::{
     CheckedProgram, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind, HirForStmt,
     HirFunction, HirFunctionKind, HirItemId, HirMatchBody, HirMatchStmt, HirPatternKind,
-    HirProgram, HirStmt, HirType, HostBuiltin,
+    HirProgram, HirStateId, HirStmt, HirTask, HirTaskState, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp, UnaryOp};
 use langlog_syntax::{Diagnostic, Label, Span};
@@ -65,12 +65,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_program(&mut self) -> String {
         let mut module = String::from("(module\n");
-        if self
-            .program
-            .functions
-            .iter()
-            .any(|function| function.kind == HirFunctionKind::Task)
-        {
+        if !self.program.tasks.is_empty() {
             return self.compile_task_program(module);
         }
 
@@ -105,12 +100,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_task_program(&mut self, mut module: String) -> String {
-        let Some(root) = self
-            .program
-            .functions
-            .iter()
-            .find(|function| function.kind == HirFunctionKind::Task && function.name == "main")
-        else {
+        let Some(root) = self.program.tasks.iter().find(|task| task.name == "main") else {
             self.error(None, "Wasm task build requires `task main() -> u32`");
             module.push_str(")\n");
             return module;
@@ -165,13 +155,15 @@ impl<'a> Compiler<'a> {
 #[derive(Debug, Clone)]
 struct TaskRuntimeLayout<'a> {
     states: Vec<TaskStateLayout<'a>>,
-    state_by_id: HashMap<HirItemId, usize>,
+    state_by_id: HashMap<HirStateId, usize>,
+    field_bindings: HashMap<HirBindingId, StateSlotValue>,
+    field_width: u32,
     state_width: u32,
 }
 
 #[derive(Debug, Clone)]
 struct TaskStateLayout<'a> {
-    function: &'a HirFunction,
+    state: &'a HirTaskState,
     tag: u32,
     bindings: HashMap<HirBindingId, StateSlotValue>,
     param_bindings: Vec<StateSlotValue>,
@@ -184,30 +176,47 @@ struct StateSlotValue {
 }
 
 impl<'a> TaskRuntimeLayout<'a> {
-    fn build(compiler: &mut Compiler<'a>, root: &'a HirFunction) -> Option<Self> {
-        let task_by_id: HashMap<_, _> = compiler
-            .program
-            .functions
-            .iter()
-            .filter(|function| function.kind == HirFunctionKind::Task)
-            .map(|function| (function.id, function))
-            .collect();
+    fn build(compiler: &mut Compiler<'a>, root: &'a HirTask) -> Option<Self> {
+        let state_by_id_source: HashMap<_, _> =
+            root.states.iter().map(|state| (state.id, state)).collect();
+        let Some(start) = root.states.iter().find(|state| state.name == "start") else {
+            compiler.error(Some(root.span), "task main must declare `state start`");
+            return None;
+        };
 
         let mut seen = HashSet::new();
-        let mut queue = VecDeque::from([root.id]);
+        let mut queue = VecDeque::from([start.id]);
         let mut reachable = Vec::new();
         while let Some(id) = queue.pop_front() {
             if !seen.insert(id) {
                 continue;
             }
-            let Some(task) = task_by_id.get(&id).copied() else {
-                compiler.error(None, "delegate target is not a task item");
+            let Some(state) = state_by_id_source.get(&id).copied() else {
+                compiler.error(None, "go target is not a task state");
                 continue;
             };
-            reachable.push(task);
-            for target in delegate_targets_in_block(&task.body) {
-                if task_by_id.contains_key(&target) {
+            reachable.push(state);
+            for target in go_targets_in_block(&state.body) {
+                if state_by_id_source.contains_key(&target) {
                     queue.push_back(target);
+                }
+            }
+        }
+
+        let mut field_bindings = HashMap::new();
+        let mut field_width = 0_u32;
+        let mut valid = true;
+        for field in &root.fields {
+            match state_slot_value(&field.binding.ty, &mut field_width) {
+                Some(slot) => {
+                    field_bindings.insert(field.binding.id, slot);
+                }
+                None => {
+                    compiler.error(
+                        Some(field.binding.span),
+                        wasm_type_diagnostic(&field.binding.ty),
+                    );
+                    valid = false;
                 }
             }
         }
@@ -215,20 +224,22 @@ impl<'a> TaskRuntimeLayout<'a> {
         let mut states = Vec::new();
         let mut state_by_id = HashMap::new();
         let mut state_width = 0;
-        for task in reachable {
+        for state_item in reachable {
             let tag = u32::try_from(states.len()).unwrap_or(u32::MAX);
-            let Some(state) = TaskStateLayout::build(compiler, task, tag) else {
+            let Some(state) = TaskStateLayout::build(compiler, state_item, tag) else {
                 continue;
             };
             state_width = state_width.max(state.variant_width);
-            state_by_id.insert(task.id, states.len());
+            state_by_id.insert(state_item.id, states.len());
             states.push(state);
         }
 
-        if compiler.diagnostics.is_empty() {
+        if valid && compiler.diagnostics.is_empty() {
             Some(Self {
                 states,
                 state_by_id,
+                field_bindings,
+                field_width,
                 state_width,
             })
         } else {
@@ -236,7 +247,7 @@ impl<'a> TaskRuntimeLayout<'a> {
         }
     }
 
-    fn state(&self, id: HirItemId) -> Option<&TaskStateLayout<'a>> {
+    fn state(&self, id: HirStateId) -> Option<&TaskStateLayout<'a>> {
         self.state_by_id
             .get(&id)
             .and_then(|index| self.states.get(*index))
@@ -244,13 +255,13 @@ impl<'a> TaskRuntimeLayout<'a> {
 }
 
 impl<'a> TaskStateLayout<'a> {
-    fn build(compiler: &mut Compiler<'a>, function: &'a HirFunction, tag: u32) -> Option<Self> {
+    fn build(compiler: &mut Compiler<'a>, state: &'a HirTaskState, tag: u32) -> Option<Self> {
         let mut bindings = HashMap::new();
         let mut param_bindings = Vec::new();
         let mut next_offset = 0_u32;
         let mut valid = true;
 
-        for param in &function.params {
+        for param in &state.params {
             match state_slot_value(&param.ty, &mut next_offset) {
                 Some(slot) => {
                     bindings.insert(param.id, slot.clone());
@@ -264,7 +275,7 @@ impl<'a> TaskStateLayout<'a> {
         }
 
         let mut locals = Vec::new();
-        collect_task_local_bindings(&function.body, &mut locals);
+        collect_task_local_bindings(&state.body, &mut locals);
         for binding in locals {
             if bindings.contains_key(&binding.id) {
                 continue;
@@ -281,7 +292,7 @@ impl<'a> TaskStateLayout<'a> {
         }
 
         valid.then_some(Self {
-            function,
+            state,
             tag,
             bindings,
             param_bindings,
@@ -300,14 +311,15 @@ fn state_slot_value(ty: &HirType, next_offset: &mut u32) -> Option<StateSlotValu
 
 struct FunctionCompiler<'a, 'b> {
     compiler: &'a mut Compiler<'b>,
-    function: &'b HirFunction,
+    function: Option<&'b HirFunction>,
+    task: Option<&'b HirTask>,
     locals: HashMap<HirBindingId, LocalValue>,
     param_count: u32,
     next_local: u32,
     task_layout: Option<TaskRuntimeLayout<'b>>,
+    task_field_start: u32,
     task_state_start: u32,
     task_tag_local: u32,
-    next_label: u32,
     code: Vec<String>,
 }
 
@@ -329,42 +341,47 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         let param_count = next_param;
         Self {
             compiler,
-            function,
+            function: Some(function),
+            task: None,
             locals,
             param_count,
             next_local: param_count,
             task_layout: None,
+            task_field_start: 0,
             task_state_start: 0,
             task_tag_local: 0,
-            next_label: 0,
             code: Vec::new(),
         }
     }
 
     fn new_task_dispatcher(
         compiler: &'a mut Compiler<'b>,
-        root: &'b HirFunction,
+        root: &'b HirTask,
         layout: TaskRuntimeLayout<'b>,
     ) -> Self {
         let task_tag_local = 0;
-        let task_state_start = 1;
+        let task_field_start = 1;
+        let task_state_start = task_field_start + layout.field_width;
         let next_local = task_state_start + layout.state_width;
         Self {
             compiler,
-            function: root,
+            function: None,
+            task: Some(root),
             locals: HashMap::new(),
             param_count: 0,
             next_local,
             task_layout: Some(layout),
+            task_field_start,
             task_state_start,
             task_tag_local,
-            next_label: 0,
             code: Vec::new(),
         }
     }
 
     fn compile_function(&mut self, export: bool) -> String {
-        let function = self.function;
+        let function = self
+            .function
+            .expect("function compiler requires a function");
         let function_index = self
             .compiler
             .function_index(function.id)
@@ -425,21 +442,34 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
 
     fn compile_task_dispatcher(&mut self) -> String {
         // The task dispatcher is the executable form of the task memory model:
-        // one tag local selects the active task-state variant, and one shared
-        // bank of locals holds the flattened slots for the largest reachable
-        // variant. Each loop iteration runs the task matching the tag.
-        // `delegate` updates those shared slots, changes the tag, and branches
-        // back to `$task_dispatch` instead of emitting a Wasm task call.
+        // one tag local selects the active state variant, persistent field
+        // locals survive transitions, and one shared bank of locals holds the
+        // flattened slots for the largest reachable active state.
+        let task = self.task.expect("task dispatcher requires a task");
         let layout = self
             .task_layout
             .as_ref()
             .expect("task dispatcher requires a task layout");
+        let start = task
+            .states
+            .iter()
+            .find(|state| state.name == "start")
+            .expect("checked task should have a start state");
         let root_tag = layout
-            .state(self.function.id)
-            .expect("root task should be reachable")
+            .state(start.id)
+            .expect("start should be reachable")
             .tag;
         let states = layout.states.clone();
 
+        self.locals = self.task_field_locals();
+        for field in &task.fields {
+            self.compile_expr(&field.value);
+            let Some(local) = self.locals.get(&field.binding.id).cloned() else {
+                self.unsupported(field.span, "task field is not mapped to a Wasm local");
+                continue;
+            };
+            self.store_slots(&local.slots);
+        }
         self.emit(format!("i32.const {root_tag}"));
         self.emit(format!("local.set {}", self.task_tag_local));
         self.emit("loop $task_dispatch");
@@ -449,7 +479,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             self.emit("i32.eq");
             self.emit("if");
             self.locals = self.task_locals_for_state(&state);
-            self.compile_block(&state.function.body, &state.function.return_type);
+            self.compile_block(&state.state.body, &task.return_type);
             self.emit("end");
         }
         self.emit("unreachable");
@@ -475,11 +505,37 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         &self,
         state: &TaskStateLayout<'_>,
     ) -> HashMap<HirBindingId, LocalValue> {
-        state
-            .bindings
-            .iter()
-            .map(|(id, slots)| (*id, self.task_local_value(slots)))
-            .collect()
+        let mut locals = self.task_field_locals();
+        locals.extend(
+            state
+                .bindings
+                .iter()
+                .map(|(id, slots)| (*id, self.task_local_value(slots))),
+        );
+        locals
+    }
+
+    fn task_field_locals(&self) -> HashMap<HirBindingId, LocalValue> {
+        self.task_layout
+            .as_ref()
+            .map(|layout| {
+                layout
+                    .field_bindings
+                    .iter()
+                    .map(|(id, slots)| (*id, self.task_field_value(slots)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn task_field_value(&self, slots: &StateSlotValue) -> LocalValue {
+        LocalValue {
+            slots: slots
+                .offsets
+                .iter()
+                .map(|offset| self.task_field_start + offset)
+                .collect(),
+        }
     }
 
     fn task_local_value(&self, slots: &StateSlotValue) -> LocalValue {
@@ -540,11 +596,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit("return");
             }
             HirStmt::Forever(stmt) => {
-                if self.task_layout.is_some() {
-                    self.compile_task_forever(&stmt.body);
-                } else {
-                    self.unsupported(stmt.span, "`forever` is not supported by Wasm v1");
-                }
+                self.unsupported(stmt.span, "`forever` is not supported by target tasks");
             }
             HirStmt::Exit(stmt) => {
                 if self.task_layout.is_some() {
@@ -555,10 +607,13 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 }
             }
             HirStmt::Delegate(stmt) => {
+                self.unsupported(stmt.span, "`delegate` is not supported by target tasks");
+            }
+            HirStmt::Go(stmt) => {
                 if self.task_layout.is_some() {
-                    self.compile_task_delegate(stmt);
+                    self.compile_task_go(stmt);
                 } else {
-                    self.unsupported(stmt.span, "`delegate` is not supported by Wasm v1");
+                    self.unsupported(stmt.span, "`go` is only supported inside task states");
                 }
             }
             HirStmt::Match(stmt) => self.compile_match_stmt(stmt, return_type),
@@ -581,29 +636,18 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         }
     }
 
-    fn compile_task_forever(&mut self, body: &HirBlock) {
-        let label = self.fresh_label("task_forever");
-        self.emit(format!("loop ${label}"));
-        self.compile_block(body, &self.function.return_type);
-        self.emit(format!("br ${label}"));
-        self.emit("end");
-    }
-
-    fn compile_task_delegate(&mut self, stmt: &langlog_sema::HirDelegateStmt) {
+    fn compile_task_go(&mut self, stmt: &langlog_sema::HirGoStmt) {
         let Some(target) = self
             .task_layout
             .as_ref()
             .and_then(|layout| layout.state(stmt.target))
             .cloned()
         else {
-            self.unsupported(stmt.span, "delegate target is not reachable from task main");
+            self.unsupported(stmt.span, "go target is not reachable from task main");
             return;
         };
         if stmt.args.len() != target.param_bindings.len() {
-            self.unsupported(
-                stmt.span,
-                "delegate argument count does not match target task",
-            );
+            self.unsupported(stmt.span, "go argument count does not match target state");
             return;
         }
 
@@ -791,7 +835,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             HostBuiltin::Some => {
                 if args.len() != 1 {
                     self.unsupported(
-                        args.first().map_or(self.function.span, |arg| arg.span),
+                        args.first().map_or(self.active_span(), |arg| arg.span),
                         "invalid builtin arity",
                     );
                     return;
@@ -801,13 +845,13 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             HostBuiltin::Ok => {
                 if args.len() != 1 {
                     self.unsupported(
-                        args.first().map_or(self.function.span, |arg| arg.span),
+                        args.first().map_or(self.active_span(), |arg| arg.span),
                         "invalid builtin arity",
                     );
                     return;
                 }
                 let HirType::Result { err, .. } = ty else {
-                    self.unsupported(self.function.span, "`ok` must have a Result type");
+                    self.unsupported(self.active_span(), "`ok` must have a Result type");
                     return;
                 };
                 self.emit_default_value(err);
@@ -815,7 +859,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             HostBuiltin::None => {
                 let HirType::Option(inner) = ty else {
-                    self.unsupported(self.function.span, "`none` must have an Option type");
+                    self.unsupported(self.active_span(), "`none` must have an Option type");
                     return;
                 };
                 self.emit_default_value(inner);
@@ -823,13 +867,13 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
             }
             HostBuiltin::Err => {
                 let HirType::Result { ok, .. } = ty else {
-                    self.unsupported(self.function.span, "`err` must have a Result type");
+                    self.unsupported(self.active_span(), "`err` must have a Result type");
                     return;
                 };
                 let Some(err_width) = args.first().and_then(|arg| supported_value_width(&arg.ty))
                 else {
                     self.unsupported(
-                        self.function.span,
+                        self.active_span(),
                         "`err` payload is not supported by Wasm v1",
                     );
                     return;
@@ -1077,7 +1121,7 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.emit("end");
             }
             _ => self.unsupported(
-                self.function.span,
+                self.active_span(),
                 "unsupported checked arithmetic operator",
             ),
         }
@@ -1392,12 +1436,6 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         local
     }
 
-    fn fresh_label(&mut self, prefix: &str) -> String {
-        let label = format!("{prefix}_{}", self.next_label);
-        self.next_label += 1;
-        label
-    }
-
     fn allocate_scratch_local(&mut self) -> u32 {
         let local = self.next_local;
         self.next_local += 1;
@@ -1462,127 +1500,139 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
         self.compiler.error(Some(span), message);
     }
 
+    fn active_span(&self) -> Span {
+        self.function
+            .map(|function| function.span)
+            .or_else(|| self.task.map(|task| task.span))
+            .expect("function compiler should have an active callable")
+    }
+
     fn emit(&mut self, instruction: impl Into<String>) {
         self.code.push(instruction.into());
     }
 }
 
-fn delegate_targets_in_block(block: &HirBlock) -> Vec<HirItemId> {
+fn go_targets_in_block(block: &HirBlock) -> Vec<HirStateId> {
     let mut targets = Vec::new();
-    collect_delegate_targets_block(block, &mut targets);
+    collect_go_targets_block(block, &mut targets);
     targets
 }
 
-fn collect_delegate_targets_block(block: &HirBlock, targets: &mut Vec<HirItemId>) {
+fn collect_go_targets_block(block: &HirBlock, targets: &mut Vec<HirStateId>) {
     for statement in &block.statements {
-        collect_delegate_targets_stmt(statement, targets);
+        collect_go_targets_stmt(statement, targets);
     }
     if let Some(result) = &block.result {
-        collect_delegate_targets_expr(result, targets);
+        collect_go_targets_expr(result, targets);
     }
 }
 
-fn collect_delegate_targets_stmt(statement: &HirStmt, targets: &mut Vec<HirItemId>) {
+fn collect_go_targets_stmt(statement: &HirStmt, targets: &mut Vec<HirStateId>) {
     match statement {
         HirStmt::Let(stmt) => {
             if let Some(value) = &stmt.value {
-                collect_delegate_targets_expr(value, targets);
+                collect_go_targets_expr(value, targets);
             }
         }
         HirStmt::Assign(stmt) => {
-            collect_delegate_targets_expr(&stmt.target, targets);
-            collect_delegate_targets_expr(&stmt.value, targets);
+            collect_go_targets_expr(&stmt.target, targets);
+            collect_go_targets_expr(&stmt.value, targets);
         }
-        HirStmt::Expr(stmt) => collect_delegate_targets_expr(&stmt.expr, targets),
+        HirStmt::Expr(stmt) => collect_go_targets_expr(&stmt.expr, targets),
         HirStmt::If(stmt) => {
-            collect_delegate_targets_expr(&stmt.condition, targets);
-            collect_delegate_targets_block(&stmt.then_block, targets);
+            collect_go_targets_expr(&stmt.condition, targets);
+            collect_go_targets_block(&stmt.then_block, targets);
             if let Some(branch) = &stmt.else_branch {
-                collect_delegate_targets_else(branch, targets);
+                collect_go_targets_else(branch, targets);
             }
         }
         HirStmt::Match(stmt) => {
-            collect_delegate_targets_expr(&stmt.expr, targets);
+            collect_go_targets_expr(&stmt.expr, targets);
             for arm in &stmt.arms {
                 match &arm.body {
-                    HirMatchBody::Block(block) => collect_delegate_targets_block(block, targets),
-                    HirMatchBody::Expr(expr) => collect_delegate_targets_expr(expr, targets),
+                    HirMatchBody::Block(block) => collect_go_targets_block(block, targets),
+                    HirMatchBody::Expr(expr) => collect_go_targets_expr(expr, targets),
                 }
             }
         }
         HirStmt::For(stmt) => {
-            collect_delegate_targets_expr(&stmt.iterable, targets);
-            collect_delegate_targets_block(&stmt.body, targets);
+            collect_go_targets_expr(&stmt.iterable, targets);
+            collect_go_targets_block(&stmt.body, targets);
         }
         HirStmt::Return(stmt) => {
             if let Some(value) = &stmt.value {
-                collect_delegate_targets_expr(value, targets);
+                collect_go_targets_expr(value, targets);
             }
         }
-        HirStmt::Forever(stmt) => collect_delegate_targets_block(&stmt.body, targets),
-        HirStmt::Exit(stmt) => collect_delegate_targets_expr(&stmt.value, targets),
+        HirStmt::Forever(stmt) => collect_go_targets_block(&stmt.body, targets),
+        HirStmt::Exit(stmt) => collect_go_targets_expr(&stmt.value, targets),
         HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_go_targets_expr(arg, targets);
+            }
+        }
+        HirStmt::Go(stmt) => {
             targets.push(stmt.target);
             for arg in &stmt.args {
-                collect_delegate_targets_expr(arg, targets);
+                collect_go_targets_expr(arg, targets);
             }
         }
         HirStmt::Observe(stmt) => {
-            collect_delegate_targets_expr(&stmt.left, targets);
-            collect_delegate_targets_expr(&stmt.right, targets);
-            collect_delegate_targets_block(&stmt.else_block, targets);
+            collect_go_targets_expr(&stmt.left, targets);
+            collect_go_targets_expr(&stmt.right, targets);
+            collect_go_targets_block(&stmt.else_block, targets);
         }
         HirStmt::UnsafeMarker(stmt) => {
             for arg in &stmt.args {
-                collect_delegate_targets_expr(arg, targets);
+                collect_go_targets_expr(arg, targets);
             }
         }
     }
 }
 
-fn collect_delegate_targets_else(branch: &HirElseBranch, targets: &mut Vec<HirItemId>) {
+fn collect_go_targets_else(branch: &HirElseBranch, targets: &mut Vec<HirStateId>) {
     match branch {
-        HirElseBranch::Block(block) => collect_delegate_targets_block(block, targets),
+        HirElseBranch::Block(block) => collect_go_targets_block(block, targets),
         HirElseBranch::If(stmt) => {
-            collect_delegate_targets_expr(&stmt.condition, targets);
-            collect_delegate_targets_block(&stmt.then_block, targets);
+            collect_go_targets_expr(&stmt.condition, targets);
+            collect_go_targets_block(&stmt.then_block, targets);
             if let Some(branch) = &stmt.else_branch {
-                collect_delegate_targets_else(branch, targets);
+                collect_go_targets_else(branch, targets);
             }
         }
     }
 }
 
-fn collect_delegate_targets_expr(expr: &HirExpr, targets: &mut Vec<HirItemId>) {
+fn collect_go_targets_expr(expr: &HirExpr, targets: &mut Vec<HirStateId>) {
     match &expr.kind {
         HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
             for element in elements {
-                collect_delegate_targets_expr(element, targets);
+                collect_go_targets_expr(element, targets);
             }
         }
-        HirExprKind::Block(block) => collect_delegate_targets_block(block, targets),
-        HirExprKind::Unary { expr, .. } => collect_delegate_targets_expr(expr, targets),
+        HirExprKind::Block(block) => collect_go_targets_block(block, targets),
+        HirExprKind::Unary { expr, .. } => collect_go_targets_expr(expr, targets),
         HirExprKind::Binary { left, right, .. } => {
-            collect_delegate_targets_expr(left, targets);
-            collect_delegate_targets_expr(right, targets);
+            collect_go_targets_expr(left, targets);
+            collect_go_targets_expr(right, targets);
         }
         HirExprKind::Recover { expr, fallback, .. } => {
-            collect_delegate_targets_expr(expr, targets);
-            collect_delegate_targets_expr(fallback, targets);
+            collect_go_targets_expr(expr, targets);
+            collect_go_targets_expr(fallback, targets);
         }
         HirExprKind::Call { callee, args } => {
-            collect_delegate_targets_expr(callee, targets);
+            collect_go_targets_expr(callee, targets);
             for arg in args {
-                collect_delegate_targets_expr(arg, targets);
+                collect_go_targets_expr(arg, targets);
             }
         }
         HirExprKind::Index { target, index } => {
-            collect_delegate_targets_expr(target, targets);
-            collect_delegate_targets_expr(index, targets);
+            collect_go_targets_expr(target, targets);
+            collect_go_targets_expr(index, targets);
         }
         HirExprKind::UnsafeMarker { args, .. } => {
             for arg in args {
-                collect_delegate_targets_expr(arg, targets);
+                collect_go_targets_expr(arg, targets);
             }
         }
         HirExprKind::Binding(_)
@@ -1652,6 +1702,11 @@ fn collect_task_local_bindings_stmt(
         HirStmt::Forever(stmt) => collect_task_local_bindings(&stmt.body, bindings),
         HirStmt::Exit(stmt) => collect_task_local_bindings_expr(&stmt.value, bindings),
         HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_task_local_bindings_expr(arg, bindings);
+            }
+        }
+        HirStmt::Go(stmt) => {
             for arg in &stmt.args {
                 collect_task_local_bindings_expr(arg, bindings);
             }
@@ -1737,6 +1792,14 @@ fn used_host_builtins(program: &HirProgram) -> Vec<HostBuiltin> {
     for function in &program.functions {
         collect_host_builtins_block(&function.body, &mut builtins);
     }
+    for task in &program.tasks {
+        for field in &task.fields {
+            collect_host_builtins_expr(&field.value, &mut builtins);
+        }
+        for state in &task.states {
+            collect_host_builtins_block(&state.body, &mut builtins);
+        }
+    }
     builtins
 }
 
@@ -1793,6 +1856,11 @@ fn collect_host_builtins_stmt(statement: &HirStmt, builtins: &mut Vec<HostBuilti
         HirStmt::Forever(stmt) => collect_host_builtins_block(&stmt.body, builtins),
         HirStmt::Exit(stmt) => collect_host_builtins_expr(&stmt.value, builtins),
         HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_host_builtins_expr(arg, builtins);
+            }
+        }
+        HirStmt::Go(stmt) => {
             for arg in &stmt.args {
                 collect_host_builtins_expr(arg, builtins);
             }

@@ -1,10 +1,11 @@
 use crate::ast::{
     AssignStmt, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr, ExprKind, ExprStmt,
-    ForStmt, ForeverStmt, Function, GenericArg, IfStmt, Item, LetStmt, MarkerAnnotation, MarkerArg,
-    MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt, MarkerRefinement,
-    MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt, MarkerRuleParam, MarkerRuleStmt, MatchArm,
-    MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern, PatternKind, ReturnStmt,
-    Stmt, Task, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
+    ForStmt, ForeverStmt, Function, GenericArg, GoStmt, IfStmt, Item, LetStmt, MarkerAnnotation,
+    MarkerArg, MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt,
+    MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt, MarkerRuleParam,
+    MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern,
+    PatternKind, ReturnStmt, Stmt, Task, TaskField, TaskState, Type, TypeKind, UnaryOp,
+    UnsafeMarkerConstruction, UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -134,14 +135,91 @@ impl<'a> Parser<'a> {
         let params = self.parse_params()?;
         self.expect_tag(TokenTag::Arrow, "expected `->` before task return type")?;
         let return_type = self.parse_type()?;
-        let body = self.parse_block()?;
-        let span = start.span.cover(body.span).unwrap_or(body.span);
+        let (body_span, fields, states) = self.parse_task_body()?;
+        let span = start.span.cover(body_span).unwrap_or(body_span);
 
         Some(Task {
             span,
             name,
             params,
             return_type,
+            body_span,
+            fields,
+            states,
+        })
+    }
+
+    fn parse_task_body(&mut self) -> Option<(Span, Vec<TaskField>, Vec<TaskState>)> {
+        let start = self.expect_tag(TokenTag::LBrace, "expected `{` to start a task body")?;
+        let mut fields = Vec::new();
+        let mut states = Vec::new();
+
+        while !self.at(TokenTag::RBrace) && !self.at(TokenTag::Eof) {
+            let start_cursor = self.cursor;
+            match self.current_tag() {
+                TokenTag::Let => match self.parse_task_field() {
+                    Some(field) => fields.push(field),
+                    None => self.synchronize_task_member(),
+                },
+                TokenTag::Identifier if self.at_contextual_keyword("state") => {
+                    match self.parse_task_state() {
+                        Some(state) => states.push(state),
+                        None => self.synchronize_task_member(),
+                    }
+                }
+                _ => {
+                    self.error_current(
+                        "expected a task field or state",
+                        "task bodies contain `let` fields and nested `state` items",
+                    );
+                    self.synchronize_task_member();
+                }
+            }
+            if !self.ensure_progress(
+                start_cursor,
+                "parser made no progress while parsing a task member",
+            ) {
+                break;
+            }
+        }
+
+        let end = self.expect_tag(TokenTag::RBrace, "expected `}` to close task body")?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+        Some((span, fields, states))
+    }
+
+    fn parse_task_field(&mut self) -> Option<TaskField> {
+        let start = self.expect_tag(TokenTag::Let, "expected `let` to start a task field")?;
+        let mutable = self.bump_if(TokenTag::Mut);
+        let name = self.expect_identifier("expected a task field name")?;
+        self.expect_tag(TokenTag::Colon, "expected `:` after task field name")?;
+        let ty = self.parse_type()?;
+        self.expect_tag(TokenTag::Eq, "expected `=` after task field type")?;
+        let value = self.parse_expression(0)?;
+        let end = self.expect_tag(TokenTag::Semi, "expected `;` after task field")?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+
+        Some(TaskField {
+            span,
+            mutable,
+            name,
+            ty,
+            value,
+        })
+    }
+
+    fn parse_task_state(&mut self) -> Option<TaskState> {
+        let start = self.expect_contextual_keyword("state", "expected `state`")?;
+        let name = self.expect_identifier("expected a state name")?;
+        self.expect_tag(TokenTag::LParen, "expected `(` after state name")?;
+        let params = self.parse_params()?;
+        let body = self.parse_block()?;
+        let span = start.span.cover(body.span).unwrap_or(start.span);
+
+        Some(TaskState {
+            span,
+            name,
+            params,
             body,
         })
     }
@@ -714,7 +792,7 @@ impl<'a> Parser<'a> {
                 | TokenTag::Delegate
                 | TokenTag::Observe
                 | TokenTag::Unsafe
-        )
+        ) || self.at_contextual_keyword("go")
     }
 
     fn parse_statement(&mut self) -> Option<Stmt> {
@@ -727,6 +805,9 @@ impl<'a> Parser<'a> {
             TokenTag::Forever => self.parse_forever_statement().map(Stmt::Forever),
             TokenTag::Exit => self.parse_exit_statement().map(Stmt::Exit),
             TokenTag::Delegate => self.parse_delegate_statement().map(Stmt::Delegate),
+            TokenTag::Identifier if self.at_contextual_keyword("go") => {
+                self.parse_go_statement().map(Stmt::Go)
+            }
             TokenTag::Observe => self.parse_observe_statement().map(Stmt::Observe),
             TokenTag::Unsafe => self.parse_unsafe_marker_statement().map(Stmt::UnsafeMarker),
             _ => {
@@ -926,6 +1007,22 @@ impl<'a> Parser<'a> {
             .unwrap_or(start.span);
 
         Some(DelegateStmt { span, target, args })
+    }
+
+    fn parse_go_statement(&mut self) -> Option<GoStmt> {
+        let start = self.expect_contextual_keyword("go", "expected `go`")?;
+        let target = self.expect_identifier("expected a state name after `go`")?;
+        self.expect_tag(TokenTag::LParen, "expected `(` after state name")?;
+        let args = self.parse_call_arguments(TokenTag::RParen)?;
+        let args_end = self.expect_tag(TokenTag::RParen, "expected `)` after `go` arguments")?;
+        let end = self.expect_tag(TokenTag::Semi, "expected `;` after `go`")?;
+        let span = start
+            .span
+            .cover(end.span)
+            .or_else(|| start.span.cover(args_end.span))
+            .unwrap_or(start.span);
+
+        Some(GoStmt { span, target, args })
     }
 
     fn parse_observe_statement(&mut self) -> Option<ObserveStmt> {
@@ -1471,6 +1568,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn synchronize_task_member(&mut self) {
+        while !self.at(TokenTag::Eof) {
+            match self.current_tag() {
+                TokenTag::Semi => {
+                    self.bump();
+                    break;
+                }
+                TokenTag::RBrace => break,
+                TokenTag::Let => break,
+                TokenTag::Identifier if self.at_contextual_keyword("state") => break,
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+    }
+
     fn synchronize_statement(&mut self) {
         while !self.at(TokenTag::Eof) {
             match self.current_tag() {
@@ -1489,6 +1603,7 @@ impl<'a> Parser<'a> {
                 | TokenTag::Delegate
                 | TokenTag::Observe
                 | TokenTag::Unsafe => break,
+                TokenTag::Identifier if self.at_contextual_keyword("go") => break,
                 _ => {
                     self.bump();
                 }

@@ -339,7 +339,9 @@ fn requirement_llg_wasm_01_build_reports_task_root_diagnostics_to_stderr() {
     let source = TempSource::new(
         r#"
 task worker() -> u32 {
-    exit 0;
+    state start() {
+        exit 0;
+    }
 }
 "#,
     );

@@ -46,6 +46,12 @@ struct ItemSignature {
     signature: FunctionType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskStateSignature {
+    params: Vec<SemanticType>,
+    span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ItemContext<'a> {
     kind: ItemKind,
@@ -57,6 +63,7 @@ struct ItemContext<'a> {
 struct ControlContext<'a> {
     item: ItemContext<'a>,
     forever_depth: usize,
+    in_task_state: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -389,7 +396,82 @@ impl<'a> Analyzer<'a> {
             name: task.name.value.as_str(),
             name_span: task.name.span,
         };
-        self.analyze_callable(&task.params, Some(&task.return_type), &task.body, context);
+        let mut scopes = ScopeStack::default();
+        scopes.push();
+        for param in &task.params {
+            scopes.insert(
+                param.name.value.clone(),
+                Binding {
+                    kind: BindingKind::Param,
+                    span: param.name.span,
+                    loop_bound: is_bounded_iterable_type(&param.ty),
+                    mutable: false,
+                },
+            );
+        }
+        for param in &task.params {
+            self.analyze_type_marker_args(&param.ty, &scopes);
+        }
+        self.analyze_type_marker_args(&task.return_type, &scopes);
+
+        let mut field_names = HashMap::new();
+        for field in &task.fields {
+            if let Some(previous) = field_names.insert(field.name.value.clone(), field.name.span) {
+                self.report_duplicate_task_field(field.name.span, previous, &field.name.value);
+            }
+            self.analyze_type_marker_args(&field.ty, &scopes);
+            let mut control = ControlContext {
+                item: context,
+                forever_depth: 0,
+                in_task_state: false,
+            };
+            self.analyze_expr(&field.value, &mut scopes, &mut control);
+            scopes.insert(
+                field.name.value.clone(),
+                Binding {
+                    kind: BindingKind::Local,
+                    span: field.name.span,
+                    loop_bound: is_bounded_iterable_type(&field.ty),
+                    mutable: field.mutable,
+                },
+            );
+        }
+
+        let mut state_names = HashMap::new();
+        for state in &task.states {
+            if let Some(previous) = state_names.insert(state.name.value.clone(), state.name.span) {
+                self.report_duplicate_task_state(state.name.span, previous, &state.name.value);
+            }
+        }
+
+        for state in &task.states {
+            scopes.push();
+            for param in &state.params {
+                if field_names.contains_key(&param.name.value) {
+                    self.report_state_param_collides_with_task_field(param.name.span);
+                }
+                scopes.insert(
+                    param.name.value.clone(),
+                    Binding {
+                        kind: BindingKind::Param,
+                        span: param.name.span,
+                        loop_bound: is_bounded_iterable_type(&param.ty),
+                        mutable: false,
+                    },
+                );
+            }
+            for param in &state.params {
+                self.analyze_type_marker_args(&param.ty, &scopes);
+            }
+            let mut control = ControlContext {
+                item: context,
+                forever_depth: 0,
+                in_task_state: true,
+            };
+            self.analyze_block(&state.body, &mut scopes, &mut control);
+            scopes.pop();
+        }
+        scopes.pop();
     }
 
     fn analyze_marker_rule(&mut self, rule: &MarkerRule) {
@@ -475,6 +557,7 @@ impl<'a> Analyzer<'a> {
         let mut control = ControlContext {
             item: context,
             forever_depth: 0,
+            in_task_state: false,
         };
         self.analyze_block(body, &mut scopes, &mut control);
     }
@@ -579,9 +662,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Stmt::Forever(stmt) => {
-                if context.item.kind != ItemKind::Task {
-                    self.report_task_statement_outside_task(stmt.span, "`forever`");
-                }
+                self.report_legacy_task_statement(stmt.span, "`forever`", "`go` state cycles");
                 if context.forever_depth > 0 {
                     self.report_nested_forever(stmt.span);
                 }
@@ -590,21 +671,20 @@ impl<'a> Analyzer<'a> {
                 context.forever_depth -= 1;
             }
             Stmt::Exit(stmt) => {
-                if context.item.kind != ItemKind::Task {
+                if !context.in_task_state {
                     self.report_task_statement_outside_task(stmt.span, "`exit`");
                 }
                 self.analyze_expr(&stmt.value, scopes, context);
             }
             Stmt::Delegate(stmt) => {
-                if context.item.kind != ItemKind::Task {
-                    self.report_task_statement_outside_task(stmt.span, "`delegate`");
+                self.report_legacy_task_statement(stmt.span, "`delegate`", "`go`");
+                for arg in &stmt.args {
+                    self.analyze_expr(arg, scopes, context);
                 }
-                if let Some(binding) =
-                    self.resolve_name(stmt.target.value.as_str(), stmt.target.span, scopes)
-                {
-                    if binding.kind != BindingKind::TaskItem {
-                        self.report_delegate_target_not_task(stmt.target.span);
-                    }
+            }
+            Stmt::Go(stmt) => {
+                if !context.in_task_state {
+                    self.report_task_statement_outside_task(stmt.span, "`go`");
                 }
                 for arg in &stmt.args {
                     self.analyze_expr(arg, scopes, context);
@@ -1001,14 +1081,14 @@ impl<'a> Analyzer<'a> {
     fn report_return_in_task(&mut self, span: Span) {
         self.diagnostics.push(
             Diagnostic::error("`return` is not allowed inside a task")
-                .with_label(Label::primary(span, "use `exit` or `delegate` in tasks")),
+                .with_label(Label::primary(span, "use `exit` or `go` in task states")),
         );
     }
 
     fn report_task_statement_outside_task(&mut self, span: Span, keyword: &str) {
         self.diagnostics.push(
-            Diagnostic::error(format!("{keyword} is only allowed inside a task"))
-                .with_label(Label::primary(span, "task-only orchestration statement")),
+            Diagnostic::error(format!("{keyword} is only valid inside task states"))
+                .with_label(Label::primary(span, "task-state orchestration statement")),
         );
     }
 
@@ -1019,10 +1099,34 @@ impl<'a> Analyzer<'a> {
         );
     }
 
-    fn report_delegate_target_not_task(&mut self, span: Span) {
+    fn report_legacy_task_statement(&mut self, span: Span, statement: &str, replacement: &str) {
         self.diagnostics.push(
-            Diagnostic::error("`delegate` requires a task target")
-                .with_label(Label::primary(span, "this target is not a task")),
+            Diagnostic::error(format!("{statement} is not part of target task states"))
+                .with_label(Label::primary(span, format!("use {replacement} instead"))),
+        );
+    }
+
+    fn report_duplicate_task_field(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate task field `{name}`"))
+                .with_label(Label::primary(span, "field is declared again here"))
+                .with_label(Label::secondary(previous, "first declaration is here")),
+        );
+    }
+
+    fn report_duplicate_task_state(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate task state `{name}`"))
+                .with_label(Label::primary(span, "state is declared again here"))
+                .with_label(Label::secondary(previous, "first declaration is here")),
+        );
+    }
+
+    fn report_state_param_collides_with_task_field(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("state parameters must not shadow task fields").with_label(
+                Label::primary(span, "rename this state parameter or task field"),
+            ),
         );
     }
 
@@ -1041,6 +1145,7 @@ struct TypeChecker<'a> {
     item_signatures: HashMap<String, ItemSignature>,
     host_signatures: HashMap<String, FunctionType>,
     marker_families: HashMap<String, MarkerFamilySignature>,
+    task_state_stack: Vec<HashMap<String, TaskStateSignature>>,
     facts: TypeFacts,
 }
 
@@ -1094,6 +1199,7 @@ impl<'a> TypeChecker<'a> {
             item_signatures,
             host_signatures,
             marker_families,
+            task_state_stack: Vec::new(),
             facts: TypeFacts::default(),
         }
     }
@@ -1201,11 +1307,79 @@ impl<'a> TypeChecker<'a> {
 
         let expected_return = lower_type(&task.return_type);
         self.check_marker_qualified_type(&task.return_type, &scopes, true);
-        self.check_block(&task.body, &mut scopes, &expected_return);
 
-        if !is_terminal_block(&task.body, TerminalKind::Task) {
-            self.report_task_fallthrough(task.body.span);
+        let mut field_names = HashMap::new();
+        for field in &task.fields {
+            if let Some(previous) = field_names.insert(field.name.value.clone(), field.name.span) {
+                self.report_duplicate_task_field(field.name.span, previous, &field.name.value);
+            }
+            let field_type = lower_type(&field.ty);
+            self.check_marker_qualified_type(&field.ty, &scopes, true);
+            let value_type =
+                self.check_expr_with_expected(&field.value, &mut scopes, Some(&field_type));
+            self.require_same_type(field.value.span, &field_type, &value_type);
+            self.facts
+                .record_binding(field.name.span, field_type.clone());
+            scopes.insert(field.name.value.clone(), field_type);
         }
+
+        let mut state_signatures = HashMap::new();
+        let mut start_count = 0usize;
+        for state in &task.states {
+            if state.name.value == "start" {
+                start_count += 1;
+            }
+            let signature = TaskStateSignature {
+                params: state
+                    .params
+                    .iter()
+                    .map(|param| lower_type(&param.ty))
+                    .collect(),
+                span: state.name.span,
+            };
+            if let Some(previous) =
+                state_signatures.insert(state.name.value.clone(), signature.clone())
+            {
+                self.report_duplicate_task_state(state.name.span, previous.span, &state.name.value);
+            }
+        }
+        match start_count {
+            0 => self.report_missing_start_state(task.body_span),
+            1 => {}
+            _ => self.report_duplicate_start_state(task.body_span),
+        }
+
+        if let Some(start) = state_signatures.get("start").cloned() {
+            let task_params: Vec<_> = task
+                .params
+                .iter()
+                .map(|param| lower_type(&param.ty))
+                .collect();
+            self.require_state_signature_matches_task(task.name.span, &task_params, &start.params);
+        }
+
+        self.task_state_stack.push(state_signatures);
+        for state in &task.states {
+            scopes.push();
+            for param in &state.params {
+                if field_names.contains_key(&param.name.value) {
+                    self.report_state_param_collides_with_task_field(param.name.span);
+                }
+                let param_type = lower_type(&param.ty);
+                self.facts
+                    .record_binding(param.name.span, param_type.clone());
+                scopes.insert(param.name.value.clone(), param_type);
+            }
+            for param in &state.params {
+                self.check_marker_qualified_type(&param.ty, &scopes, true);
+            }
+            self.check_block(&state.body, &mut scopes, &expected_return);
+            if !is_terminal_block(&state.body, TerminalKind::TaskState) {
+                self.report_task_state_fallthrough(state.body.span);
+            }
+            scopes.pop();
+        }
+        self.task_state_stack.pop();
 
         scopes.pop();
     }
@@ -1464,6 +1638,7 @@ impl<'a> TypeChecker<'a> {
                 self.require_same_type(stmt.span, expected_return, &value_type);
             }
             Stmt::Forever(stmt) => {
+                self.report_legacy_task_statement(stmt.span, "`forever`", "`go` state cycles");
                 self.check_block(&stmt.body, scopes, expected_return);
             }
             Stmt::Exit(stmt) => {
@@ -1472,7 +1647,13 @@ impl<'a> TypeChecker<'a> {
                 self.require_same_type(stmt.span, expected_return, &value_type);
             }
             Stmt::Delegate(stmt) => {
-                self.check_delegate_stmt(stmt, scopes, expected_return);
+                self.report_legacy_task_statement(stmt.span, "`delegate`", "`go`");
+                for arg in &stmt.args {
+                    self.check_expr(arg, scopes);
+                }
+            }
+            Stmt::Go(stmt) => {
+                self.check_go_stmt(stmt, scopes);
             }
             Stmt::Observe(stmt) => {
                 let left = self.check_expr(&stmt.left, scopes);
@@ -2106,46 +2287,34 @@ impl<'a> TypeChecker<'a> {
         (*signature.return_type).clone()
     }
 
-    fn check_delegate_stmt(
-        &mut self,
-        stmt: &langlog_syntax::ast::DelegateStmt,
-        scopes: &mut TypeScopeStack,
-        expected_return: &SemanticType,
-    ) {
-        let Some(item) = self
-            .item_signatures
-            .get(stmt.target.value.as_str())
-            .cloned()
-        else {
+    fn check_go_stmt(&mut self, stmt: &langlog_syntax::ast::GoStmt, scopes: &mut TypeScopeStack) {
+        let Some(states) = self.task_state_stack.last() else {
+            self.report_task_statement_outside_task(stmt.span, "`go`");
+            for arg in &stmt.args {
+                self.check_expr(arg, scopes);
+            }
+            return;
+        };
+        let Some(target) = states.get(stmt.target.value.as_str()).cloned() else {
+            self.report_unknown_task_state(stmt.target.span, stmt.target.value.as_str());
             for arg in &stmt.args {
                 self.check_expr(arg, scopes);
             }
             return;
         };
 
-        if item.kind != ItemKind::Task {
-            self.report_delegate_target_not_task(stmt.target.span);
+        if stmt.args.len() != target.params.len() {
+            self.report_go_arity_mismatch(stmt.target.span, target.params.len(), stmt.args.len());
             for arg in &stmt.args {
                 self.check_expr(arg, scopes);
             }
             return;
         }
 
-        let signature = item.signature;
-        if stmt.args.len() != signature.params.len() {
-            self.report_delegate_arity_mismatch(
-                stmt.target.span,
-                signature.params.len(),
-                stmt.args.len(),
-            );
-        } else {
-            for (arg, expected) in stmt.args.iter().zip(signature.params.iter()) {
-                let found = self.check_expr_with_expected(arg, scopes, Some(expected));
-                self.require_same_type(arg.span, expected, &found);
-            }
+        for (arg, expected) in stmt.args.iter().zip(target.params.iter()) {
+            let found = self.check_expr_with_expected(arg, scopes, Some(expected));
+            self.require_same_type(arg.span, expected, &found);
         }
-
-        self.require_same_type(stmt.target.span, expected_return, &signature.return_type);
     }
 
     fn check_index_expr(
@@ -2243,8 +2412,8 @@ impl<'a> TypeChecker<'a> {
 
     fn report_task_item_used_as_expression(&mut self, span: Span) {
         self.diagnostics.push(
-            Diagnostic::error("task items can only be used with `delegate`").with_label(
-                Label::primary(span, "use `delegate` to transfer to this task"),
+            Diagnostic::error("task items cannot be used as expressions").with_label(
+                Label::primary(span, "use `go` inside the task state graph instead"),
             ),
         );
     }
@@ -2258,29 +2427,116 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
-    fn report_delegate_target_not_task(&mut self, span: Span) {
+    fn report_task_statement_outside_task(&mut self, span: Span, statement: &str) {
         self.diagnostics.push(
-            Diagnostic::error("`delegate` requires a task target")
-                .with_label(Label::primary(span, "this target is not a task")),
+            Diagnostic::error(format!("{statement} is only valid inside task states")).with_label(
+                Label::primary(span, "move this statement into a `state` body"),
+            ),
         );
     }
 
-    fn report_delegate_arity_mismatch(&mut self, span: Span, expected: usize, found: usize) {
+    fn report_task_state_fallthrough(&mut self, span: Span) {
         self.diagnostics.push(
-            Diagnostic::error(format!(
-                "delegate arity mismatch: expected {expected} argument(s), found {found}"
-            ))
-            .with_label(Label::primary(span, "adjust this delegate target")),
-        );
-    }
-
-    fn report_task_fallthrough(&mut self, span: Span) {
-        self.diagnostics.push(
-            Diagnostic::error("task bodies must not fall through").with_label(Label::primary(
+            Diagnostic::error("task states must not fall through").with_label(Label::primary(
                 span,
-                "end with `exit`, `delegate`, or a non-nested `forever`",
+                "end every reachable path with `exit` or `go`",
             )),
         );
+    }
+
+    fn report_legacy_task_statement(&mut self, span: Span, statement: &str, replacement: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("{statement} is not part of target task states"))
+                .with_label(Label::primary(span, format!("use {replacement} instead"))),
+        );
+    }
+
+    fn report_duplicate_task_field(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate task field `{name}`"))
+                .with_label(Label::primary(span, "field is declared again here"))
+                .with_label(Label::secondary(previous, "first declaration is here")),
+        );
+    }
+
+    fn report_duplicate_task_state(&mut self, span: Span, previous: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("duplicate task state `{name}`"))
+                .with_label(Label::primary(span, "state is declared again here"))
+                .with_label(Label::secondary(previous, "first declaration is here")),
+        );
+    }
+
+    fn report_missing_start_state(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("tasks must declare a `start` state")
+                .with_label(Label::primary(span, "add `state start(...) { ... }` here")),
+        );
+    }
+
+    fn report_duplicate_start_state(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("tasks must declare exactly one `start` state")
+                .with_label(Label::primary(span, "`start` is declared more than once")),
+        );
+    }
+
+    fn report_state_param_collides_with_task_field(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("state parameters must not shadow task fields").with_label(
+                Label::primary(span, "rename this state parameter or task field"),
+            ),
+        );
+    }
+
+    fn report_unknown_task_state(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("unknown task state `{name}`"))
+                .with_label(Label::primary(span, "state is not declared in this task")),
+        );
+    }
+
+    fn report_go_arity_mismatch(&mut self, span: Span, expected: usize, found: usize) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "go arity mismatch: expected {expected} argument(s), found {found}"
+            ))
+            .with_label(Label::primary(span, "adjust this state transition")),
+        );
+    }
+
+    fn require_state_signature_matches_task(
+        &mut self,
+        span: Span,
+        task_params: &[SemanticType],
+        start_params: &[SemanticType],
+    ) {
+        if task_params.len() != start_params.len() {
+            self.diagnostics.push(
+                Diagnostic::error(format!(
+                    "`start` state arity mismatch: expected {} parameter(s), found {}",
+                    task_params.len(),
+                    start_params.len()
+                ))
+                .with_label(Label::primary(span, "`start` must mirror task parameters")),
+            );
+            return;
+        }
+
+        for (index, (task_param, start_param)) in
+            task_params.iter().zip(start_params.iter()).enumerate()
+        {
+            if task_param != start_param {
+                self.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "`start` state parameter {index} has type {}, expected {}",
+                        start_param.describe(),
+                        task_param.describe()
+                    ))
+                    .with_label(Label::primary(span, "`start` must mirror task parameters")),
+                );
+            }
+        }
     }
 
     fn report_non_indexable_target(&mut self, span: Span) {
@@ -2746,13 +3002,13 @@ fn is_bounded_iterable_type(ty: &langlog_syntax::ast::Type) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalKind {
     Function,
-    Task,
+    TaskState,
 }
 
 fn terminal_kind(item_kind: ItemKind) -> TerminalKind {
     match item_kind {
         ItemKind::Function => TerminalKind::Function,
-        ItemKind::Task => TerminalKind::Task,
+        ItemKind::Task => TerminalKind::TaskState,
     }
 }
 
@@ -2767,7 +3023,7 @@ fn is_terminal_block(block: &Block, kind: TerminalKind) -> bool {
 fn is_terminal_statement(statement: &Stmt, kind: TerminalKind) -> bool {
     match statement {
         Stmt::Return(_) => kind == TerminalKind::Function,
-        Stmt::Exit(_) | Stmt::Delegate(_) | Stmt::Forever(_) => kind == TerminalKind::Task,
+        Stmt::Exit(_) | Stmt::Go(_) => kind == TerminalKind::TaskState,
         Stmt::If(stmt) => {
             is_terminal_block(&stmt.then_block, kind)
                 && stmt

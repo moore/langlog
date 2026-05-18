@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use langlog_sema::{
     CheckedProgram, HirBinding, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind,
     HirFunction, HirItemId, HirMarkerFamily, HirMarkerPlace, HirMarkerRequirement, HirMarkerRule,
     HirMarkerRuleStmt, HirMarkerTemplateArg, HirMatchBody, HirPattern, HirPatternKind, HirProgram,
-    HirStmt, HirType, HostBuiltin,
+    HirStateId, HirStmt, HirTask, HirTaskState, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp};
 use langlog_syntax::{ByteOffset, Diagnostic, FileId, Label, Severity, Span};
@@ -151,11 +151,27 @@ pub fn check(program: &CheckedProgram) -> CheckedProof {
 pub struct ProofProgram {
     pub places: Vec<ProofPlace>,
     pub functions: Vec<ProofFunction>,
+    pub tasks: Vec<ProofTask>,
     pub marker_rules: Vec<ProofMarkerRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofFunction {
+    pub body: ProofBlock,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofTask {
+    pub init: ProofBlock,
+    pub states: Vec<ProofTaskState>,
+    pub productivity_obligations: Vec<MarkerObligation>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofTaskState {
+    pub name: String,
     pub body: ProofBlock,
     pub span: Span,
 }
@@ -362,6 +378,7 @@ pub fn lower_to_proof_ir(hir: &HirProgram) -> ProofProgram {
     ProofLowerer::new(
         collect_bindings(hir),
         collect_function_markers(hir),
+        collect_state_markers(hir),
         collect_marker_family_arities(hir),
     )
     .lower_program(hir)
@@ -382,6 +399,7 @@ struct ParamMarkerSignature {
 struct ProofLowerer {
     binding_info: HashMap<HirBindingId, BindingInfo>,
     function_markers: HashMap<HirItemId, FunctionMarkerSignature>,
+    state_markers: HashMap<HirStateId, FunctionMarkerSignature>,
     marker_family_arities: HashMap<String, usize>,
     current_return_markers: Vec<HirMarkerRequirement>,
     binding_places: BindingPlaceMap,
@@ -461,11 +479,13 @@ impl ProofLowerer {
     fn new(
         binding_info: HashMap<HirBindingId, BindingInfo>,
         function_markers: HashMap<HirItemId, FunctionMarkerSignature>,
+        state_markers: HashMap<HirStateId, FunctionMarkerSignature>,
         marker_family_arities: HashMap<String, usize>,
     ) -> Self {
         Self {
             binding_info,
             function_markers,
+            state_markers,
             marker_family_arities,
             current_return_markers: Vec::new(),
             binding_places: HashMap::new(),
@@ -510,10 +530,127 @@ impl ProofLowerer {
             });
         }
 
+        let mut tasks = Vec::new();
+        for task in &hir.tasks {
+            tasks.push(self.lower_task(task));
+        }
+
         ProofProgram {
             places: self.places,
             functions,
+            tasks,
             marker_rules: hir.marker_rules.iter().map(lower_marker_rule).collect(),
+        }
+    }
+
+    fn lower_task(&mut self, task: &HirTask) -> ProofTask {
+        self.binding_places.clear();
+        self.binding_versions.clear();
+        self.current_return_markers = task.return_markers.clone();
+        let mut init_entries = Vec::new();
+        for param in &task.params {
+            let place = self.bind_initial_place(param, None);
+            for marker in &param.markers {
+                if let Some(fact) = self.marker_requirement_fact(
+                    marker,
+                    place,
+                    &HashMap::new(),
+                    MarkerFactSource::TrustedBuiltin,
+                    param.span,
+                ) {
+                    init_entries.push(ProofEntry::Fact {
+                        span: fact.origin_span,
+                        fact,
+                    });
+                }
+            }
+        }
+        for field in &task.fields {
+            let value = self.lower_expr(&field.value, &mut init_entries);
+            let value_place = value.as_ref().map(|value| value.place);
+            let place = self.bind_initial_place(
+                &field.binding,
+                value_place.and_then(|place| self.place_value(place)),
+            );
+            init_entries.push(ProofEntry::Let {
+                binding: field.binding.id,
+                place,
+                value: value_place,
+                span: field.span,
+            });
+            self.push_marker_obligations(
+                &mut init_entries,
+                &field.binding.markers,
+                place,
+                &HashMap::new(),
+                field.span,
+            );
+        }
+        let init = ProofBlock {
+            entries: init_entries,
+            span: task.span,
+        };
+
+        let states = task
+            .states
+            .iter()
+            .map(|state| self.lower_task_state(task, state))
+            .collect();
+        let productivity_obligations = task_productivity_obligations(task);
+
+        ProofTask {
+            init,
+            states,
+            productivity_obligations,
+            span: task.span,
+        }
+    }
+
+    fn lower_task_state(&mut self, task: &HirTask, state: &HirTaskState) -> ProofTaskState {
+        self.binding_places.clear();
+        self.binding_versions.clear();
+        self.current_return_markers = task.return_markers.clone();
+        let mut entry_facts = Vec::new();
+        for field in &task.fields {
+            let place = self.bind_initial_place(&field.binding, None);
+            for marker in &field.binding.markers {
+                if let Some(fact) = self.marker_requirement_fact(
+                    marker,
+                    place,
+                    &HashMap::new(),
+                    MarkerFactSource::TrustedBuiltin,
+                    field.span,
+                ) {
+                    entry_facts.push(fact);
+                }
+            }
+        }
+        for param in &state.params {
+            let place = self.bind_initial_place(param, None);
+            for marker in &param.markers {
+                if let Some(fact) = self.marker_requirement_fact(
+                    marker,
+                    place,
+                    &HashMap::new(),
+                    MarkerFactSource::TrustedBuiltin,
+                    param.span,
+                ) {
+                    entry_facts.push(fact);
+                }
+            }
+        }
+        let mut body = self.lower_block(&state.body);
+        body.entries.splice(
+            0..0,
+            entry_facts.into_iter().map(|fact| ProofEntry::Fact {
+                span: fact.origin_span,
+                fact,
+            }),
+        );
+        ProofTaskState {
+            name: state.name.clone(),
+            body,
+            span: state.span,
         }
     }
 
@@ -699,6 +836,14 @@ impl ProofLowerer {
                     .filter_map(|arg| self.lower_expr(arg, entries))
                     .collect();
                 self.push_call_marker_obligations(entries, stmt.target, &args, stmt.span);
+            }
+            HirStmt::Go(stmt) => {
+                let args: Vec<_> = stmt
+                    .args
+                    .iter()
+                    .filter_map(|arg| self.lower_expr(arg, entries))
+                    .collect();
+                self.push_state_marker_obligations(entries, stmt.target, &args, stmt.span);
             }
             HirStmt::UnsafeMarker(stmt) => {
                 let args: Vec<_> = stmt
@@ -1026,6 +1171,22 @@ impl ProofLowerer {
         span: Span,
     ) {
         let Some(signature) = self.function_markers.get(&item).cloned() else {
+            return;
+        };
+        let substitution = call_marker_substitution(&signature, args);
+        for (param, arg) in signature.params.iter().zip(args.iter()) {
+            self.push_marker_obligations(entries, &param.markers, arg.place, &substitution, span);
+        }
+    }
+
+    fn push_state_marker_obligations(
+        &mut self,
+        entries: &mut Vec<ProofEntry>,
+        state: HirStateId,
+        args: &[ProofExpr],
+        span: Span,
+    ) {
+        let Some(signature) = self.state_markers.get(&state).cloned() else {
             return;
         };
         let substitution = call_marker_substitution(&signature, args);
@@ -1584,6 +1745,19 @@ impl<'a> Checker<'a> {
         for function in &self.program.functions {
             let mut env = MarkerEnv::default();
             self.check_block(&function.body, &mut env);
+        }
+        for task in &self.program.tasks {
+            let mut env = MarkerEnv::default();
+            self.check_block(&task.init, &mut env);
+            for state in &task.states {
+                let mut env = MarkerEnv::default();
+                self.check_block(&state.body, &mut env);
+            }
+            let env = MarkerEnv::default();
+            for obligation in &task.productivity_obligations {
+                self.obligations += 1;
+                self.report_marker_obligation(&env, obligation);
+            }
         }
     }
 
@@ -3012,6 +3186,21 @@ fn collect_bindings(hir: &HirProgram) -> HashMap<HirBindingId, BindingInfo> {
         }
         collect_block_bindings(&mut bindings, &function.body);
     }
+    for task in &hir.tasks {
+        for param in &task.params {
+            collect_binding(&mut bindings, param);
+        }
+        for field in &task.fields {
+            collect_binding(&mut bindings, &field.binding);
+            collect_expr_bindings(&mut bindings, &field.value);
+        }
+        for state in &task.states {
+            for param in &state.params {
+                collect_binding(&mut bindings, param);
+            }
+            collect_block_bindings(&mut bindings, &state.body);
+        }
+    }
     bindings
 }
 
@@ -3019,6 +3208,17 @@ fn collect_function_markers(hir: &HirProgram) -> HashMap<HirItemId, FunctionMark
     hir.functions
         .iter()
         .map(|function| (function.id, function_marker_signature(function)))
+        .collect()
+}
+
+fn collect_state_markers(hir: &HirProgram) -> HashMap<HirStateId, FunctionMarkerSignature> {
+    hir.tasks
+        .iter()
+        .flat_map(|task| {
+            task.states
+                .iter()
+                .map(|state| (state.id, state_marker_signature(state)))
+        })
         .collect()
 }
 
@@ -3043,6 +3243,20 @@ fn function_marker_signature(function: &HirFunction) -> FunctionMarkerSignature 
     }
 }
 
+fn state_marker_signature(state: &HirTaskState) -> FunctionMarkerSignature {
+    FunctionMarkerSignature {
+        params: state
+            .params
+            .iter()
+            .map(|param| ParamMarkerSignature {
+                binding: param.id,
+                markers: param.markers.clone(),
+            })
+            .collect(),
+        return_markers: Vec::new(),
+    }
+}
+
 fn call_marker_substitution(
     signature: &FunctionMarkerSignature,
     args: &[ProofExpr],
@@ -3053,6 +3267,361 @@ fn call_marker_substitution(
         .zip(args.iter())
         .map(|(param, arg)| (param.binding, arg.place))
         .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TaskGoEdge {
+    from: HirStateId,
+    to: HirStateId,
+    productive: bool,
+    span: Span,
+}
+
+fn task_productivity_obligations(task: &HirTask) -> Vec<MarkerObligation> {
+    let mut edges = Vec::new();
+    for state in &task.states {
+        task_block_continuations(&state.body, vec![false], &mut edges, state.id);
+    }
+
+    let Some(start) = task
+        .states
+        .iter()
+        .find(|state| state.name == "start")
+        .map(|state| state.id)
+    else {
+        return Vec::new();
+    };
+    let reachable = reachable_task_states(start, &edges);
+    find_unproductive_cycle_span(&edges, &reachable)
+        .into_iter()
+        .map(|span| MarkerObligation {
+            target: ObligationTarget::StateCycle { span },
+            required: MarkerPattern::Event,
+            source: ObligationSource::EventCycle,
+            span,
+        })
+        .collect()
+}
+
+fn task_block_continuations(
+    block: &HirBlock,
+    incoming: Vec<bool>,
+    edges: &mut Vec<TaskGoEdge>,
+    current_state: HirStateId,
+) -> Vec<bool> {
+    let mut paths = incoming;
+    for statement in &block.statements {
+        if paths.is_empty() {
+            break;
+        }
+        paths = task_statement_continuations(statement, paths, edges, current_state);
+    }
+    if let Some(result) = &block.result {
+        let fresh = hir_expr_direct_fresh_event(result);
+        if fresh {
+            paths.iter_mut().for_each(|path| *path = true);
+        }
+    }
+    paths
+}
+
+fn task_statement_continuations(
+    statement: &HirStmt,
+    incoming: Vec<bool>,
+    edges: &mut Vec<TaskGoEdge>,
+    current_state: HirStateId,
+) -> Vec<bool> {
+    match statement {
+        HirStmt::Let(stmt) => update_paths_with_expr(incoming, stmt.value.as_ref()),
+        HirStmt::Assign(stmt) => {
+            let mut paths = update_paths_with_expr(incoming, Some(&stmt.target));
+            paths = update_paths_with_expr(paths, Some(&stmt.value));
+            paths
+        }
+        HirStmt::Expr(stmt) => update_paths_with_expr(incoming, Some(&stmt.expr)),
+        HirStmt::If(stmt) => {
+            let conditioned = update_paths_with_expr(incoming, Some(&stmt.condition));
+            let mut out = Vec::new();
+            for fresh in conditioned {
+                out.extend(task_block_continuations(
+                    &stmt.then_block,
+                    vec![fresh],
+                    edges,
+                    current_state,
+                ));
+                if let Some(branch) = &stmt.else_branch {
+                    out.extend(task_else_continuations(branch, fresh, edges, current_state));
+                } else {
+                    out.push(fresh);
+                }
+            }
+            out
+        }
+        HirStmt::Match(stmt) => {
+            let matched = update_paths_with_expr(incoming, Some(&stmt.expr));
+            let mut out = Vec::new();
+            for fresh in matched {
+                for arm in &stmt.arms {
+                    match &arm.body {
+                        HirMatchBody::Block(block) => out.extend(task_block_continuations(
+                            block,
+                            vec![fresh],
+                            edges,
+                            current_state,
+                        )),
+                        HirMatchBody::Expr(expr) => {
+                            out.push(fresh || hir_expr_direct_fresh_event(expr));
+                        }
+                    }
+                }
+            }
+            out
+        }
+        HirStmt::For(stmt) => {
+            let iterated = update_paths_with_expr(incoming, Some(&stmt.iterable));
+            let mut out = iterated.clone();
+            for fresh in iterated {
+                out.extend(task_block_continuations(
+                    &stmt.body,
+                    vec![fresh],
+                    edges,
+                    current_state,
+                ));
+            }
+            out
+        }
+        HirStmt::Return(_) | HirStmt::Exit(_) => Vec::new(),
+        HirStmt::Forever(stmt) => {
+            for fresh in incoming {
+                task_block_continuations(&stmt.body, vec![fresh], edges, current_state);
+            }
+            Vec::new()
+        }
+        HirStmt::Delegate(stmt) => {
+            let mut paths = incoming;
+            for arg in &stmt.args {
+                paths = update_paths_with_expr(paths, Some(arg));
+            }
+            Vec::new()
+        }
+        HirStmt::Go(stmt) => {
+            let mut paths = incoming;
+            for arg in &stmt.args {
+                paths = update_paths_with_expr(paths, Some(arg));
+            }
+            edges.push(TaskGoEdge {
+                from: current_state,
+                to: stmt.target,
+                productive: paths.iter().all(|fresh| *fresh),
+                span: stmt.span,
+            });
+            Vec::new()
+        }
+        HirStmt::Observe(stmt) => {
+            let mut paths = update_paths_with_expr(incoming, Some(&stmt.left));
+            paths = update_paths_with_expr(paths, Some(&stmt.right));
+            let mut out = paths.clone();
+            for fresh in paths {
+                out.extend(task_block_continuations(
+                    &stmt.else_block,
+                    vec![fresh],
+                    edges,
+                    current_state,
+                ));
+            }
+            out
+        }
+        HirStmt::UnsafeMarker(stmt) => {
+            let has_fresh_event = stmt.marker == HirMarkerFamily::Event
+                || stmt.args.iter().any(hir_expr_direct_fresh_event);
+            let mut paths = incoming;
+            if has_fresh_event {
+                paths.iter_mut().for_each(|path| *path = true);
+            }
+            paths
+        }
+    }
+}
+
+fn task_else_continuations(
+    branch: &HirElseBranch,
+    incoming: bool,
+    edges: &mut Vec<TaskGoEdge>,
+    current_state: HirStateId,
+) -> Vec<bool> {
+    match branch {
+        HirElseBranch::Block(block) => {
+            task_block_continuations(block, vec![incoming], edges, current_state)
+        }
+        HirElseBranch::If(stmt) => task_statement_continuations(
+            &HirStmt::If(*stmt.clone()),
+            vec![incoming],
+            edges,
+            current_state,
+        ),
+    }
+}
+
+fn update_paths_with_expr(mut paths: Vec<bool>, expr: Option<&HirExpr>) -> Vec<bool> {
+    if expr.is_some_and(hir_expr_direct_fresh_event) {
+        paths.iter_mut().for_each(|path| *path = true);
+    }
+    paths
+}
+
+fn hir_expr_direct_fresh_event(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::Call { callee, args } => {
+            matches!(callee.kind, HirExprKind::HostBuiltin(HostBuiltin::ReadU32))
+                || args.iter().any(hir_expr_direct_fresh_event)
+        }
+        HirExprKind::UnsafeMarker { marker, args } => {
+            *marker == HirMarkerFamily::Event || args.iter().any(hir_expr_direct_fresh_event)
+        }
+        HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
+            elements.iter().any(hir_expr_direct_fresh_event)
+        }
+        HirExprKind::Block(block) => task_block_has_direct_fresh_event(block),
+        HirExprKind::Unary { expr, .. } => hir_expr_direct_fresh_event(expr),
+        HirExprKind::Binary { left, right, .. } => {
+            hir_expr_direct_fresh_event(left) || hir_expr_direct_fresh_event(right)
+        }
+        HirExprKind::Recover { expr, fallback, .. } => {
+            hir_expr_direct_fresh_event(expr) || hir_expr_direct_fresh_event(fallback)
+        }
+        HirExprKind::Index { target, index } => {
+            hir_expr_direct_fresh_event(target) || hir_expr_direct_fresh_event(index)
+        }
+        HirExprKind::Binding(_)
+        | HirExprKind::Item(_)
+        | HirExprKind::HostBuiltin(_)
+        | HirExprKind::Int(_)
+        | HirExprKind::Bool(_) => false,
+    }
+}
+
+fn task_block_has_direct_fresh_event(block: &HirBlock) -> bool {
+    block
+        .statements
+        .iter()
+        .any(task_statement_has_direct_fresh_event)
+        || block
+            .result
+            .as_deref()
+            .is_some_and(hir_expr_direct_fresh_event)
+}
+
+fn task_statement_has_direct_fresh_event(statement: &HirStmt) -> bool {
+    match statement {
+        HirStmt::Let(stmt) => stmt.value.as_ref().is_some_and(hir_expr_direct_fresh_event),
+        HirStmt::Assign(stmt) => {
+            hir_expr_direct_fresh_event(&stmt.target) || hir_expr_direct_fresh_event(&stmt.value)
+        }
+        HirStmt::Expr(stmt) => hir_expr_direct_fresh_event(&stmt.expr),
+        HirStmt::If(stmt) => {
+            hir_expr_direct_fresh_event(&stmt.condition)
+                || task_block_has_direct_fresh_event(&stmt.then_block)
+                || stmt
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(task_else_has_direct_fresh_event)
+        }
+        HirStmt::Match(stmt) => {
+            hir_expr_direct_fresh_event(&stmt.expr)
+                || stmt.arms.iter().any(|arm| match &arm.body {
+                    HirMatchBody::Block(block) => task_block_has_direct_fresh_event(block),
+                    HirMatchBody::Expr(expr) => hir_expr_direct_fresh_event(expr),
+                })
+        }
+        HirStmt::For(stmt) => {
+            hir_expr_direct_fresh_event(&stmt.iterable)
+                || task_block_has_direct_fresh_event(&stmt.body)
+        }
+        HirStmt::Return(stmt) => stmt.value.as_ref().is_some_and(hir_expr_direct_fresh_event),
+        HirStmt::Forever(stmt) => task_block_has_direct_fresh_event(&stmt.body),
+        HirStmt::Exit(stmt) => hir_expr_direct_fresh_event(&stmt.value),
+        HirStmt::Delegate(stmt) => stmt.args.iter().any(hir_expr_direct_fresh_event),
+        HirStmt::Go(stmt) => stmt.args.iter().any(hir_expr_direct_fresh_event),
+        HirStmt::Observe(stmt) => {
+            hir_expr_direct_fresh_event(&stmt.left)
+                || hir_expr_direct_fresh_event(&stmt.right)
+                || task_block_has_direct_fresh_event(&stmt.else_block)
+        }
+        HirStmt::UnsafeMarker(stmt) => {
+            stmt.marker == HirMarkerFamily::Event
+                || stmt.args.iter().any(hir_expr_direct_fresh_event)
+        }
+    }
+}
+
+fn task_else_has_direct_fresh_event(branch: &HirElseBranch) -> bool {
+    match branch {
+        HirElseBranch::Block(block) => task_block_has_direct_fresh_event(block),
+        HirElseBranch::If(stmt) => {
+            task_statement_has_direct_fresh_event(&HirStmt::If(*stmt.clone()))
+        }
+    }
+}
+
+fn reachable_task_states(start: HirStateId, edges: &[TaskGoEdge]) -> HashSet<HirStateId> {
+    let mut reachable = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(state) = stack.pop() {
+        if !reachable.insert(state) {
+            continue;
+        }
+        for edge in edges.iter().filter(|edge| edge.from == state) {
+            stack.push(edge.to);
+        }
+    }
+    reachable
+}
+
+fn find_unproductive_cycle_span(
+    edges: &[TaskGoEdge],
+    reachable: &HashSet<HirStateId>,
+) -> Option<Span> {
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for state in reachable {
+        if let Some(span) =
+            find_unproductive_cycle_from(*state, edges, reachable, &mut visiting, &mut visited)
+        {
+            return Some(span);
+        }
+    }
+    None
+}
+
+fn find_unproductive_cycle_from(
+    state: HirStateId,
+    edges: &[TaskGoEdge],
+    reachable: &HashSet<HirStateId>,
+    visiting: &mut HashSet<HirStateId>,
+    visited: &mut HashSet<HirStateId>,
+) -> Option<Span> {
+    if !reachable.contains(&state) || visited.contains(&state) {
+        return None;
+    }
+    if !visiting.insert(state) {
+        return None;
+    }
+    for edge in edges
+        .iter()
+        .filter(|edge| !edge.productive && edge.from == state && reachable.contains(&edge.to))
+    {
+        if visiting.contains(&edge.to) {
+            return Some(edge.span);
+        }
+        if let Some(span) =
+            find_unproductive_cycle_from(edge.to, edges, reachable, visiting, visited)
+        {
+            return Some(span);
+        }
+    }
+    visiting.remove(&state);
+    visited.insert(state);
+    None
 }
 
 fn collect_binding(bindings: &mut HashMap<HirBindingId, BindingInfo>, binding: &HirBinding) {
@@ -3119,6 +3688,11 @@ fn collect_statement_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>,
         HirStmt::Forever(stmt) => collect_block_bindings(bindings, &stmt.body),
         HirStmt::Exit(stmt) => collect_expr_bindings(bindings, &stmt.value),
         HirStmt::Delegate(stmt) => {
+            for arg in &stmt.args {
+                collect_expr_bindings(bindings, arg);
+            }
+        }
+        HirStmt::Go(stmt) => {
             for arg in &stmt.args {
                 collect_expr_bindings(bindings, arg);
             }

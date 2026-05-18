@@ -249,35 +249,36 @@ fn main(values: [u32; 4], index: u32) {
 
 //= SPEC.md#llg-proof-01-marker-required-operations
 //= type=test
-//# Marker checking MUST traverse task bodies, including `forever` bodies, `exit` values, and `delegate` arguments.
+//# In the target task-state model, marker checking MUST traverse state bodies, `exit` values, and `go` arguments.
 #[test]
 fn requirement_llg_proof_01_checks_indexing_inside_task_bodies() {
     let (_, proven) = check_ok(
         r#"
 task main(values: [u32; 4], index: u32) -> u32 {
-    forever {
+    state start(values: [u32; 4], index: u32) {
         observe index < 4 else {
             exit 1;
         }
-        values[index];
+        exit values[index];
     }
 }
 "#,
     );
-    assert_eq!(proof_ir(&proven).functions.len(), 1);
+    assert_eq!(proof_ir(&proven).tasks.len(), 1);
 
-    let (checked, unproven_forever) = check_err(
+    let (checked, unproven_state_body) = check_err(
         r#"
 task main(values: [u32; 4], index: u32) -> u32 {
-    forever {
-        values[index];
+    state start(values: [u32; 4], index: u32) {
+        let value = values[index];
+        exit value;
     }
 }
 "#,
     );
     assert_primary_diagnostic(
         &checked,
-        &unproven_forever,
+        &unproven_state_body,
         "possible out-of-bounds indexing is not proven safe",
         "index",
     );
@@ -285,7 +286,9 @@ task main(values: [u32; 4], index: u32) -> u32 {
     let (checked, unproven_exit) = check_err(
         r#"
 task main(values: [u32; 4], index: u32) -> u32 {
-    exit values[index];
+    state start(values: [u32; 4], index: u32) {
+        exit values[index];
+    }
 }
 "#,
     );
@@ -298,12 +301,14 @@ task main(values: [u32; 4], index: u32) -> u32 {
 
     let (checked, unproven_delegate) = check_err(
         r#"
-task worker(value: u32) -> u32 {
-    exit value;
-}
-
 task main(values: [u32; 4], index: u32) -> u32 {
-    delegate worker(values[index]);
+    state start(values: [u32; 4], index: u32) {
+        go worker(values[index]);
+    }
+
+    state worker(value: u32) {
+        exit value;
+    }
 }
 "#,
     );
@@ -313,6 +318,120 @@ task main(values: [u32; 4], index: u32) -> u32 {
         "possible out-of-bounds indexing is not proven safe",
         "index",
     );
+}
+
+//= SPEC.md#llg-proof-01-marker-required-operations
+//= type=test
+//# Marker checking MUST evaluate marker-required operations in `go` arguments before the transition.
+#[test]
+fn requirement_llg_proof_01_task_state_marker_checking_traverses_go_arguments() {
+    let (checked, proof) = check_err(
+        r#"
+task main(values: [u32; 4], index: u32) -> u32 {
+    state start(values: [u32; 4], index: u32) {
+        go done(values[index]);
+    }
+
+    state done(value: u32) {
+        exit value;
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "possible out-of-bounds indexing is not proven safe",
+        "index",
+    );
+}
+
+//= SPEC.md#llg-proof-03-event-productivity
+//= type=test
+//# Every cyclic path through `go` transitions in the target task-state model MUST introduce an `Event` marker during execution of at least one state body on that path.
+#[test]
+fn requirement_llg_proof_03_productivity_requires_event_on_each_cycle() {
+    let (checked, proof) = check_err(
+        r#"
+task main() -> u32 {
+    state start() { go left(); }
+    state left() { go right(); }
+    state right() { go left(); }
+}
+"#,
+    );
+
+    assert!(proof.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Error
+            && diagnostic.message == "task cycle is not proven productive"
+    }));
+    assert!(!checked.has_errors());
+}
+
+//= SPEC.md#llg-proof-03-event-productivity
+//= type=test
+//# An `Event` marker carried into a task argument, task field, or state argument MUST NOT by itself satisfy the cycle obligation, because the event did not happen inside the cycle.
+#[test]
+fn requirement_llg_proof_03_productivity_rejects_carried_event_only() {
+    let (checked, proof) = check_err(
+        r#"
+task main(token: u32 with Event) -> u32 {
+    state start(token: u32 with Event) {
+        go start(token);
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "task cycle is not proven productive",
+        "go start(token);",
+    );
+}
+
+//= SPEC.md#llg-proof-03-event-productivity
+//= type=test
+//# A self-loop with no fresh `Event` introduction MUST be rejected.
+#[test]
+fn requirement_llg_proof_03_productivity_rejects_self_loop_without_event() {
+    let (checked, proof) = check_err(
+        r#"
+task main() -> u32 {
+    state start() {
+        go start();
+    }
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "task cycle is not proven productive",
+        "go start();",
+    );
+}
+
+//= SPEC.md#llg-proof-03-event-productivity
+//= type=test
+//# A cycle containing a state body that introduces a fresh `Event` marker MAY satisfy the productivity obligation for that cycle.
+#[test]
+fn requirement_llg_proof_03_productivity_accepts_cycle_with_fresh_event() {
+    let (_, proof) = check_ok(
+        r#"
+task main() -> u32 {
+    state start() {
+        let token = read_u32();
+        go start();
+    }
+}
+"#,
+    );
+
+    assert!(proof.diagnostics.is_empty(), "{:#?}", proof.diagnostics);
 }
 
 //= PROOF_IR.md#llg-pir-01-pipeline-and-lowering

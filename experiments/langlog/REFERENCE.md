@@ -59,7 +59,10 @@ Reserved keywords in the current language:
 
 Task orchestration additionally reserves:
 
-`task`, `forever`, `exit`, `delegate`
+`task`, `exit`
+
+`forever` and `delegate` remain lexed as legacy words so the implementation can
+emit direct migration diagnostics.
 
 ## Items
 
@@ -86,7 +89,8 @@ task name(param1: Type, param2: Type) -> Type {
 }
 ```
 
-Tasks are orchestration code, not ordinary total functions.
+Tasks are orchestration code, not ordinary total functions. The accepted task
+model uses explicit nested states and terminal intra-task `go` transitions.
 
 Rules:
 
@@ -94,53 +98,42 @@ Rules:
 - Executable task programs use `task main() -> u32` as the root task for now.
 - Ordinary functions cannot call tasks.
 - Tasks can call ordinary functions.
-- Tasks can transfer to other tasks with `delegate`.
-- `delegate` is a terminal orchestration statement and does not return to the
-  caller.
-- A `delegate` statement requires the callee return type to exactly match the
-  caller task return type.
 - Plain call syntax cannot call a task.
-- Cyclic task delegation is valid and memory-bounded because `delegate` does
-  not retain caller state.
+- Each task must declare exactly one `state start(...)`.
+- `start` has the same parameter arity and types as the enclosing task.
+- `go state(args...);` transfers to a state in the same task and does not
+  return.
+- Cyclic `go` graphs are memory-bounded; the proof phase requires fresh
+  `Event` evidence on cyclic paths.
 
 Task memory model:
 
 - A running task instance is represented as one active task-state variant.
-- Each variant stores the locals for one reachable task item.
-- `delegate` evaluates its arguments, discards the caller task-local state, and
-  replaces it with the target task-state variant.
-- `delegate` does not create a task stack frame.
+- Each variant stores active state parameters and state locals.
+- Task fields are persistent locals shared by all states.
+- `go` evaluates its arguments, discards source state-local values, and
+  replaces active state arguments with target state arguments.
+- `go` does not create a stack frame.
 - The task-local memory bound is the size of the largest reachable task-state
-  variant plus tag overhead. Large buffers should normally be represented by
-  handles or leases rather than stored inline.
+  variant plus task fields and tag overhead. Large buffers should normally be
+  represented by handles or leases rather than stored inline.
 
 Examples:
 
 ```langlog
 task main() -> u32 {
-    exit 0;
-}
-
-task service() -> u32 {
-    forever {
-        tick();
+    state start() {
+        go worker();
     }
-}
 
-task setup() -> u32 {
-    delegate worker();
-}
+    state worker() {
+        exit 0;
+    }
 
-task worker() -> u32 {
-    exit 0;
-}
-
-task alpha() -> u32 {
-    delegate beta();
-}
-
-task beta() -> u32 {
-    delegate alpha();
+    state loop() {
+        let pulse = read_u32();
+        go loop();
+    }
 }
 ```
 
@@ -149,11 +142,15 @@ Invalid examples:
 ```langlog
 // Invalid: task return type is mandatory.
 task missing_return_type() {
-    exit 0;
+    state start() {
+        exit 0;
+    }
 }
 
 task main() -> u32 {
-    exit 0;
+    state start() {
+        exit 0;
+    }
 }
 
 // Invalid: ordinary functions cannot call tasks.
@@ -161,26 +158,19 @@ fn not_allowed() -> u32 {
     main();
 }
 
-// Invalid: task calls require `delegate`, even inside another task.
+// Invalid: task items are not called with ordinary call syntax.
 task not_delegated() -> u32 {
-    worker();
-}
-
-// Invalid: delegation requires matching return types.
-task wrong_type() -> u32 {
-    delegate shutdown();
-}
-
-task shutdown() -> bool {
-    exit true;
+    state start() {
+        worker();
+        exit 0;
+    }
 }
 ```
 
 ## Statements
 
-The current parser accepts these statements in functions. The planned
-task-orchestration surface additionally defines `forever`, `delegate`, and
-`exit` for task bodies.
+The current parser accepts these statements in functions. Task states
+additionally define `exit` and contextual `go`.
 
 ### `let`
 
@@ -282,74 +272,78 @@ return total;
 return;
 ```
 
-`return` is invalid inside task bodies. Tasks must terminate with `exit`,
-`delegate`, or a non-nested `forever` loop.
+`return` is invalid inside task state bodies. Task states must terminate with
+`exit` or `go`.
 
-### `forever`
+### Task States
+
+Task state graphs are explicit:
 
 ```langlog
 task main() -> u32 {
-    forever {
-        tick();
+    let shared: u32 = 0;
+
+    state start() {
+        go next(shared);
+    }
+
+    state next(value: u32) {
+        exit value;
     }
 }
 ```
 
-`forever` is the task orchestration loop. It is valid only inside task bodies.
+In this target model, task-level `let` declarations are fields visible to every
+state, exactly one state named `start` is the entry state, and `go` is a
+terminal tail transition to another state in the same task. Infinite task
+behavior is represented by cycles in the `go` graph rather than by `forever`.
 
-Rules:
-
-- `forever` uses the form `forever { ... }`.
-- A bare `forever` loop is a valid crash-only or externally terminated task.
-- Nested `forever` loops are rejected in the initial task design.
-- Each iteration is expected to contain bounded work; runtime scheduling and
-  handler dispatch semantics are future work.
-
-### `delegate`
+### `go`
 
 ```langlog
-task setup() -> u32 {
-    delegate worker();
-}
+task main() -> u32 {
+    state start() {
+        go worker();
+    }
 
-task worker() -> u32 {
-    exit 0;
+    state worker() {
+        exit 0;
+    }
 }
 ```
 
-`delegate` transfers orchestration from the current task to another task.
+`go` transfers orchestration from the current state to another state in the
+same task.
 
 Rules:
 
-- `delegate` uses the form `delegate name(args...);`.
-- `delegate` is valid only inside task bodies.
-- `delegate` must target a task, not an ordinary function.
-- `delegate` does not return to the current task.
-- The target task return type must exactly match the current task return type.
-- Cyclic task delegation is valid and bounded because each `delegate` replaces
-  the active task state instead of pushing a frame.
-
-Future versions may consider using `delegate` for explicit tail calls to
-ordinary functions, but the initial task-orchestration surface limits it to
-tasks.
+- `go` uses the form `go state(args...);`.
+- `go` is valid only inside task state bodies.
+- `go` must target a state in the same task.
+- `go` does not return to the current state.
+- The target state argument list must match the `go` arguments.
+- Cyclic `go` graphs are bounded because each transition replaces the active
+  state variant instead of pushing a frame.
 
 ### `exit`
 
 ```langlog
 task main() -> u32 {
-    exit 0;
+    state start() {
+        exit 0;
+    }
 }
 ```
 
-`exit` terminates the program from a task.
+`exit` terminates the program from a task state.
 
 Rules:
 
 - `exit` uses the form `exit <expr>;`.
-- `exit` is valid only inside task bodies.
+- `exit` is valid only inside task state bodies.
 - The expression must match the task return type.
-- A task body cannot accidentally fall through. Every reachable path must end
-  in `exit`, a same-return-type `delegate`, or a non-nested `forever`.
+- A task state body cannot accidentally fall through. Every reachable path must
+  end in `exit` or `go`.
 
 ### `observe`
 
@@ -552,8 +546,8 @@ The backend runs only after syntax, semantic, and proof checks succeed.
 
 Wasm V1 supports:
 
-- `task main() -> u32`, with reachable tasks lowered into one dispatcher using
-  a tag local and flattened task-state slots
+- `task main() -> u32`, with reachable states lowered into one dispatcher using
+  a tag local, persistent field locals, and flattened active-state slots
 - `fn main() -> u32`
 - flattened non-collection values using `i32` slots:
   - `()`
@@ -567,8 +561,7 @@ Wasm V1 supports:
 - arithmetic, structural equality, ordering comparisons over `u32`, array
   indexing, `if`, `match`, `for` over arrays and ranges, direct calls,
   `observe`, recovery expressions, and `return`
-- task `exit`, `delegate`, cyclic delegation, and compile-only `forever`
-  loops
+- task `exit`, `go`, cyclic `go` graphs, and persistent task fields
 - playground host builtins lowered as `langlog_host` imports
 
 Wasm V1 rejects:

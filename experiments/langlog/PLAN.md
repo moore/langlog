@@ -134,7 +134,7 @@ M5 because there is still no backend-independent executable semantics layer.
 - [x] Add host builtin imports for browser/playground interaction.
 - [x] Add `langlog-playground-wasm` and a static browser playground adapter.
 - [x] Lower `task main() -> u32` programs to Wasm V1 using a single dispatcher
-  with bounded task-state slots; `delegate` updates state instead of calling
+  with bounded task-state slots; `go` updates active state instead of calling
   task items.
 - [ ] Keep Wasm V1 behavior aligned with future MIR/interpreter semantics once
   M5 exists.
@@ -154,15 +154,22 @@ VM.
 
 ### M6 Event-loop runtime and async lowering
 
-- [x] Draft the initial task orchestration surface: `task`, `forever`, `exit`,
-  `delegate`, `task main() -> u32`, task-only terminal delegation, explicit
-  program exit, and no accidental task fallthrough.
-- [x] Implement parser, AST, HIR, semantic diagnostics, and tests for `task`,
-  `forever`, `exit`, and `delegate`.
-- [x] Specify the task memory model: a task instance is one active state enum
-  variant, and `delegate` replaces caller task-local state rather than pushing
-  a task stack frame.
+- [x] Draft the legacy V0 task orchestration surface and supersede it with
+  explicit task states plus terminal `go`.
+- [x] Reject legacy `forever` and `delegate` task orchestration in the target
+  implementation with direct diagnostics.
+- [x] Specify the target task memory model: a task instance is one active state
+  enum variant, and `go` replaces active state-local data while preserving task
+  fields.
 - [x] Implement Wasm V1 task runtime lowering for `task main() -> u32`.
+- [x] Specify the target task-state model: nested `state` items, terminal
+  intra-task `go` transitions, no primitive `forever`, and event-productivity
+  obligations over `go` cycles.
+- [x] Implement parser, AST, HIR, semantic diagnostics, and tests for nested
+  `state` items and terminal `go` transitions.
+- [x] Build a per-task state transition graph and prove event productivity over
+  cyclic `go` paths.
+- [x] Lower explicit task states to the existing dispatcher-style runtime shape.
 - [ ] Define the single-event-loop runtime model.
 - [ ] Define I/O programs as task-driven bounded state machines.
 - [ ] Add bounded event handlers and scheduling semantics.

@@ -39,6 +39,25 @@ pub struct Task {
     pub name: Spanned<String>,
     pub params: Vec<Param>,
     pub return_type: Type,
+    pub body_span: Span,
+    pub fields: Vec<TaskField>,
+    pub states: Vec<TaskState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskField {
+    pub span: Span,
+    pub mutable: bool,
+    pub name: Spanned<String>,
+    pub ty: Type,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskState {
+    pub span: Span,
+    pub name: Spanned<String>,
+    pub params: Vec<Param>,
     pub body: Block,
 }
 
@@ -137,6 +156,7 @@ pub enum Stmt {
     Forever(ForeverStmt),
     Exit(ExitStmt),
     Delegate(DelegateStmt),
+    Go(GoStmt),
     Observe(ObserveStmt),
     UnsafeMarker(UnsafeMarkerStmt),
 }
@@ -154,6 +174,7 @@ impl Stmt {
             Self::Forever(stmt) => stmt.span,
             Self::Exit(stmt) => stmt.span,
             Self::Delegate(stmt) => stmt.span,
+            Self::Go(stmt) => stmt.span,
             Self::Observe(stmt) => stmt.span,
             Self::UnsafeMarker(stmt) => stmt.span,
         }
@@ -244,6 +265,13 @@ pub struct ExitStmt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegateStmt {
+    pub span: Span,
+    pub target: Spanned<String>,
+    pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoStmt {
     pub span: Span,
     pub target: Spanned<String>,
     pub args: Vec<Expr>,

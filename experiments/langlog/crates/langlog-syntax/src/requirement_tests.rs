@@ -195,6 +195,20 @@ fn requirement_llg_lex_03_reserves_keywords() {
     );
 }
 
+//= SPEC.md#llg-lex-03-reserved-keywords
+//= type=test
+//# The target task-state syntax MUST recognize `state` and `go` as contextual task-syntax words.
+#[test]
+fn requirement_llg_lex_03_task_state_words_are_contextual() {
+    let lexed = lex("requirement.llg", "state go");
+    let tags: Vec<_> = lexed.tokens.iter().map(|token| token.tag()).collect();
+
+    assert_eq!(
+        tags,
+        vec![TokenTag::Identifier, TokenTag::Identifier, TokenTag::Eof]
+    );
+}
+
 //= SPEC.md#llg-lex-04-lexical-error-diagnostics
 //= type=test
 //# Lexical diagnostics for invalid characters MUST include a primary span covering the offending character.
@@ -218,7 +232,7 @@ fn requirement_llg_syn_01_accepts_function_and_task_top_level_items() {
 marker Trusted();
 fn main() {}
 fn helper() {}
-task worker() -> u32 { exit 0; }
+task worker() -> u32 { state start() { exit 0; } }
 "#,
     );
 
@@ -297,13 +311,19 @@ fn requirement_llg_syn_01_allows_omitted_return_types() {
 //# A task item MUST use the form `task name(param: Type, ...) -> Type { ... }`.
 #[test]
 fn requirement_llg_syn_01_parses_task_item_syntax() {
-    let parsed = parse_ok("task main(value: u32) -> u32 { exit value; }");
+    let parsed =
+        parse_ok("task main(value: u32) -> u32 { state start(value: u32) { exit value; } }");
     let task = first_task(&parsed);
 
     assert_eq!(task.name.value, "main");
     assert_eq!(task.params.len(), 1);
     assert!(matches!(task.return_type.kind, TypeKind::Named(_)));
-    assert!(matches!(task.body.statements.as_slice(), [Stmt::Exit(_)]));
+    assert_eq!(task.states.len(), 1);
+    assert_eq!(task.states[0].name.value, "start");
+    assert!(matches!(
+        task.states[0].body.statements.as_slice(),
+        [Stmt::Exit(_)]
+    ));
 }
 
 //= SPEC.md#llg-syn-01-top-level-items
@@ -423,27 +443,106 @@ fn main() {
     assert!(matches!(statements[7], Stmt::Return(_)));
 }
 
-//= SPEC.md#llg-syn-02-statements
+//= SPEC.md#llg-syn-08-target-task-state-syntax
 //= type=test
-//# The task-orchestration parser MUST additionally accept `forever`, `exit`, and `delegate` statements.
+//# A `go` statement MUST use the form `go state(args...);`.
 #[test]
-fn requirement_llg_syn_02_parses_task_statement_forms() {
+fn requirement_llg_syn_08_parses_go_statement_forms() {
     let parsed = parse_ok(
         r#"
 task main() -> u32 {
-    forever {
-        tick();
+    state start() {
+        go worker(1);
     }
-    delegate worker(1);
-    exit 0;
+
+    state worker(value: u32) {
+        exit value;
+    }
 }
 "#,
     );
 
-    let statements = &first_task(&parsed).body.statements;
-    assert!(matches!(statements[0], Stmt::Forever(_)));
-    assert!(matches!(statements[1], Stmt::Delegate(_)));
-    assert!(matches!(statements[2], Stmt::Exit(_)));
+    let task = first_task(&parsed);
+    let statements = &task.states[0].body.statements;
+    assert!(matches!(statements[0], Stmt::Go(_)));
+    assert!(matches!(task.states[1].body.statements[0], Stmt::Exit(_)));
+}
+
+//= SPEC.md#llg-syn-08-target-task-state-syntax
+//= type=test
+//# The target task-state syntax MUST allow `state name(param: Type, ...) { ... }` items nested directly inside task bodies.
+#[test]
+fn requirement_llg_syn_08_accepts_nested_states() {
+    let parsed = parse_ok(
+        r#"
+task main() -> u32 {
+    state start() { go done(42); }
+    state done(value: u32) { exit value; }
+}
+"#,
+    );
+    let task = first_task(&parsed);
+
+    assert_eq!(task.states.len(), 2);
+    assert_eq!(task.states[0].name.value, "start");
+    assert_eq!(task.states[1].params[0].name.value, "value");
+}
+
+//= SPEC.md#llg-syn-08-target-task-state-syntax
+//= type=test
+//# The target task-state syntax MUST allow task field declarations as top-level `let` declarations inside task bodies.
+#[test]
+fn requirement_llg_syn_08_accepts_task_fields() {
+    let parsed = parse_ok(
+        r#"
+task main() -> u32 {
+    let mut count: u32 = 0;
+    state start() { exit count; }
+}
+"#,
+    );
+    let task = first_task(&parsed);
+
+    assert_eq!(task.fields.len(), 1);
+    assert!(task.fields[0].mutable);
+    assert_eq!(task.fields[0].name.value, "count");
+}
+
+//= SPEC.md#llg-syn-08-target-task-state-syntax
+//= type=test
+//# The AST for a `go` statement MUST preserve the target state name and argument expressions.
+#[test]
+fn requirement_llg_syn_08_accepts_go_statement() {
+    let parsed = parse_ok(
+        r#"
+task main() -> u32 {
+    state start() { go next(1, true); }
+    state next(value: u32, flag: bool) { exit value; }
+}
+"#,
+    );
+    let Stmt::Go(go) = &first_task(&parsed).states[0].body.statements[0] else {
+        panic!("expected go statement");
+    };
+
+    assert_eq!(go.target.value, "next");
+    assert_eq!(go.args.len(), 2);
+}
+
+//= SPEC.md#llg-syn-08-target-task-state-syntax
+//= type=test
+//# In the target task-state model, `forever` MUST NOT be part of task-state syntax; infinite behavior is represented by cycles in the `go` transition graph.
+#[test]
+fn requirement_llg_syn_08_replaces_forever_with_go_cycles() {
+    let parsed = parse_err(
+        r#"
+task main() -> u32 {
+    forever {}
+}
+"#,
+    );
+
+    assert_diagnostic_contains(&parsed, "expected a task field or state");
 }
 
 //= SPEC.md#llg-syn-02-statements
