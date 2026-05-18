@@ -10,14 +10,19 @@ struct TempWorkspace {
 
 impl TempWorkspace {
     fn new(file_contents: &str) -> Self {
+        Self::with_file("crates/example/src/lib.rs", file_contents)
+    }
+
+    fn with_file(relative_path: &str, file_contents: &str) -> Self {
         let mut root = std::env::temp_dir();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         root.push(format!("langlog-xtask-{}-{unique}", process::id()));
-        fs::create_dir_all(root.join("crates/example/src")).unwrap();
-        fs::write(root.join("crates/example/src/lib.rs"), file_contents).unwrap();
+        let file_path = root.join(relative_path);
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(file_path, file_contents).unwrap();
         Self { root }
     }
 }
@@ -62,6 +67,18 @@ fn requirement_llg_tools_01_ignores_uncited_helper_functions() {
             todo_tests: 0
         }
     );
+}
+
+//= TOOLS.md#llg-tools-01-requirement-checker
+//= type=test
+//# The requirement checker MUST reject uncited test functions.
+#[test]
+fn requirement_llg_tools_01_rejects_uncited_test_functions() {
+    let workspace = TempWorkspace::new("#[test]\nfn plain_regression() {}\n\nfn helper() {}\n");
+
+    let errors = check_requirements(&workspace.root).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors.iter().any(|error| error.contains("uncited #[test]")));
 }
 
 //= TOOLS.md#llg-tools-01-requirement-checker

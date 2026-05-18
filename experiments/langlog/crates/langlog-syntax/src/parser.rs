@@ -1,8 +1,9 @@
 use crate::ast::{
     AssignStmt, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr, ExprKind, ExprStmt,
-    ForStmt, ForeverStmt, Function, GenericArg, IfStmt, Item, LetStmt, MatchArm, MatchBody,
-    MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern, PatternKind, ReturnStmt, Stmt, Task,
-    Type, TypeKind, UnaryOp,
+    ForStmt, ForeverStmt, Function, GenericArg, IfStmt, Item, LetStmt, MarkerAnnotation, MarkerArg,
+    MarkerArgKind, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern,
+    PatternKind, ReturnStmt, Stmt, Task, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction,
+    UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -163,12 +164,131 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Option<Type> {
+        let base = self.parse_type_atom()?;
+        if !self.bump_if(TokenTag::With) {
+            return Some(base);
+        }
+
+        let markers = self.parse_marker_annotations()?;
+        let end = markers
+            .last()
+            .map(|marker| marker.span)
+            .unwrap_or(base.span);
+        let span = base.span.cover(end).unwrap_or(base.span);
+        Some(Type::new(
+            span,
+            TypeKind::With {
+                base: Box::new(base),
+                markers,
+            },
+        ))
+    }
+
+    fn parse_type_atom(&mut self) -> Option<Type> {
         match self.current_tag() {
             TokenTag::LParen => self.parse_tuple_or_grouped_type(),
             TokenTag::LBracket => self.parse_array_type(),
             TokenTag::Identifier => self.parse_named_or_applied_type(),
             _ => {
                 self.error_current("expected a type", "type expected here");
+                None
+            }
+        }
+    }
+
+    fn parse_marker_annotations(&mut self) -> Option<Vec<MarkerAnnotation>> {
+        if self.bump_if(TokenTag::LParen) {
+            let mut markers = Vec::new();
+            if !self.at(TokenTag::RParen) {
+                loop {
+                    markers.push(self.parse_marker_annotation()?);
+                    if self.bump_if(TokenTag::Comma) {
+                        if self.at(TokenTag::RParen) {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect_tag(TokenTag::RParen, "expected `)` after marker list")?;
+            return Some(markers);
+        }
+
+        Some(vec![self.parse_marker_annotation()?])
+    }
+
+    fn parse_marker_annotation(&mut self) -> Option<MarkerAnnotation> {
+        let name = self.expect_identifier("expected a marker name")?;
+        let mut args = Vec::new();
+        let mut end = name.span;
+
+        if self.bump_if(TokenTag::LParen) {
+            if !self.at(TokenTag::RParen) {
+                loop {
+                    args.push(self.parse_marker_arg()?);
+                    if self.bump_if(TokenTag::Comma) {
+                        if self.at(TokenTag::RParen) {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let close = self.expect_tag(TokenTag::RParen, "expected `)` after marker arguments")?;
+            end = close.span;
+        }
+
+        let span = name.span.cover(end).unwrap_or(name.span);
+        Some(MarkerAnnotation { span, name, args })
+    }
+
+    fn parse_marker_arg(&mut self) -> Option<MarkerArg> {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Identifier(name) => {
+                self.bump();
+                let base = Spanned::new(token.span, name);
+                if self.bump_if(TokenTag::Dot) {
+                    let field = self.expect_identifier("expected a field name after `.`")?;
+                    let span = base.span.cover(field.span).unwrap_or(base.span);
+                    return Some(MarkerArg {
+                        span,
+                        kind: MarkerArgKind::Field { base, field },
+                    });
+                }
+                Some(MarkerArg {
+                    span: base.span,
+                    kind: MarkerArgKind::Name(base),
+                })
+            }
+            TokenKind::IntLiteral(value) => {
+                self.bump();
+                Some(MarkerArg {
+                    span: token.span,
+                    kind: MarkerArgKind::Int(value),
+                })
+            }
+            TokenKind::True => {
+                self.bump();
+                Some(MarkerArg {
+                    span: token.span,
+                    kind: MarkerArgKind::Bool(true),
+                })
+            }
+            TokenKind::False => {
+                self.bump();
+                Some(MarkerArg {
+                    span: token.span,
+                    kind: MarkerArgKind::Bool(false),
+                })
+            }
+            _ => {
+                self.error_current(
+                    "expected a marker argument",
+                    "expected a place name, field place, or literal here",
+                );
                 None
             }
         }
@@ -392,6 +512,7 @@ impl<'a> Parser<'a> {
                 | TokenTag::Exit
                 | TokenTag::Delegate
                 | TokenTag::Observe
+                | TokenTag::Unsafe
         )
     }
 
@@ -406,6 +527,7 @@ impl<'a> Parser<'a> {
             TokenTag::Exit => self.parse_exit_statement().map(Stmt::Exit),
             TokenTag::Delegate => self.parse_delegate_statement().map(Stmt::Delegate),
             TokenTag::Observe => self.parse_observe_statement().map(Stmt::Observe),
+            TokenTag::Unsafe => self.parse_unsafe_marker_statement().map(Stmt::UnsafeMarker),
             _ => {
                 self.error_current("expected a statement", "statement expected here");
                 None
@@ -623,6 +745,46 @@ impl<'a> Parser<'a> {
             right,
             else_block,
         })
+    }
+
+    fn parse_unsafe_marker_statement(&mut self) -> Option<UnsafeMarkerStmt> {
+        let construction = self.parse_unsafe_marker_construction(true)?;
+        Some(UnsafeMarkerStmt {
+            span: construction.span,
+            construction,
+        })
+    }
+
+    fn parse_unsafe_marker_construction(
+        &mut self,
+        require_inner_semicolon: bool,
+    ) -> Option<UnsafeMarkerConstruction> {
+        let start = self.expect_tag(TokenTag::Unsafe, "expected `unsafe`")?;
+        self.expect_tag(TokenTag::LBrace, "expected `{` after `unsafe`")?;
+        let marker = self.expect_identifier("expected a marker name")?;
+        self.expect_tag(TokenTag::PathSep, "expected `::` after marker name")?;
+        let method = self.expect_identifier("expected marker constructor name")?;
+        if method.value != "mark" {
+            self.diagnostics.push(
+                Diagnostic::error("unsafe marker construction must call `mark`")
+                    .with_label(Label::primary(method.span, "expected `mark` here")),
+            );
+        }
+        self.expect_tag(TokenTag::LParen, "expected `(` after `mark`")?;
+        let args = self.parse_call_arguments(TokenTag::RParen)?;
+        self.expect_tag(TokenTag::RParen, "expected `)` after marker arguments")?;
+        if require_inner_semicolon {
+            self.expect_tag(TokenTag::Semi, "expected `;` after unsafe marker statement")?;
+        } else if self.at(TokenTag::Semi) {
+            self.error_current(
+                "unsafe marker expressions must not end with an inner `;`",
+                "remove this semicolon or use the statement form",
+            );
+            self.bump();
+        }
+        let end = self.expect_tag(TokenTag::RBrace, "expected `}` after unsafe marker")?;
+        let span = start.span.cover(end.span).unwrap_or(start.span);
+        Some(UnsafeMarkerConstruction { span, marker, args })
     }
 
     fn parse_observe_operator(&mut self) -> Option<ObserveOp> {
@@ -889,7 +1051,33 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) => {
                 self.bump();
                 let name = Spanned::new(token.span, name);
+                if self.at(TokenTag::PathSep) {
+                    let path_sep = self.bump();
+                    let span = name.span.cover(path_sep.span).unwrap_or(name.span);
+                    self.diagnostics.push(
+                        Diagnostic::error("marker constructors must be inside `unsafe`")
+                            .with_label(Label::primary(
+                                span,
+                                "wrap this marker construction in `unsafe { ... }`",
+                            )),
+                    );
+                    if self.at(TokenTag::Identifier) {
+                        self.bump();
+                    }
+                    if self.bump_if(TokenTag::LParen) {
+                        let _ = self.parse_call_arguments(TokenTag::RParen);
+                        let _ = self
+                            .expect_tag(TokenTag::RParen, "expected `)` after marker arguments");
+                    }
+                }
                 Some(Expr::new(token.span, ExprKind::Name(name)))
+            }
+            TokenKind::Unsafe => {
+                let construction = self.parse_unsafe_marker_construction(false)?;
+                Some(Expr::new(
+                    construction.span,
+                    ExprKind::UnsafeMarker(construction),
+                ))
             }
             TokenKind::LParen => self.parse_grouped_or_tuple_expression(),
             TokenKind::LBracket => self.parse_array_expression(),
@@ -1058,7 +1246,8 @@ impl<'a> Parser<'a> {
                 | TokenTag::Forever
                 | TokenTag::Exit
                 | TokenTag::Delegate
-                | TokenTag::Observe => break,
+                | TokenTag::Observe
+                | TokenTag::Unsafe => break,
                 _ => {
                     self.bump();
                 }
@@ -1155,6 +1344,7 @@ fn observe_expr_is_phase1_proof_expr(expr: &Expr) -> bool {
         ExprKind::Index { target, index } => {
             observe_expr_is_phase1_proof_expr(target) && observe_expr_is_phase1_proof_expr(index)
         }
+        ExprKind::UnsafeMarker(_) => false,
     }
 }
 

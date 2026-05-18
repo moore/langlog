@@ -80,6 +80,7 @@ fn collect_entries<'a>(block: &'a ProofBlock, entries: &mut Vec<&'a ProofEntry>)
             }
             ProofEntry::Let { .. }
             | ProofEntry::Assign { .. }
+            | ProofEntry::Fact { .. }
             | ProofEntry::Obligation { .. }
             | ProofEntry::Eval { .. } => {}
         }
@@ -102,8 +103,8 @@ fn assert_expr_spans(expr: &ProofExpr) {
     assert_non_empty_span(expr.span, "ProofExpr");
     match &expr.kind {
         ProofExprKind::Binding(_)
-        | ProofExprKind::Item
-        | ProofExprKind::HostBuiltin
+        | ProofExprKind::Item(_)
+        | ProofExprKind::HostBuiltin(_)
         | ProofExprKind::Int(_)
         | ProofExprKind::Bool(_) => {}
         ProofExprKind::Tuple(elements) | ProofExprKind::Array(elements) => {
@@ -125,6 +126,11 @@ fn assert_expr_spans(expr: &ProofExpr) {
         ProofExprKind::Index { target, index } => {
             assert_expr_spans(target);
             assert_expr_spans(index);
+        }
+        ProofExprKind::UnsafeMarker { args, .. } => {
+            for arg in args {
+                assert_expr_spans(arg);
+            }
         }
     }
 }
@@ -167,8 +173,8 @@ fn assert_expr_well_formed(expr: &ProofExpr, proof: &CheckedProof) {
     );
     match &expr.kind {
         ProofExprKind::Binding(_)
-        | ProofExprKind::Item
-        | ProofExprKind::HostBuiltin
+        | ProofExprKind::Item(_)
+        | ProofExprKind::HostBuiltin(_)
         | ProofExprKind::Int(_)
         | ProofExprKind::Bool(_) => {}
         ProofExprKind::Tuple(elements) | ProofExprKind::Array(elements) => {
@@ -190,6 +196,11 @@ fn assert_expr_well_formed(expr: &ProofExpr, proof: &CheckedProof) {
         ProofExprKind::Index { target, index } => {
             assert_expr_well_formed(target, proof);
             assert_expr_well_formed(index, proof);
+        }
+        ProofExprKind::UnsafeMarker { args, .. } => {
+            for arg in args {
+                assert_expr_well_formed(arg, proof);
+            }
         }
     }
 }
@@ -321,7 +332,7 @@ fn main(values: [u32; 4], index: u32) {
     for entry in proof_entries(&proof) {
         assert_non_empty_span(entry.span(), "ProofEntry");
         match entry {
-            ProofEntry::Let { .. } | ProofEntry::Assign { .. } => {}
+            ProofEntry::Let { .. } | ProofEntry::Assign { .. } | ProofEntry::Fact { .. } => {}
             ProofEntry::Branch {
                 condition,
                 then_facts,
@@ -452,6 +463,7 @@ fn main(values: [u32; 4], index: u32) {
             }
             ProofEntry::Let { .. }
             | ProofEntry::Assign { .. }
+            | ProofEntry::Fact { .. }
             | ProofEntry::Obligation { .. }
             | ProofEntry::Scope { .. } => {}
         }
@@ -602,6 +614,142 @@ fn main(left: u32, right: u32) {
         marker,
         MarkerPattern::Equal { .. }
     )));
+}
+
+//= SPEC.md#llg-mark-04-builtin-marker-families
+//= type=test
+//# The trusted `read_u32()` host builtin MUST return a value marked with `Event`.
+#[test]
+fn requirement_llg_mark_04_read_u32_produces_event_marker() {
+    let (_, proof) = check_ok(
+        r#"
+fn main() {
+    let value: u32 with Event = read_u32();
+}
+"#,
+    );
+
+    assert_eq!(proof.obligations, 1);
+    assert!(proof
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::TrustedBuiltin
+            && matches!(fact.marker, MarkerPattern::Event)));
+}
+
+//= SPEC.md#llg-mark-01-marker-model
+//= type=test
+//# A value without a required marker fact MUST NOT be used where that marker is required.
+#[test]
+fn requirement_llg_mark_01_rejects_marker_qualified_let_without_required_fact() {
+    let (checked, proof) = check_err(
+        r#"
+fn main() {
+    let value: u32 with Event = 1;
+}
+"#,
+    );
+
+    assert_primary_diagnostic(
+        &checked,
+        &proof,
+        "required marker is not proven for this value",
+        "let value: u32 with Event = 1;",
+    );
+    assert_note_contains(&proof, "required marker: Event");
+}
+
+//= SPEC.md#llg-mark-02-function-boundaries
+//= type=test
+//# A marker-qualified function parameter MUST create a call-site obligation for each required marker on the corresponding argument.
+#[test]
+fn requirement_llg_mark_02_requires_call_site_markers_for_marker_qualified_parameters() {
+    check_ok(
+        r#"
+fn needs_event(value: u32 with Event) {}
+
+fn main() {
+    needs_event(read_u32());
+}
+"#,
+    );
+
+    let (_, proof) = check_err(
+        r#"
+fn needs_event(value: u32 with Event) {}
+
+fn main() {
+    needs_event(1);
+}
+"#,
+    );
+
+    assert_note_contains(&proof, "required marker: Event");
+}
+
+//= SPEC.md#llg-mark-02-function-boundaries
+//= type=test
+//# A marker-qualified return type MUST require the returned expression to provide each named marker and MUST provide those markers to callers after the call succeeds.
+#[test]
+fn requirement_llg_mark_02_function_returns_only_explicitly_declared_markers() {
+    let (_, stripped) = check_err(
+        r#"
+fn strip(value: u32 with Event) -> u32 {
+    value
+}
+
+fn main() {
+    let value: u32 with Event = strip(read_u32());
+}
+"#,
+    );
+    assert_note_contains(&stripped, "required marker: Event");
+
+    check_ok(
+        r#"
+fn keep(value: u32 with Event) -> u32 with Event {
+    value
+}
+
+fn main() {
+    let value: u32 with Event = keep(read_u32());
+}
+"#,
+    );
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# Code that creates a marker fact MUST do so inside an `unsafe` block.
+#[test]
+fn requirement_llg_mark_03_unsafe_marker_construction_emits_facts() {
+    let (_, statement_proof) = check_ok(
+        r#"
+fn main() {
+    let value: u32 = 1;
+    unsafe { Event::mark(value); }
+    let copied: u32 with Event = value;
+}
+"#,
+    );
+    assert!(statement_proof
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::UnsafeConstruction
+            && matches!(fact.marker, MarkerPattern::Event)));
+
+    let (_, expression_proof) = check_ok(
+        r#"
+fn main() {
+    let copied: u32 with Event = unsafe { Event::mark(1) };
+}
+"#,
+    );
+    assert!(expression_proof
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::UnsafeConstruction
+            && matches!(fact.marker, MarkerPattern::Event)));
 }
 
 //= SPEC.md#llg-proof-01-marker-required-operations

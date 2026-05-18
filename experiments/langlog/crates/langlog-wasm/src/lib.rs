@@ -572,6 +572,12 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                 self.compile_block(&stmt.else_block, return_type);
                 self.emit("end");
             }
+            HirStmt::UnsafeMarker(stmt) => {
+                for arg in &stmt.args {
+                    self.compile_expr(arg);
+                    self.drop_value(&arg.ty);
+                }
+            }
         }
     }
 
@@ -759,6 +765,17 @@ impl<'a, 'b> FunctionCompiler<'a, 'b> {
                     fallback,
                     &expr.ty,
                 );
+            }
+            HirExprKind::UnsafeMarker { args, .. } => {
+                if let Some((first, rest)) = args.split_first() {
+                    self.compile_expr(first);
+                    for arg in rest {
+                        self.compile_expr(arg);
+                        self.drop_value(&arg.ty);
+                    }
+                } else {
+                    self.emit_default_value(&expr.ty);
+                }
             }
         }
     }
@@ -1515,6 +1532,11 @@ fn collect_delegate_targets_stmt(statement: &HirStmt, targets: &mut Vec<HirItemI
             collect_delegate_targets_expr(&stmt.right, targets);
             collect_delegate_targets_block(&stmt.else_block, targets);
         }
+        HirStmt::UnsafeMarker(stmt) => {
+            for arg in &stmt.args {
+                collect_delegate_targets_expr(arg, targets);
+            }
+        }
     }
 }
 
@@ -1557,6 +1579,11 @@ fn collect_delegate_targets_expr(expr: &HirExpr, targets: &mut Vec<HirItemId>) {
         HirExprKind::Index { target, index } => {
             collect_delegate_targets_expr(target, targets);
             collect_delegate_targets_expr(index, targets);
+        }
+        HirExprKind::UnsafeMarker { args, .. } => {
+            for arg in args {
+                collect_delegate_targets_expr(arg, targets);
+            }
         }
         HirExprKind::Binding(_)
         | HirExprKind::Item(_)
@@ -1634,6 +1661,11 @@ fn collect_task_local_bindings_stmt(
             collect_task_local_bindings_expr(&stmt.right, bindings);
             collect_task_local_bindings(&stmt.else_block, bindings);
         }
+        HirStmt::UnsafeMarker(stmt) => {
+            for arg in &stmt.args {
+                collect_task_local_bindings_expr(arg, bindings);
+            }
+        }
     }
 }
 
@@ -1686,6 +1718,11 @@ fn collect_task_local_bindings_expr(expr: &HirExpr, bindings: &mut Vec<langlog_s
         HirExprKind::Index { target, index } => {
             collect_task_local_bindings_expr(target, bindings);
             collect_task_local_bindings_expr(index, bindings);
+        }
+        HirExprKind::UnsafeMarker { args, .. } => {
+            for arg in args {
+                collect_task_local_bindings_expr(arg, bindings);
+            }
         }
         HirExprKind::Binding(_)
         | HirExprKind::Item(_)
@@ -1765,6 +1802,11 @@ fn collect_host_builtins_stmt(statement: &HirStmt, builtins: &mut Vec<HostBuilti
             collect_host_builtins_expr(&stmt.right, builtins);
             collect_host_builtins_block(&stmt.else_block, builtins);
         }
+        HirStmt::UnsafeMarker(stmt) => {
+            for arg in &stmt.args {
+                collect_host_builtins_expr(arg, builtins);
+            }
+        }
     }
 }
 
@@ -1818,6 +1860,11 @@ fn collect_host_builtins_expr(expr: &HirExpr, builtins: &mut Vec<HostBuiltin>) {
         HirExprKind::Index { target, index } => {
             collect_host_builtins_expr(target, builtins);
             collect_host_builtins_expr(index, builtins);
+        }
+        HirExprKind::UnsafeMarker { args, .. } => {
+            for arg in args {
+                collect_host_builtins_expr(arg, builtins);
+            }
         }
         HirExprKind::Binding(_)
         | HirExprKind::Item(_)

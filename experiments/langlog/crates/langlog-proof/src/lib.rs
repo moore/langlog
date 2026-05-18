@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use langlog_sema::{
     CheckedProgram, HirBinding, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind,
-    HirMatchBody, HirPattern, HirPatternKind, HirProgram, HirStmt, HirType,
+    HirFunction, HirItemId, HirMarkerFamily, HirMarkerPlace, HirMarkerRequirement, HirMatchBody,
+    HirPattern, HirPatternKind, HirProgram, HirStmt, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp};
 use langlog_syntax::{Diagnostic, Label, Severity, Span};
@@ -91,6 +92,7 @@ pub enum ObligationTarget {
 pub enum ObligationSource {
     Index { array: PlaceId, index: PlaceId },
     MapLookup { map: PlaceId, key: PlaceId },
+    MarkerRequirement,
     EventCycle,
 }
 
@@ -162,6 +164,10 @@ pub struct ProofBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofEntry {
+    Fact {
+        fact: MarkerFact,
+        span: Span,
+    },
     Let {
         binding: HirBindingId,
         place: PlaceId,
@@ -214,7 +220,8 @@ pub enum ProofEntry {
 impl ProofEntry {
     pub fn span(&self) -> Span {
         match self {
-            Self::Let { span, .. }
+            Self::Fact { span, .. }
+            | Self::Let { span, .. }
             | Self::Assign { span, .. }
             | Self::Branch { span, .. }
             | Self::Observe { span, .. }
@@ -244,8 +251,8 @@ pub struct ProofExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofExprKind {
     Binding(HirBindingId),
-    Item,
-    HostBuiltin,
+    Item(HirItemId),
+    HostBuiltin(HostBuiltin),
     Int(u64),
     Bool(bool),
     Tuple(Vec<ProofExpr>),
@@ -266,14 +273,32 @@ pub enum ProofExprKind {
         target: Box<ProofExpr>,
         index: Box<ProofExpr>,
     },
+    UnsafeMarker {
+        marker: HirMarkerFamily,
+        args: Vec<ProofExpr>,
+    },
 }
 
 pub fn lower_to_proof_ir(hir: &HirProgram) -> ProofProgram {
-    ProofLowerer::new(collect_bindings(hir)).lower_program(hir)
+    ProofLowerer::new(collect_bindings(hir), collect_function_markers(hir)).lower_program(hir)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionMarkerSignature {
+    params: Vec<ParamMarkerSignature>,
+    return_markers: Vec<HirMarkerRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParamMarkerSignature {
+    binding: HirBindingId,
+    markers: Vec<HirMarkerRequirement>,
 }
 
 struct ProofLowerer {
     binding_info: HashMap<HirBindingId, BindingInfo>,
+    function_markers: HashMap<HirItemId, FunctionMarkerSignature>,
+    current_return_markers: Vec<HirMarkerRequirement>,
     binding_places: BindingPlaceMap,
     binding_versions: BindingVersionMap,
     places: Vec<ProofPlace>,
@@ -284,9 +309,14 @@ type BindingVersionMap = HashMap<HirBindingId, u32>;
 type BranchStateRef<'a> = (&'a BindingPlaceMap, &'a BindingVersionMap);
 
 impl ProofLowerer {
-    fn new(binding_info: HashMap<HirBindingId, BindingInfo>) -> Self {
+    fn new(
+        binding_info: HashMap<HirBindingId, BindingInfo>,
+        function_markers: HashMap<HirItemId, FunctionMarkerSignature>,
+    ) -> Self {
         Self {
             binding_info,
+            function_markers,
+            current_return_markers: Vec::new(),
             binding_places: HashMap::new(),
             binding_versions: HashMap::new(),
             places: Vec::new(),
@@ -298,11 +328,33 @@ impl ProofLowerer {
         for function in &hir.functions {
             self.binding_places.clear();
             self.binding_versions.clear();
+            self.current_return_markers = function.return_markers.clone();
+            let mut entry_facts = Vec::new();
             for param in &function.params {
-                self.bind_initial_place(param, None);
+                let place = self.bind_initial_place(param, None);
+                for marker in &param.markers {
+                    if let Some(fact) = self.marker_requirement_fact(
+                        marker,
+                        place,
+                        &HashMap::new(),
+                        MarkerFactSource::TrustedBuiltin,
+                        param.span,
+                    ) {
+                        entry_facts.push(fact);
+                    }
+                }
             }
+            let mut body = self.lower_block(&function.body);
+            self.insert_trailing_return_marker_obligations(&mut body);
+            body.entries.splice(
+                0..0,
+                entry_facts.into_iter().map(|fact| ProofEntry::Fact {
+                    span: fact.origin_span,
+                    fact,
+                }),
+            );
             functions.push(ProofFunction {
-                body: self.lower_block(&function.body),
+                body,
                 span: function.span,
             });
         }
@@ -350,6 +402,13 @@ impl ProofLowerer {
                     value: value_place,
                     span: stmt.span,
                 });
+                self.push_marker_obligations(
+                    entries,
+                    &stmt.binding.markers,
+                    place,
+                    &HashMap::new(),
+                    stmt.span,
+                );
             }
             HirStmt::Assign(stmt) => {
                 let value = self.lower_expr(&stmt.value, entries);
@@ -467,7 +526,9 @@ impl ProofLowerer {
             }
             HirStmt::Return(stmt) => {
                 if let Some(value) = &stmt.value {
-                    self.lower_expr(value, entries);
+                    if let Some(value) = self.lower_expr(value, entries) {
+                        self.push_return_marker_obligations(entries, &value, stmt.span);
+                    }
                 }
             }
             HirStmt::Forever(stmt) => entries.push(ProofEntry::Scope {
@@ -475,11 +536,29 @@ impl ProofLowerer {
                 span: stmt.span,
             }),
             HirStmt::Exit(stmt) => {
-                self.lower_expr(&stmt.value, entries);
+                if let Some(value) = self.lower_expr(&stmt.value, entries) {
+                    self.push_return_marker_obligations(entries, &value, stmt.span);
+                }
             }
             HirStmt::Delegate(stmt) => {
-                for arg in &stmt.args {
-                    self.lower_expr(arg, entries);
+                let args: Vec<_> = stmt
+                    .args
+                    .iter()
+                    .filter_map(|arg| self.lower_expr(arg, entries))
+                    .collect();
+                self.push_call_marker_obligations(entries, stmt.target, &args, stmt.span);
+            }
+            HirStmt::UnsafeMarker(stmt) => {
+                let args: Vec<_> = stmt
+                    .args
+                    .iter()
+                    .filter_map(|arg| self.lower_expr(arg, entries))
+                    .collect();
+                if let Some(fact) = self.unsafe_marker_fact(stmt.marker, &args, stmt.span) {
+                    entries.push(ProofEntry::Fact {
+                        span: stmt.span,
+                        fact,
+                    });
                 }
             }
             HirStmt::Observe(stmt) => {
@@ -522,12 +601,12 @@ impl ProofLowerer {
                 let place = self.binding_place(*id);
                 (ProofExprKind::Binding(*id), place)
             }
-            HirExprKind::Item(_) => {
+            HirExprKind::Item(item) => {
                 let place =
                     self.new_place(PlaceKind::Item, expr.ty.clone(), expr.span, "item", None);
-                (ProofExprKind::Item, place)
+                (ProofExprKind::Item(*item), place)
             }
-            HirExprKind::HostBuiltin(_) => {
+            HirExprKind::HostBuiltin(builtin) => {
                 let place = self.new_place(
                     PlaceKind::HostBuiltin,
                     expr.ty.clone(),
@@ -535,7 +614,7 @@ impl ProofLowerer {
                     "host builtin",
                     None,
                 );
-                (ProofExprKind::HostBuiltin, place)
+                (ProofExprKind::HostBuiltin(*builtin), place)
             }
             HirExprKind::Int(value) => {
                 let place = self.u32_place(*value, expr.span);
@@ -602,11 +681,33 @@ impl ProofLowerer {
                 let args = args
                     .iter()
                     .filter_map(|arg| self.lower_expr(arg, entries))
-                    .collect();
+                    .collect::<Vec<_>>();
                 let place = self.new_temp(expr.ty.clone(), expr.span, None);
+                self.push_call_marker_obligations_for_callee(entries, &callee, &args, expr.span);
+                self.push_call_return_marker_facts(entries, &callee, &args, place, expr.span);
                 (
                     ProofExprKind::Call {
                         callee: Box::new(callee),
+                        args,
+                    },
+                    place,
+                )
+            }
+            HirExprKind::UnsafeMarker { marker, args } => {
+                let args = args
+                    .iter()
+                    .filter_map(|arg| self.lower_expr(arg, entries))
+                    .collect::<Vec<_>>();
+                let place = args.first()?.place;
+                if let Some(fact) = self.unsafe_marker_fact(*marker, &args, expr.span) {
+                    entries.push(ProofEntry::Fact {
+                        span: expr.span,
+                        fact,
+                    });
+                }
+                (
+                    ProofExprKind::UnsafeMarker {
+                        marker: *marker,
                         args,
                     },
                     place,
@@ -638,6 +739,240 @@ impl ProofLowerer {
             span: expr.span,
             place,
         })
+    }
+
+    fn insert_trailing_return_marker_obligations(&mut self, body: &mut ProofBlock) {
+        let Some(ProofEntry::Eval { expr, span }) = body.entries.last().cloned() else {
+            return;
+        };
+        let insert_at = body.entries.len().saturating_sub(1);
+        let mut obligations = Vec::new();
+        self.push_return_marker_obligations(&mut obligations, &expr, span);
+        body.entries.splice(insert_at..insert_at, obligations);
+    }
+
+    fn push_return_marker_obligations(
+        &mut self,
+        entries: &mut Vec<ProofEntry>,
+        value: &ProofExpr,
+        span: Span,
+    ) {
+        let markers = self.current_return_markers.clone();
+        self.push_marker_obligations(entries, &markers, value.place, &HashMap::new(), span);
+    }
+
+    fn push_call_marker_obligations_for_callee(
+        &mut self,
+        entries: &mut Vec<ProofEntry>,
+        callee: &ProofExpr,
+        args: &[ProofExpr],
+        span: Span,
+    ) {
+        if let ProofExprKind::Item(item) = callee.kind {
+            self.push_call_marker_obligations(entries, item, args, span);
+        }
+    }
+
+    fn push_call_marker_obligations(
+        &mut self,
+        entries: &mut Vec<ProofEntry>,
+        item: HirItemId,
+        args: &[ProofExpr],
+        span: Span,
+    ) {
+        let Some(signature) = self.function_markers.get(&item).cloned() else {
+            return;
+        };
+        let substitution = call_marker_substitution(&signature, args);
+        for (param, arg) in signature.params.iter().zip(args.iter()) {
+            self.push_marker_obligations(entries, &param.markers, arg.place, &substitution, span);
+        }
+    }
+
+    fn push_call_return_marker_facts(
+        &mut self,
+        entries: &mut Vec<ProofEntry>,
+        callee: &ProofExpr,
+        args: &[ProofExpr],
+        result: PlaceId,
+        span: Span,
+    ) {
+        match callee.kind {
+            ProofExprKind::HostBuiltin(HostBuiltin::ReadU32) => {
+                entries.push(ProofEntry::Fact {
+                    span,
+                    fact: MarkerFact {
+                        target: result,
+                        marker: MarkerPattern::Event,
+                        source: MarkerFactSource::TrustedBuiltin,
+                        origin_span: span,
+                    },
+                });
+            }
+            ProofExprKind::Item(item) => {
+                let Some(signature) = self.function_markers.get(&item).cloned() else {
+                    return;
+                };
+                let substitution = call_marker_substitution(&signature, args);
+                for marker in &signature.return_markers {
+                    if let Some(fact) = self.marker_requirement_fact(
+                        marker,
+                        result,
+                        &substitution,
+                        MarkerFactSource::TrustedBuiltin,
+                        span,
+                    ) {
+                        entries.push(ProofEntry::Fact { span, fact });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_marker_obligations(
+        &mut self,
+        entries: &mut Vec<ProofEntry>,
+        markers: &[HirMarkerRequirement],
+        subject: PlaceId,
+        substitution: &HashMap<HirBindingId, PlaceId>,
+        span: Span,
+    ) {
+        for marker in markers {
+            if let Some((target, required)) =
+                self.marker_requirement_pattern(marker, subject, substitution)
+            {
+                entries.push(ProofEntry::Obligation {
+                    span: marker.span,
+                    obligation: MarkerObligation {
+                        target: ObligationTarget::Place(target),
+                        required,
+                        source: ObligationSource::MarkerRequirement,
+                        span,
+                    },
+                });
+            }
+        }
+    }
+
+    fn marker_requirement_fact(
+        &mut self,
+        marker: &HirMarkerRequirement,
+        subject: PlaceId,
+        substitution: &HashMap<HirBindingId, PlaceId>,
+        source: MarkerFactSource,
+        origin_span: Span,
+    ) -> Option<MarkerFact> {
+        let (target, marker) = self.marker_requirement_pattern(marker, subject, substitution)?;
+        Some(MarkerFact {
+            target,
+            marker,
+            source,
+            origin_span,
+        })
+    }
+
+    fn marker_requirement_pattern(
+        &mut self,
+        marker: &HirMarkerRequirement,
+        subject: PlaceId,
+        substitution: &HashMap<HirBindingId, PlaceId>,
+    ) -> Option<(PlaceId, MarkerPattern)> {
+        let args = marker
+            .args
+            .iter()
+            .map(|arg| self.marker_place(arg, subject, substitution))
+            .collect::<Option<Vec<_>>>()?;
+        self.marker_pattern(marker.family, &args, subject)
+    }
+
+    fn unsafe_marker_fact(
+        &mut self,
+        family: HirMarkerFamily,
+        args: &[ProofExpr],
+        origin_span: Span,
+    ) -> Option<MarkerFact> {
+        let places = args.iter().map(|arg| arg.place).collect::<Vec<_>>();
+        let subject = *places.first()?;
+        let (target, marker) = self.marker_pattern(family, &places, subject)?;
+        Some(MarkerFact {
+            target,
+            marker,
+            source: MarkerFactSource::UnsafeConstruction,
+            origin_span,
+        })
+    }
+
+    fn marker_pattern(
+        &mut self,
+        family: HirMarkerFamily,
+        args: &[PlaceId],
+        subject: PlaceId,
+    ) -> Option<(PlaceId, MarkerPattern)> {
+        match family {
+            HirMarkerFamily::Event => Some((subject, MarkerPattern::Event)),
+            HirMarkerFamily::True => {
+                let value = *args.first()?;
+                Some((value, MarkerPattern::True { value }))
+            }
+            HirMarkerFamily::False => {
+                let value = *args.first()?;
+                Some((value, MarkerPattern::False { value }))
+            }
+            HirMarkerFamily::Equal => {
+                let (left, right) = two_places(args)?;
+                Some((left, MarkerPattern::Equal { left, right }))
+            }
+            HirMarkerFamily::LessThan => {
+                let (left, right) = two_places(args)?;
+                Some((left, MarkerPattern::LessThan { left, right }))
+            }
+            HirMarkerFamily::GreaterThan => {
+                let (left, right) = two_places(args)?;
+                Some((left, MarkerPattern::GreaterThan { left, right }))
+            }
+            HirMarkerFamily::LessOrEqual => {
+                let (left, right) = two_places(args)?;
+                Some((left, MarkerPattern::LessOrEqual { left, right }))
+            }
+            HirMarkerFamily::GreaterOrEqual => {
+                let (left, right) = two_places(args)?;
+                Some((left, MarkerPattern::GreaterOrEqual { left, right }))
+            }
+            HirMarkerFamily::MemberOf => {
+                let (key, map) = two_places(args)?;
+                Some((key, MarkerPattern::MemberOf { key, map }))
+            }
+        }
+    }
+
+    fn marker_place(
+        &mut self,
+        place: &HirMarkerPlace,
+        subject: PlaceId,
+        substitution: &HashMap<HirBindingId, PlaceId>,
+    ) -> Option<PlaceId> {
+        match place {
+            HirMarkerPlace::Subject => Some(subject),
+            HirMarkerPlace::Binding(binding) => substitution
+                .get(binding)
+                .copied()
+                .or_else(|| self.binding_places.get(binding).copied())
+                .or_else(|| Some(self.binding_place(*binding))),
+            HirMarkerPlace::U32(value) => Some(self.u32_place(*value, self.place_span(subject))),
+            HirMarkerPlace::Bool(value) => Some(self.bool_place(*value, self.place_span(subject))),
+            HirMarkerPlace::ArrayLength(binding) => {
+                let array = substitution
+                    .get(binding)
+                    .copied()
+                    .or_else(|| self.binding_places.get(binding).copied())
+                    .or_else(|| Some(self.binding_place(*binding)))?;
+                let HirType::Array { length, .. } = &self.places.get(array.index)?.ty else {
+                    return None;
+                };
+                Some(self.array_length_place(array, *length, self.place_span(array)))
+            }
+        }
     }
 
     fn proof_obligation_for_index(
@@ -746,6 +1081,7 @@ impl ProofLowerer {
             kind: langlog_sema::BindingKind::Local,
             mutable: info.mutable,
             ty: info.ty,
+            markers: Vec::new(),
             span: info.span,
         };
         self.bind_initial_place(&binding, None)
@@ -1085,6 +1421,13 @@ impl ProofLowerer {
         self.places.get(place.index).and_then(|place| place.value)
     }
 
+    fn place_span(&self, place: PlaceId) -> Span {
+        self.places
+            .get(place.index)
+            .map(|place| place.span)
+            .expect("proof places should only reference allocated places")
+    }
+
     fn place_display(&self, place: PlaceId) -> String {
         self.places
             .get(place.index)
@@ -1133,6 +1476,9 @@ impl<'a> Checker<'a> {
 
     fn check_entry(&mut self, entry: &ProofEntry, env: &mut MarkerEnv) {
         match entry {
+            ProofEntry::Fact { fact, .. } => {
+                self.add_fact(env, fact.clone());
+            }
             ProofEntry::Let {
                 place, value, span, ..
             } => {
@@ -1248,7 +1594,7 @@ impl<'a> Checker<'a> {
         if env
             .facts
             .iter()
-            .any(|fact| self.marker_matches(&fact.marker, &obligation.required))
+            .any(|fact| self.fact_satisfies_obligation(fact, obligation))
         {
             return true;
         }
@@ -1264,6 +1610,15 @@ impl<'a> Checker<'a> {
         }
 
         false
+    }
+
+    fn fact_satisfies_obligation(&self, fact: &MarkerFact, obligation: &MarkerObligation) -> bool {
+        if let ObligationTarget::Place(target) = obligation.target {
+            if fact.target != target {
+                return false;
+            }
+        }
+        self.marker_matches(&fact.marker, &obligation.required)
     }
 
     fn trusted_set_to_map_transfer(
@@ -1431,11 +1786,13 @@ impl<'a> Checker<'a> {
         let message = match obligation.source {
             ObligationSource::Index { .. } => "possible out-of-bounds indexing is not proven safe",
             ObligationSource::MapLookup { .. } => "possible missing map key is not proven present",
+            ObligationSource::MarkerRequirement => "required marker is not proven for this value",
             ObligationSource::EventCycle => "task cycle is not proven productive",
         };
         let label = match obligation.source {
             ObligationSource::Index { .. } => "prove this index stays within bounds",
             ObligationSource::MapLookup { .. } => "prove this key is present in the map",
+            ObligationSource::MarkerRequirement => "prove this marker requirement",
             ObligationSource::EventCycle => "introduce an Event marker on every cyclic path",
         };
 
@@ -1709,6 +2066,13 @@ fn binary_to_observe_op(op: BinaryOp) -> Option<ObserveOp> {
     }
 }
 
+fn two_places(args: &[PlaceId]) -> Option<(PlaceId, PlaceId)> {
+    match args {
+        [left, right] => Some((*left, *right)),
+        _ => None,
+    }
+}
+
 fn eval_binary_value(
     op: BinaryOp,
     left: Option<PlaceValue>,
@@ -1750,6 +2114,39 @@ fn collect_bindings(hir: &HirProgram) -> HashMap<HirBindingId, BindingInfo> {
         collect_block_bindings(&mut bindings, &function.body);
     }
     bindings
+}
+
+fn collect_function_markers(hir: &HirProgram) -> HashMap<HirItemId, FunctionMarkerSignature> {
+    hir.functions
+        .iter()
+        .map(|function| (function.id, function_marker_signature(function)))
+        .collect()
+}
+
+fn function_marker_signature(function: &HirFunction) -> FunctionMarkerSignature {
+    FunctionMarkerSignature {
+        params: function
+            .params
+            .iter()
+            .map(|param| ParamMarkerSignature {
+                binding: param.id,
+                markers: param.markers.clone(),
+            })
+            .collect(),
+        return_markers: function.return_markers.clone(),
+    }
+}
+
+fn call_marker_substitution(
+    signature: &FunctionMarkerSignature,
+    args: &[ProofExpr],
+) -> HashMap<HirBindingId, PlaceId> {
+    signature
+        .params
+        .iter()
+        .zip(args.iter())
+        .map(|(param, arg)| (param.binding, arg.place))
+        .collect()
 }
 
 fn collect_binding(bindings: &mut HashMap<HirBindingId, BindingInfo>, binding: &HirBinding) {
@@ -1825,6 +2222,11 @@ fn collect_statement_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>,
             collect_expr_bindings(bindings, &stmt.right);
             collect_block_bindings(bindings, &stmt.else_block);
         }
+        HirStmt::UnsafeMarker(stmt) => {
+            for arg in &stmt.args {
+                collect_expr_bindings(bindings, arg);
+            }
+        }
     }
 }
 
@@ -1887,6 +2289,11 @@ fn collect_expr_bindings(bindings: &mut HashMap<HirBindingId, BindingInfo>, expr
         HirExprKind::Index { target, index } => {
             collect_expr_bindings(bindings, target);
             collect_expr_bindings(bindings, index);
+        }
+        HirExprKind::UnsafeMarker { args, .. } => {
+            for arg in args {
+                collect_expr_bindings(bindings, arg);
+            }
         }
     }
 }

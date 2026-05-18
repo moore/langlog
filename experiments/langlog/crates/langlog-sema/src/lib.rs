@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
-    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MatchBody, ObserveOp,
-    Pattern, PatternKind, Stmt, Task, Type, TypeKind, UnaryOp,
+    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MarkerAnnotation,
+    MarkerArg, MarkerArgKind, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type,
+    TypeKind, UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -365,7 +366,12 @@ impl<'a> Analyzer<'a> {
             name: function.name.value.as_str(),
             name_span: function.name.span,
         };
-        self.analyze_callable(&function.params, &function.body, context);
+        self.analyze_callable(
+            &function.params,
+            function.return_type.as_ref(),
+            &function.body,
+            context,
+        );
     }
 
     fn analyze_task(&mut self, task: &Task) {
@@ -374,12 +380,13 @@ impl<'a> Analyzer<'a> {
             name: task.name.value.as_str(),
             name_span: task.name.span,
         };
-        self.analyze_callable(&task.params, &task.body, context);
+        self.analyze_callable(&task.params, Some(&task.return_type), &task.body, context);
     }
 
     fn analyze_callable(
         &mut self,
         params: &[langlog_syntax::ast::Param],
+        return_type: Option<&Type>,
         body: &Block,
         context: ItemContext<'_>,
     ) {
@@ -395,6 +402,12 @@ impl<'a> Analyzer<'a> {
                     mutable: false,
                 },
             );
+        }
+        for param in params {
+            self.analyze_type_marker_args(&param.ty, &scopes);
+        }
+        if let Some(return_type) = return_type {
+            self.analyze_type_marker_args(return_type, &scopes);
         }
 
         let mut control = ControlContext {
@@ -445,6 +458,9 @@ impl<'a> Analyzer<'a> {
                         mutable: stmt.mutable,
                     },
                 );
+                if let Some(ty) = &stmt.ty {
+                    self.analyze_type_marker_args(ty, scopes);
+                }
             }
             Stmt::Assign(stmt) => {
                 let target_binding = self.analyze_expr(&stmt.target, scopes, context);
@@ -540,6 +556,11 @@ impl<'a> Analyzer<'a> {
                 self.analyze_block(&stmt.else_block, scopes, context);
                 if !is_terminal_block(&stmt.else_block, terminal_kind(context.item.kind)) {
                     self.report_non_terminal_observe_else(stmt.else_block.span);
+                }
+            }
+            Stmt::UnsafeMarker(stmt) => {
+                for arg in &stmt.construction.args {
+                    self.analyze_expr(arg, scopes, context);
                 }
             }
         }
@@ -652,6 +673,55 @@ impl<'a> Analyzer<'a> {
                 self.analyze_expr(index, scopes, context);
                 None
             }
+            ExprKind::UnsafeMarker(construction) => {
+                for arg in &construction.args {
+                    self.analyze_expr(arg, scopes, context);
+                }
+                None
+            }
+        }
+    }
+
+    fn analyze_type_marker_args(&mut self, ty: &Type, scopes: &ScopeStack) {
+        match &ty.kind {
+            TypeKind::With { base, markers } => {
+                self.analyze_type_marker_args(base, scopes);
+                for marker in markers {
+                    for arg in &marker.args {
+                        self.analyze_marker_arg(arg, scopes);
+                    }
+                }
+            }
+            TypeKind::Tuple(elements) => {
+                for element in elements {
+                    self.analyze_type_marker_args(element, scopes);
+                }
+            }
+            TypeKind::Array { element, .. } => self.analyze_type_marker_args(element, scopes),
+            TypeKind::Applied { args, .. } => {
+                for arg in args {
+                    if let GenericArg::Type(ty) = arg {
+                        self.analyze_type_marker_args(ty, scopes);
+                    }
+                }
+            }
+            TypeKind::Unit | TypeKind::Named(_) => {}
+        }
+    }
+
+    fn analyze_marker_arg(&mut self, arg: &MarkerArg, scopes: &ScopeStack) {
+        match &arg.kind {
+            MarkerArgKind::Name(name) => {
+                if let Some(binding) = self.resolve_name(name.value.as_str(), name.span, scopes) {
+                    self.require_marker_place_binding(name.span, binding);
+                }
+            }
+            MarkerArgKind::Field { base, .. } => {
+                if let Some(binding) = self.resolve_name(base.value.as_str(), base.span, scopes) {
+                    self.require_marker_place_binding(base.span, binding);
+                }
+            }
+            MarkerArgKind::Int(_) | MarkerArgKind::Bool(_) => {}
         }
     }
 
@@ -818,10 +888,23 @@ impl<'a> Analyzer<'a> {
             | ExprKind::Block(_)
             | ExprKind::Unary { .. }
             | ExprKind::Call { .. }
-            | ExprKind::Index { .. } => Some(false),
+            | ExprKind::Index { .. }
+            | ExprKind::UnsafeMarker(_) => Some(false),
             ExprKind::Binary { .. } => Some(false),
             ExprKind::Recover { .. } => Some(false),
         }
+    }
+
+    fn require_marker_place_binding(&mut self, span: Span, binding: Binding) {
+        if matches!(binding.kind, BindingKind::Param | BindingKind::Local) {
+            return;
+        }
+
+        self.diagnostics.push(
+            Diagnostic::error("marker arguments must name value places").with_label(
+                Label::primary(span, "expected a parameter or local binding here"),
+            ),
+        );
     }
 
     fn report_unbounded_iteration(&mut self, iterable_span: Span) {
@@ -937,6 +1020,11 @@ impl<'a> Analyzer<'a> {
                 self.check_observe_expr_stability(target, scopes);
                 self.check_observe_expr_stability(index, scopes);
             }
+            ExprKind::UnsafeMarker(construction) => {
+                for arg in &construction.args {
+                    self.check_observe_expr_stability(arg, scopes);
+                }
+            }
         }
     }
 }
@@ -1005,12 +1093,18 @@ impl<'a> TypeChecker<'a> {
                 .record_binding(param.name.span, param_type.clone());
             scopes.insert(param.name.value.clone(), param_type);
         }
+        for param in &function.params {
+            self.check_marker_qualified_type(&param.ty, &scopes, true);
+        }
 
         let expected_return = function
             .return_type
             .as_ref()
             .map(lower_type)
             .unwrap_or(SemanticType::Unit);
+        if let Some(return_type) = &function.return_type {
+            self.check_marker_qualified_type(return_type, &scopes, true);
+        }
         let body_type = self.check_block(&function.body, &mut scopes, &expected_return);
 
         if let Some(expr) = &function.body.trailing_expr {
@@ -1031,8 +1125,12 @@ impl<'a> TypeChecker<'a> {
                 .record_binding(param.name.span, param_type.clone());
             scopes.insert(param.name.value.clone(), param_type);
         }
+        for param in &task.params {
+            self.check_marker_qualified_type(&param.ty, &scopes, true);
+        }
 
         let expected_return = lower_type(&task.return_type);
+        self.check_marker_qualified_type(&task.return_type, &scopes, true);
         self.check_block(&task.body, &mut scopes, &expected_return);
 
         if !is_terminal_block(&task.body, TerminalKind::Task) {
@@ -1088,6 +1186,9 @@ impl<'a> TypeChecker<'a> {
                 self.facts
                     .record_binding(stmt.name.span, binding_type.clone());
                 scopes.insert(stmt.name.value.clone(), binding_type);
+                if let Some(ty) = &stmt.ty {
+                    self.check_marker_qualified_type(ty, scopes, true);
+                }
             }
             Stmt::Assign(stmt) => {
                 let target = self.check_expr(&stmt.target, scopes);
@@ -1158,6 +1259,14 @@ impl<'a> TypeChecker<'a> {
                 let right = self.check_expr(&stmt.right, scopes);
                 self.require_observe_types(stmt.span, stmt.op, &left, &right);
                 self.check_block(&stmt.else_block, scopes, expected_return);
+            }
+            Stmt::UnsafeMarker(stmt) => {
+                self.check_unsafe_marker_construction(
+                    stmt.construction.marker.span,
+                    stmt.construction.marker.value.as_str(),
+                    &stmt.construction.args,
+                    scopes,
+                );
             }
         }
     }
@@ -1276,10 +1385,143 @@ impl<'a> TypeChecker<'a> {
                 let index_type = self.check_expr(index, scopes);
                 self.check_index_expr(expr.span, &target_type, index.span, &index_type)
             }
+            ExprKind::UnsafeMarker(construction) => self.check_unsafe_marker_construction(
+                construction.marker.span,
+                construction.marker.value.as_str(),
+                &construction.args,
+                scopes,
+            ),
             ExprKind::Grouped(expr) => self.check_expr(expr, scopes),
         };
 
         self.facts.record_expr(expr.span, ty)
+    }
+
+    fn check_marker_qualified_type(
+        &mut self,
+        ty: &Type,
+        scopes: &TypeScopeStack,
+        allow_marker_here: bool,
+    ) {
+        match &ty.kind {
+            TypeKind::With { base, markers } => {
+                if !allow_marker_here {
+                    self.report_nested_marker_type(ty.span);
+                }
+                self.check_marker_qualified_type(base, scopes, false);
+                for marker in markers {
+                    self.check_marker_annotation(marker, scopes);
+                }
+            }
+            TypeKind::Tuple(elements) => {
+                for element in elements {
+                    self.check_marker_qualified_type(element, scopes, false);
+                }
+            }
+            TypeKind::Array { element, .. } => {
+                self.check_marker_qualified_type(element, scopes, false);
+            }
+            TypeKind::Applied { args, .. } => {
+                for arg in args {
+                    if let GenericArg::Type(ty) = arg {
+                        self.check_marker_qualified_type(ty, scopes, false);
+                    }
+                }
+            }
+            TypeKind::Unit | TypeKind::Named(_) => {}
+        }
+    }
+
+    fn check_marker_annotation(&mut self, marker: &MarkerAnnotation, scopes: &TypeScopeStack) {
+        let Some(family) = lower_marker_family(&marker.name.value) else {
+            self.report_unknown_marker(marker.name.span, marker.name.value.as_str());
+            return;
+        };
+
+        if !self.marker_type_arity_is_valid(family, marker.args.len()) {
+            self.report_marker_arity(marker.name.span, marker.name.value.as_str());
+        }
+
+        for arg in &marker.args {
+            self.check_marker_arg(arg, scopes);
+        }
+    }
+
+    fn marker_type_arity_is_valid(&self, family: HirMarkerFamily, arity: usize) -> bool {
+        match family {
+            HirMarkerFamily::Event => arity == 0,
+            HirMarkerFamily::True | HirMarkerFamily::False => arity <= 1,
+            HirMarkerFamily::Equal
+            | HirMarkerFamily::LessThan
+            | HirMarkerFamily::GreaterThan
+            | HirMarkerFamily::LessOrEqual
+            | HirMarkerFamily::GreaterOrEqual
+            | HirMarkerFamily::MemberOf => (1..=2).contains(&arity),
+        }
+    }
+
+    fn check_marker_arg(&mut self, arg: &MarkerArg, scopes: &TypeScopeStack) {
+        match &arg.kind {
+            MarkerArgKind::Name(name) => {
+                scopes.lookup(name.value.as_str());
+            }
+            MarkerArgKind::Field { base, field } => {
+                if field.value != "length" {
+                    self.report_unknown_marker_field(field.span, field.value.as_str());
+                    return;
+                }
+                let Some(base_type) = scopes.lookup(base.value.as_str()) else {
+                    return;
+                };
+                if !matches!(base_type, SemanticType::Array { .. }) {
+                    self.report_marker_length_requires_array(base.span);
+                }
+            }
+            MarkerArgKind::Int(_) | MarkerArgKind::Bool(_) => {}
+        }
+    }
+
+    fn check_unsafe_marker_construction(
+        &mut self,
+        marker_span: Span,
+        marker_name: &str,
+        args: &[Expr],
+        scopes: &mut TypeScopeStack,
+    ) -> SemanticType {
+        let Some(family) = lower_marker_family(marker_name) else {
+            self.report_unknown_marker(marker_span, marker_name);
+            for arg in args {
+                self.check_expr(arg, scopes);
+            }
+            return SemanticType::Unknown;
+        };
+
+        let expected = self.unsafe_marker_arity(family);
+        if args.len() != expected {
+            self.report_marker_constructor_arity(marker_span, marker_name, expected, args.len());
+        }
+
+        let mut arg_types = Vec::new();
+        for arg in args {
+            arg_types.push(self.check_expr(arg, scopes));
+        }
+
+        arg_types
+            .into_iter()
+            .next()
+            .unwrap_or(SemanticType::Unknown)
+    }
+
+    fn unsafe_marker_arity(&self, family: HirMarkerFamily) -> usize {
+        match family {
+            HirMarkerFamily::Event | HirMarkerFamily::True | HirMarkerFamily::False => 1,
+            HirMarkerFamily::Equal
+            | HirMarkerFamily::LessThan
+            | HirMarkerFamily::GreaterThan
+            | HirMarkerFamily::LessOrEqual
+            | HirMarkerFamily::GreaterOrEqual
+            | HirMarkerFamily::MemberOf => 2,
+        }
     }
 
     fn check_array_expr(
@@ -1826,6 +2068,62 @@ impl<'a> TypeChecker<'a> {
                 .with_label(Label::primary(span, "add a type annotation here")),
         );
     }
+
+    fn report_nested_marker_type(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("marker-qualified types can only describe complete value places")
+                .with_label(Label::primary(
+                    span,
+                    "move this marker qualifier to the outer value type",
+                )),
+        );
+    }
+
+    fn report_unknown_marker(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("unknown marker `{name}`")).with_label(Label::primary(
+                span,
+                "expected a builtin marker family here",
+            )),
+        );
+    }
+
+    fn report_marker_arity(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("wrong number of arguments for marker `{name}`")).with_label(
+                Label::primary(span, "marker arguments do not match this family"),
+            ),
+        );
+    }
+
+    fn report_marker_constructor_arity(
+        &mut self,
+        span: Span,
+        name: &str,
+        expected: usize,
+        found: usize,
+    ) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "wrong number of arguments for unsafe marker `{name}`: expected {expected}, found {found}"
+            ))
+            .with_label(Label::primary(span, "marker constructor arity mismatch")),
+        );
+    }
+
+    fn report_unknown_marker_field(&mut self, span: Span, field: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("unknown marker place field `{field}`"))
+                .with_label(Label::primary(span, "only `.length` is supported here")),
+        );
+    }
+
+    fn report_marker_length_requires_array(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("marker place field `.length` requires an array value")
+                .with_label(Label::primary(span, "this place is not an array")),
+        );
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1973,6 +2271,7 @@ fn lower_type(ty: &Type) -> SemanticType {
             element: Box::new(lower_type(element)),
             length: length.value,
         },
+        TypeKind::With { base, .. } => lower_type(base),
         TypeKind::Applied { base, args } => match (base.value.as_str(), args.as_slice()) {
             ("Option", [GenericArg::Type(inner)]) => {
                 SemanticType::Option(Box::new(lower_type(inner)))
@@ -2015,6 +2314,7 @@ fn iterable_item_type(ty: &SemanticType) -> Option<SemanticType> {
 
 fn is_bounded_iterable_type(ty: &langlog_syntax::ast::Type) -> bool {
     match &ty.kind {
+        langlog_syntax::ast::TypeKind::With { base, .. } => is_bounded_iterable_type(base),
         langlog_syntax::ast::TypeKind::Array { .. } => true,
         langlog_syntax::ast::TypeKind::Applied { base, .. } => {
             matches!(base.value.as_str(), "Set" | "Map")

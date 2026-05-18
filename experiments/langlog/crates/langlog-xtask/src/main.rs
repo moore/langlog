@@ -76,6 +76,13 @@ fn check_requirements(root: &Path) -> Result<Summary, Vec<String>> {
             let block = collect_annotation_block(&lines, index);
             let parsed = parse_annotation_block(&block);
             if parsed.is_empty() {
+                if parsed.test_attrs > 0 {
+                    errors.push(format!(
+                        "{}:{}: {fn_name} is an uncited #[test]; add one //= <spec>.md#..., one //= type=..., and one //# ...",
+                        display(root, &path),
+                        index + 1
+                    ));
+                }
                 continue;
             }
 

@@ -1,8 +1,11 @@
 use crate::lexer::lex;
 use crate::token::TokenTag;
 
+//= SPEC.md#llg-lex-01-comments
+//= type=test
+//# The lexer MUST NOT emit tokens for ignored comments.
 #[test]
-fn lexes_keywords_comments_and_symbols() {
+fn requirement_llg_lex_01_skips_comment_tokens() {
     let lexed = lex(
         "demo.llg",
         "fn main() -> u32 { /* block */ let mut value = 1 + 2; // line\n return value; }",

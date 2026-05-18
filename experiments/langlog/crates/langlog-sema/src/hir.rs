@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use langlog_syntax::ast::{
-    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MatchBody, ObserveOp, Pattern,
-    PatternKind, Stmt, Task, Type, UnaryOp,
+    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MarkerAnnotation, MarkerArg,
+    MarkerArgKind, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -38,6 +38,7 @@ pub struct HirFunction {
     pub name: String,
     pub params: Vec<HirBinding>,
     pub return_type: HirType,
+    pub return_markers: Vec<HirMarkerRequirement>,
     pub body: HirBlock,
     pub span: Span,
 }
@@ -49,6 +50,7 @@ pub struct HirBinding {
     pub kind: BindingKind,
     pub mutable: bool,
     pub ty: HirType,
+    pub markers: Vec<HirMarkerRequirement>,
     pub span: Span,
 }
 
@@ -72,6 +74,7 @@ pub enum HirStmt {
     Exit(HirExitStmt),
     Delegate(HirDelegateStmt),
     Observe(HirObserveStmt),
+    UnsafeMarker(HirUnsafeMarkerStmt),
 }
 
 impl HirStmt {
@@ -88,6 +91,7 @@ impl HirStmt {
             Self::Exit(stmt) => stmt.span,
             Self::Delegate(stmt) => stmt.span,
             Self::Observe(stmt) => stmt.span,
+            Self::UnsafeMarker(stmt) => stmt.span,
         }
     }
 }
@@ -190,6 +194,13 @@ pub struct HirObserveStmt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirUnsafeMarkerStmt {
+    pub marker: HirMarkerFamily,
+    pub args: Vec<HirExpr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirPattern {
     pub kind: HirPatternKind,
     pub span: Span,
@@ -242,6 +253,39 @@ pub enum HirExprKind {
         target: Box<HirExpr>,
         index: Box<HirExpr>,
     },
+    UnsafeMarker {
+        marker: HirMarkerFamily,
+        args: Vec<HirExpr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirMarkerFamily {
+    True,
+    False,
+    Equal,
+    LessThan,
+    GreaterThan,
+    LessOrEqual,
+    GreaterOrEqual,
+    MemberOf,
+    Event,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirMarkerRequirement {
+    pub family: HirMarkerFamily,
+    pub args: Vec<HirMarkerPlace>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirMarkerPlace {
+    Subject,
+    Binding(HirBindingId),
+    U32(u64),
+    Bool(bool),
+    ArrayLength(HirBindingId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,13 +369,25 @@ impl<'a> HirLowerer<'a> {
             params: function
                 .params
                 .iter()
-                .map(|param| self.lower_named_binding(&param.name, BindingKind::Param, false))
+                .map(|param| {
+                    self.lower_named_binding_with_type(
+                        &param.name,
+                        BindingKind::Param,
+                        false,
+                        Some(&param.ty),
+                    )
+                })
                 .collect(),
             return_type: function
                 .return_type
                 .as_ref()
                 .map(lower_ast_type)
                 .unwrap_or(HirType::Unit),
+            return_markers: function
+                .return_type
+                .as_ref()
+                .map(|ty| self.lower_marker_requirements(ty))
+                .unwrap_or_default(),
             body: self.lower_block(&function.body),
             span: function.span,
         }
@@ -347,9 +403,17 @@ impl<'a> HirLowerer<'a> {
             params: task
                 .params
                 .iter()
-                .map(|param| self.lower_named_binding(&param.name, BindingKind::Param, false))
+                .map(|param| {
+                    self.lower_named_binding_with_type(
+                        &param.name,
+                        BindingKind::Param,
+                        false,
+                        Some(&param.ty),
+                    )
+                })
                 .collect(),
             return_type: lower_ast_type(&task.return_type),
+            return_markers: self.lower_marker_requirements(&task.return_type),
             body: self.lower_block(&task.body),
             span: task.span,
         }
@@ -373,7 +437,12 @@ impl<'a> HirLowerer<'a> {
     fn lower_statement(&self, statement: &Stmt) -> HirStmt {
         match statement {
             Stmt::Let(stmt) => HirStmt::Let(HirLetStmt {
-                binding: self.lower_named_binding(&stmt.name, BindingKind::Local, stmt.mutable),
+                binding: self.lower_named_binding_with_type(
+                    &stmt.name,
+                    BindingKind::Local,
+                    stmt.mutable,
+                    stmt.ty.as_ref(),
+                ),
                 annotation: stmt.ty.as_ref().map(lower_ast_type),
                 value: stmt.value.as_ref().map(|expr| self.lower_expr(expr)),
                 span: stmt.span,
@@ -445,6 +514,17 @@ impl<'a> HirLowerer<'a> {
                 op: stmt.op,
                 right: self.lower_expr(&stmt.right),
                 else_block: self.lower_block(&stmt.else_block),
+                span: stmt.span,
+            }),
+            Stmt::UnsafeMarker(stmt) => HirStmt::UnsafeMarker(HirUnsafeMarkerStmt {
+                marker: lower_marker_family(&stmt.construction.marker.value)
+                    .expect("checked marker statements must name a builtin marker"),
+                args: stmt
+                    .construction
+                    .args
+                    .iter()
+                    .map(|arg| self.lower_expr(arg))
+                    .collect(),
                 span: stmt.span,
             }),
         }
@@ -598,6 +678,19 @@ impl<'a> HirLowerer<'a> {
                 ty,
                 span: expr.span,
             },
+            ExprKind::UnsafeMarker(construction) => HirExpr {
+                kind: HirExprKind::UnsafeMarker {
+                    marker: lower_marker_family(&construction.marker.value)
+                        .expect("checked marker expressions must name a builtin marker"),
+                    args: construction
+                        .args
+                        .iter()
+                        .map(|arg| self.lower_expr(arg))
+                        .collect(),
+                },
+                ty,
+                span: expr.span,
+            },
             ExprKind::Grouped(inner) => {
                 let mut lowered = self.lower_expr(inner);
                 lowered.span = expr.span;
@@ -613,6 +706,16 @@ impl<'a> HirLowerer<'a> {
         kind: BindingKind,
         mutable: bool,
     ) -> HirBinding {
+        self.lower_named_binding_with_type(name, kind, mutable, None)
+    }
+
+    fn lower_named_binding_with_type(
+        &self,
+        name: &Spanned<String>,
+        kind: BindingKind,
+        mutable: bool,
+        ty: Option<&Type>,
+    ) -> HirBinding {
         HirBinding {
             id: HirBindingId {
                 declaration_span: name.span,
@@ -621,6 +724,9 @@ impl<'a> HirLowerer<'a> {
             kind,
             mutable,
             ty: self.lower_binding_type(name.span),
+            markers: ty
+                .map(|ty| self.lower_marker_requirements(ty))
+                .unwrap_or_default(),
             span: name.span,
         }
     }
@@ -640,11 +746,103 @@ impl<'a> HirLowerer<'a> {
             .expect("checked HIR bindings must carry a type");
         lower_semantic_type(ty).expect("checked HIR bindings must not contain unknown types")
     }
+
+    fn lower_marker_requirements(&self, ty: &Type) -> Vec<HirMarkerRequirement> {
+        let TypeKind::With { markers, .. } = &ty.kind else {
+            return Vec::new();
+        };
+
+        markers
+            .iter()
+            .filter_map(|marker| self.lower_marker_requirement(marker))
+            .collect()
+    }
+
+    fn lower_marker_requirement(&self, marker: &MarkerAnnotation) -> Option<HirMarkerRequirement> {
+        let family = lower_marker_family(&marker.name.value)?;
+        let args = normalize_marker_places(
+            family,
+            marker
+                .args
+                .iter()
+                .filter_map(|arg| self.lower_marker_arg(arg))
+                .collect(),
+        );
+        Some(HirMarkerRequirement {
+            family,
+            args,
+            span: marker.span,
+        })
+    }
+
+    fn lower_marker_arg(&self, arg: &MarkerArg) -> Option<HirMarkerPlace> {
+        match &arg.kind {
+            MarkerArgKind::Name(name) => self.marker_binding_place(name.span),
+            MarkerArgKind::Field { base, field } if field.value == "length" => self
+                .marker_binding_place(base.span)
+                .and_then(|place| match place {
+                    HirMarkerPlace::Binding(binding) => Some(HirMarkerPlace::ArrayLength(binding)),
+                    _ => None,
+                }),
+            MarkerArgKind::Field { .. } => None,
+            MarkerArgKind::Int(value) => Some(HirMarkerPlace::U32(*value)),
+            MarkerArgKind::Bool(value) => Some(HirMarkerPlace::Bool(*value)),
+        }
+    }
+
+    fn marker_binding_place(&self, span: Span) -> Option<HirMarkerPlace> {
+        let resolution = self.resolutions.get(&span)?;
+        matches!(resolution.kind, BindingKind::Param | BindingKind::Local).then_some(
+            HirMarkerPlace::Binding(HirBindingId {
+                declaration_span: resolution.declaration_span,
+            }),
+        )
+    }
 }
 
 fn lower_ast_type(ty: &Type) -> HirType {
     let semantic = lower_type(ty);
     lower_semantic_type(&semantic).expect("surface types must lower into HIR types")
+}
+
+pub fn lower_marker_family(name: &str) -> Option<HirMarkerFamily> {
+    match name {
+        "True" => Some(HirMarkerFamily::True),
+        "False" => Some(HirMarkerFamily::False),
+        "Equal" => Some(HirMarkerFamily::Equal),
+        "LessThan" => Some(HirMarkerFamily::LessThan),
+        "GreaterThan" => Some(HirMarkerFamily::GreaterThan),
+        "LessOrEqual" => Some(HirMarkerFamily::LessOrEqual),
+        "GreaterOrEqual" => Some(HirMarkerFamily::GreaterOrEqual),
+        "MemberOf" => Some(HirMarkerFamily::MemberOf),
+        "Event" => Some(HirMarkerFamily::Event),
+        _ => None,
+    }
+}
+
+fn normalize_marker_places(
+    family: HirMarkerFamily,
+    args: Vec<HirMarkerPlace>,
+) -> Vec<HirMarkerPlace> {
+    match family {
+        HirMarkerFamily::Event => Vec::new(),
+        HirMarkerFamily::True | HirMarkerFamily::False if args.is_empty() => {
+            vec![HirMarkerPlace::Subject]
+        }
+        HirMarkerFamily::MemberOf if args.len() == 1 => {
+            vec![HirMarkerPlace::Subject, args[0].clone()]
+        }
+        HirMarkerFamily::Equal
+        | HirMarkerFamily::LessThan
+        | HirMarkerFamily::GreaterThan
+        | HirMarkerFamily::LessOrEqual
+        | HirMarkerFamily::GreaterOrEqual
+            if args.len() == 1 =>
+        {
+            vec![HirMarkerPlace::Subject, args[0].clone()]
+        }
+        _ => args,
+    }
 }
 
 fn lower_semantic_type(ty: &SemanticType) -> Option<HirType> {

@@ -70,6 +70,7 @@ properties that should be enforced structurally rather than by convention:
 - The lexer MUST ignore block comments delimited by `/*` and `*/`.
 - The lexer MUST support nested block comments.
 - The lexer MUST report an error for an unterminated block comment.
+- The lexer MUST NOT emit tokens for ignored comments.
 
 ## LLG-LEX-02 Identifiers And Literals
 
@@ -113,6 +114,8 @@ properties that should be enforced structurally rather than by convention:
 
 - The parser MUST accept `let`, assignment, expression, `if`, `match`, `for`,
   `return`, and `observe` statements.
+- The parser MUST preserve accepted statement forms and their nested expression
+  shapes in the AST.
 - The task-orchestration parser MUST additionally accept `forever`, `exit`, and
   `delegate` statements.
 - The current parser allows a `let` statement to include `mut`, a type
@@ -213,6 +216,8 @@ with marker facts attached to places.
   `String with Event`.
 - Multiple markers MUST use a parenthesized marker list, such as
   `String with (Event, Foo)`.
+- The parser MUST preserve marker-qualified types, marker names, and marker
+  place arguments in the AST.
 - A value with extra marker facts MAY be used where those markers are not
   required.
 - A value without a required marker fact MUST NOT be used where that marker is
@@ -222,8 +227,13 @@ with marker facts attached to places.
 
 - Function arguments MAY elide unmentioned markers, because ignoring marker
   facts is safe.
+- A marker-qualified function parameter MUST create a call-site obligation for
+  each required marker on the corresponding argument.
 - Function return values MUST carry only the marker facts named by the function
   signature.
+- A marker-qualified return type MUST require the returned expression to
+  provide each named marker and MUST provide those markers to callers after the
+  call succeeds.
 - A generic type parameter MUST NOT capture unmentioned marker facts from an
   argument.
 - If a function preserves or creates a marker fact across the call boundary,
@@ -255,6 +265,8 @@ in its return type.
 
 - Safe code MAY consume and require marker facts.
 - Code that creates a marker fact MUST do so inside an `unsafe` block.
+- Marker constructor syntax outside `unsafe` MUST be rejected with a syntax
+  diagnostic.
 - Unsafe marker construction MUST assert that the marker contract is true for
   the marked place.
 - Compiler-derived marker facts MAY still be created by built-in control-flow
@@ -282,6 +294,8 @@ unsafe {
 - `MemberOf(key, map)` MUST mark that `key` is known to be present in `map`.
 - `Event` MUST mark a value that represents fresh external input or a fresh
   externally scheduled occurrence.
+- The trusted `read_u32()` host builtin MUST return a value marked with
+  `Event`.
 
 Full user-defined marker-family declaration syntax is deferred. The first
 marker-aware phase defines builtin marker families and builtin companion marker

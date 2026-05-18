@@ -65,6 +65,7 @@ pub enum Stmt {
     Exit(ExitStmt),
     Delegate(DelegateStmt),
     Observe(ObserveStmt),
+    UnsafeMarker(UnsafeMarkerStmt),
 }
 
 impl Stmt {
@@ -81,6 +82,7 @@ impl Stmt {
             Self::Exit(stmt) => stmt.span,
             Self::Delegate(stmt) => stmt.span,
             Self::Observe(stmt) => stmt.span,
+            Self::UnsafeMarker(stmt) => stmt.span,
         }
     }
 }
@@ -183,6 +185,12 @@ pub struct ObserveStmt {
     pub else_block: Block,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsafeMarkerStmt {
+    pub span: Span,
+    pub construction: UnsafeMarkerConstruction,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObserveOp {
     Eq,
@@ -255,7 +263,15 @@ pub enum ExprKind {
         target: Box<Expr>,
         index: Box<Expr>,
     },
+    UnsafeMarker(UnsafeMarkerConstruction),
     Grouped(Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsafeMarkerConstruction {
+    pub span: Span,
+    pub marker: Spanned<String>,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,10 +323,38 @@ pub enum TypeKind {
         base: Spanned<String>,
         args: Vec<GenericArg>,
     },
+    With {
+        base: Box<Type>,
+        markers: Vec<MarkerAnnotation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenericArg {
     Type(Type),
     Const(Spanned<u64>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerAnnotation {
+    pub span: Span,
+    pub name: Spanned<String>,
+    pub args: Vec<MarkerArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerArg {
+    pub span: Span,
+    pub kind: MarkerArgKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerArgKind {
+    Name(Spanned<String>),
+    Field {
+        base: Spanned<String>,
+        field: Spanned<String>,
+    },
+    Int(u64),
+    Bool(bool),
 }

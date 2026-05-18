@@ -59,7 +59,13 @@ impl Lexer {
                 '[' => self.push_simple(TokenKind::LBracket, 1),
                 ']' => self.push_simple(TokenKind::RBracket, 1),
                 ',' => self.push_simple(TokenKind::Comma, 1),
-                ':' => self.push_simple(TokenKind::Colon, 1),
+                ':' => {
+                    if self.peek_next(':') {
+                        self.push_compound(TokenKind::PathSep, 2);
+                    } else {
+                        self.push_simple(TokenKind::Colon, 1);
+                    }
+                }
                 ';' => self.push_simple(TokenKind::Semi, 1),
                 '+' => self.push_simple(TokenKind::Plus, 1),
                 '*' => self.push_simple(TokenKind::Star, 1),
@@ -121,8 +127,7 @@ impl Lexer {
                     if self.peek_next('.') {
                         self.push_compound(TokenKind::DotDot, 2);
                     } else {
-                        self.report_unexpected_char('.', "unexpected `.`");
-                        self.advance_char();
+                        self.push_simple(TokenKind::Dot, 1);
                     }
                 }
                 other => {
@@ -248,6 +253,8 @@ impl Lexer {
             "exit" => TokenKind::Exit,
             "delegate" => TokenKind::Delegate,
             "observe" => TokenKind::Observe,
+            "unsafe" => TokenKind::Unsafe,
+            "with" => TokenKind::With,
             "or" => TokenKind::Or,
             "true" => TokenKind::True,
             "false" => TokenKind::False,

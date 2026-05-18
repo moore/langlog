@@ -11,6 +11,7 @@ tooling rather than to the Langlog language.
 - The requirement checker MUST accept one cited implemented test and one cited
   todo test when both use the required annotation shape.
 - The requirement checker MUST ignore uncited helper functions.
+- The requirement checker MUST reject uncited test functions.
 - The requirement checker MUST reject cited tests that are missing the test
   attribute, spec reference, trace type, or requirement quote.
 - The requirement checker MUST reject duplicate requirement traces.
