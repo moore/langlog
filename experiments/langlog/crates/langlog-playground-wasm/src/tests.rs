@@ -84,7 +84,7 @@ fn requirement_llg_wasm_06_playground_examples_build_and_run_ready() {
         serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
     let examples = examples.as_array().expect("examples should be an array");
 
-    assert_eq!(examples.len(), 19);
+    assert_eq!(examples.len(), 21);
 
     for example in examples {
         let name = example
@@ -179,5 +179,37 @@ fn requirement_llg_wasm_06_playground_examples_include_task_delegation() {
             .get("source")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|source| source.contains("delegate"))
+    }));
+}
+
+//= WASM.md#llg-wasm-06-playground-adapter
+//= type=test
+//# The playground example programs MUST include marker-qualified value and user marker-family examples.
+#[test]
+fn requirement_llg_wasm_06_playground_examples_include_marker_features() {
+    let examples: serde_json::Value =
+        serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
+    let examples = examples.as_array().expect("examples should be an array");
+
+    assert!(examples.iter().any(|example| {
+        example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| {
+                source.contains("marker Trusted();")
+                    && source.contains("u32 with Trusted")
+                    && source.contains("Trusted::mark")
+            })
+    }));
+    assert!(examples.iter().any(|example| {
+        example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| {
+                source.contains("marker UpperBound(value: place, bound: place);")
+                    && source.contains("mark Sub")
+                    && source.contains("?bound")
+                    && source.contains("implies UpperBound(result, bound) for result;")
+            })
     }));
 }

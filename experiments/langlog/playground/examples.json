@@ -74,5 +74,13 @@
   {
     "name": "19 - Observe Facts",
     "source": "// observe records a fact and runs else only if the fact is false.\n// The proof checker can use the fact to accept the dynamic index.\ntask main() -> u32 {\n    let values: [u32; 4] = [10, 20, 30, 42];\n    let index: u32 = 3;\n\n    observe index < 4 else {\n        exit 0;\n    }\n\n    exit values[index];\n}\n"
+  },
+  {
+    "name": "20 - Marker Qualified Values",
+    "source": "// Markers are compile-time facts attached to value places.\n// This example creates a custom Trusted marker and carries it through a function boundary.\nmarker Trusted();\n\nfn accept(value: u32 with Trusted) -> u32 with Trusted {\n    return value;\n}\n\ntask main() -> u32 {\n    let raw: u32 = 42;\n    let marked: u32 with Trusted = unsafe { Trusted::mark(raw) };\n    let copied: u32 with Trusted = marked;\n\n    exit accept(copied);\n}\n"
+  },
+  {
+    "name": "21 - Marker Companion Rules",
+    "source": "// User marker families can appear in companion rules.\n// The Sub rule below preserves UpperBound(value, bound) facts through successful subtraction.\nmarker UpperBound(value: place, bound: place);\n\nmark Sub(a: place, amount: place, result: place) {\n    if a with UpperBound(a, ?bound) {\n        implies UpperBound(result, bound) for result;\n    }\n}\n\nfn keep_upper_bound(value: u32 with UpperBound(4)) -> u32 with UpperBound(4) {\n    return value;\n}\n\ntask main() -> u32 {\n    let index: u32 with UpperBound(4) = unsafe { UpperBound::mark(3, 4) };\n    let fallback: u32 with UpperBound(4) = unsafe { UpperBound::mark(0, 4) };\n    let smaller: u32 with UpperBound(4) = index - 1 or(err) fallback;\n\n    exit keep_upper_bound(smaller) + 40 or(err) 0;\n}\n"
   }
 ]

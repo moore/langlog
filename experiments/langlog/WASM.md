@@ -123,3 +123,5 @@ This document complements, but does not replace, the main language spec:
 - The playground example programs MUST include a runnable finite `forever` task
   example.
 - The playground example programs MUST include a task delegation example.
+- The playground example programs MUST include marker-qualified value and user
+  marker-family examples.
