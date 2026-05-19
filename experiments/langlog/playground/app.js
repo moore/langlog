@@ -15,6 +15,8 @@ const docsCloseButton = document.querySelector("#docsCloseButton");
 
 let initialized = false;
 let examples = [];
+let exampleSlugs = [];
+let exampleIndexBySlug = new Map();
 const docsCache = new Map();
 
 async function ensureInitialized() {
@@ -33,14 +35,94 @@ async function loadExamples() {
   if (!Array.isArray(examples) || examples.length === 0) {
     throw new Error("playground examples are empty or invalid");
   }
+  exampleSlugs = [];
+  exampleIndexBySlug = new Map();
+  examplesSelect.replaceChildren();
   examples.forEach((example, index) => {
+    const slug = uniqueExampleSlug(example.name, index);
+    exampleSlugs.push(slug);
+    exampleIndexBySlug.set(slug, index);
+
     const option = document.createElement("option");
-    option.value = String(index);
+    option.value = slug;
     option.textContent = example.name;
     examplesSelect.append(option);
   });
-  editor.value = examples[0].source;
   stdin.value = "42";
+  selectExampleFromHash();
+}
+
+function uniqueExampleSlug(name, index) {
+  const base = String(name || `example-${index + 1}`)
+    .toLowerCase()
+    .replaceAll("&", "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || `example-${index + 1}`;
+  let slug = base;
+  let suffix = 2;
+  while (exampleIndexBySlug.has(slug)) {
+    slug = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return slug;
+}
+
+function exampleIndexFromHash() {
+  const raw = window.location.hash.startsWith("#")
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  if (raw.length === 0) {
+    return 0;
+  }
+
+  let slug = raw;
+  try {
+    slug = decodeURIComponent(raw);
+  } catch (_error) {
+    return 0;
+  }
+
+  if (exampleIndexBySlug.has(slug)) {
+    return exampleIndexBySlug.get(slug);
+  }
+
+  const oneBasedIndex = Number(slug);
+  if (Number.isInteger(oneBasedIndex) && oneBasedIndex >= 1 && oneBasedIndex <= examples.length) {
+    return oneBasedIndex - 1;
+  }
+
+  return 0;
+}
+
+function selectExampleFromHash() {
+  if (examples.length === 0) {
+    return;
+  }
+  selectExample(exampleIndexFromHash(), { updateHash: false });
+}
+
+function selectExample(index, { updateHash } = { updateHash: false }) {
+  if (examples.length === 0) {
+    return;
+  }
+  const boundedIndex = index >= 0 && index < examples.length ? index : 0;
+  examplesSelect.value = exampleSlugs[boundedIndex];
+  editor.value = examples[boundedIndex].source;
+  diagnostics.textContent = "";
+  terminal.textContent = "";
+  wat.textContent = "";
+  selectOutputTab("diagnostics");
+
+  if (updateHash) {
+    updateExampleHash(boundedIndex);
+  }
+}
+
+function updateExampleHash(index) {
+  const nextHash = `#${encodeURIComponent(exampleSlugs[index])}`;
+  if (window.location.hash !== nextHash) {
+    window.location.hash = nextHash;
+  }
 }
 
 function updateDiagnostics(result) {
@@ -293,12 +375,11 @@ document.addEventListener("keydown", (event) => {
 });
 
 examplesSelect.addEventListener("change", () => {
-  editor.value = examples[Number(examplesSelect.value)].source;
-  diagnostics.textContent = "";
-  terminal.textContent = "";
-  wat.textContent = "";
-  selectOutputTab("diagnostics");
+  const index = exampleIndexBySlug.get(examplesSelect.value) ?? 0;
+  selectExample(index, { updateHash: true });
 });
+
+window.addEventListener("hashchange", selectExampleFromHash);
 
 Promise.all([loadExamples(), ensureInitialized()]).catch((error) => {
   diagnostics.textContent = `failed to initialize playground compiler: ${error.message}`;

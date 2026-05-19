@@ -82,5 +82,13 @@
   {
     "name": "21 - Marker Companion Rules",
     "source": "// Companion rules preserve user marker facts.\nmarker UpperBound(value: place, bound: place);\n\nmark Sub(a: place, amount: place, result: place) {\n    if a with UpperBound(a, ?bound) {\n        implies UpperBound(result, bound) for result;\n    }\n}\n\nfn keep_upper_bound(value: u32 with UpperBound(4)) -> u32 with UpperBound(4) {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let index: u32 with UpperBound(4) = unsafe { UpperBound::mark(3, 4) };\n        let fallback: u32 with UpperBound(4) = unsafe { UpperBound::mark(0, 4) };\n        let smaller: u32 with UpperBound(4) = index - 1 or(err) fallback;\n        exit keep_upper_bound(smaller) + 40 or(err) 0;\n    }\n}\n"
+  },
+  {
+    "name": "22 - Builtin Operator Facts",
+    "source": "// Built-in companion rules attach facts to checked operator results.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [7, 14, 21, 42];\n        let raw: u32 = 19;\n        let fallback: u32 with LessThan(4) = unsafe { LessThan::mark(0, 4) };\n        let index: u32 with LessThan(4) = raw % 4 or(err) fallback;\n\n        exit values[index];\n    }\n}\n"
+  },
+  {
+    "name": "23 - Custom Operator Marking",
+    "source": "// User companion rules can teach operators domain-specific markers.\nmarker Minimum(value: place, bound: place);\n\nmark Add(left: place, right: place, result: place) {\n    if left with Minimum(left, ?bound) {\n        implies Minimum(result, bound) for result;\n    }\n\n    if right with Minimum(right, ?bound) {\n        implies Minimum(result, bound) for result;\n    }\n}\n\nfn accept_minimum(value: u32 with Minimum(10)) -> u32 {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let left: u32 with Minimum(10) = unsafe { Minimum::mark(40, 10) };\n        let right: u32 = 2;\n        let fallback: u32 with Minimum(10) = unsafe { Minimum::mark(10, 10) };\n        let total: u32 with Minimum(10) = left + right or(err) fallback;\n\n        exit accept_minimum(total);\n    }\n}\n"
   }
 ]

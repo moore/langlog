@@ -84,7 +84,7 @@ fn requirement_llg_wasm_06_playground_examples_build_and_run_ready() {
         serde_json::from_str(PLAYGROUND_EXAMPLES_JSON).expect("examples JSON should parse");
     let examples = examples.as_array().expect("examples should be an array");
 
-    assert_eq!(examples.len(), 21);
+    assert_eq!(examples.len(), 23);
 
     for example in examples {
         let name = example
@@ -212,6 +212,26 @@ fn requirement_llg_wasm_06_playground_examples_include_marker_features() {
                     && source.contains("mark Sub")
                     && source.contains("?bound")
                     && source.contains("implies UpperBound(result, bound) for result;")
+            })
+    }));
+    assert!(examples.iter().any(|example| {
+        example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| {
+                source.contains("raw % 4")
+                    && source.contains("u32 with LessThan(4)")
+                    && source.contains("LessThan::mark")
+            })
+    }));
+    assert!(examples.iter().any(|example| {
+        example
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| {
+                source.contains("marker Minimum(value: place, bound: place);")
+                    && source.contains("mark Add")
+                    && source.contains("implies Minimum(result, bound) for result;")
             })
     }));
 }
