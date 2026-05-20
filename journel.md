@@ -892,3 +892,201 @@ That may be worth adding later for simple linear-time cases, but the first
 model should avoid becoming a full constraint solver. If an obligation cannot
 be matched directly, the compiler should ask the developer to add a guard or
 checked operation that produces the marker needed.
+
+## Marker modes, copy, and take
+
+The marker system may also be able to express substructural use rules. This
+should still be one marker system, not a split between ordinary markers and
+resource markers. Each marker family can have a structural mode. Ordinary proof
+facts such as `LessThan` and `MemberOf` are unrestricted markers. Resource-like
+facts such as `Event` can use a stricter mode.
+
+The useful modes are:
+
+| mode | copy with `=` | take with `<-` | implicit drop |
+| --- | --- | --- | --- |
+| `unrestricted` | allowed | allowed | allowed |
+| `affine` | rejected | allowed | allowed |
+| `relevant` | allowed | allowed | rejected unless used |
+| `linear` | rejected | allowed | rejected unless used |
+
+For example:
+
+```llg
+marker LessThan(left: place, right: place) : unrestricted;
+marker MemberOf(key: place, map: place) : unrestricted;
+marker Event() : relevant;
+```
+
+`LessThan(index, array.length)` should be freely copyable and droppable because
+it is just a proof fact. `Event` is different. If a state receives an event, the
+program should not be able to loop again after merely receiving it. Some place
+that carries the event must be used, taken, returned, or explicitly consumed.
+
+The mode should apply to places. That means copying a relevant place creates
+another relevant place:
+
+```llg
+let x = read_u32(); // x has Event
+let y = x;          // y also has Event
+
+handle(take y);
+go loop();          // rejected: x still has an unused Event
+```
+
+This avoids hidden marker-instance tracking in the user model. The rule is
+local: `=` copies a place and copyable markers; `<-` takes a place and moves its
+markers. Relevant markers can be copied, but every copied relevant place must
+eventually be used. Linear markers cannot be copied at all.
+
+Copying a relevant place does not count as using the source place. It creates a
+new place with the same relevant marker obligation shape. Taking a place does
+count as using the source place because the source is no longer live after the
+move.
+
+This should follow a Rust-like `copy`/`clone` distinction. Scalar values can be
+copyable and duplicable by default. Composite values such as structs and enums
+should not be implicitly copied unless their type explicitly supports copying.
+They may support an explicit duplication operation such as `dupe`, analogous to
+`clone`.
+
+`dupe` should not type check if the composite value, or any member reachable
+through it, carries a linear or affine marker. Relevant markers can be
+duplicated by `dupe`, but every resulting relevant place must still be used.
+
+Composite values need to surface the structural modes of their children. Since
+the modes live on marker families, this should probably be represented as a
+compiler-derived structural summary on the composite place rather than as a
+separate user-written annotation. Conceptually, a value with a relevant field
+gets a derived fact saying that the outer place contains a relevant obligation:
+
+```llg
+struct Packet {
+    id: u32,
+    payload: Message with Event,
+}
+
+let packet = make_packet();
+// packet has a compiler-derived summary for packet.payload with Event
+```
+
+This summary is about the current place state, not only the declared type. If a
+field is taken out, the old composite place is no longer the same full value and
+the summary must be updated or replaced:
+
+```llg
+let payload <- packet.payload;
+// packet no longer owns payload's Event obligation
+```
+
+The internal representation could be a real hidden marker such as
+`ContainsRelevant(packet, packet.payload)`, or a more diagnostic-oriented
+summary such as `DropBlocked(packet, packet.payload with Event)`. The important
+part is that users should not have to write these summaries by hand. They are
+derived during construction, field projection, field take, assignment, match
+destructuring, and other operations that change which places own which fields.
+
+Copy and drop checks can then consult the composite summary:
+
+- a composite may be copied only when every reachable part is copyable;
+- a composite may be implicitly dropped only when every reachable part is
+  droppable;
+- an affine field makes the containing place non-copyable;
+- a relevant field makes the containing place non-droppable;
+- a combination of affine and relevant reachable parts makes the containing
+  place behave linearly.
+
+This keeps marker modes as the primitive while still giving composite values
+the right structural behavior. It should also produce useful diagnostics:
+
+```text
+cannot drop `packet`
+`packet.payload` still carries relevant marker `Event`
+```
+
+Taking a value should be explicit:
+
+```llg
+let y <- x;
+```
+
+After this, `x` is no longer usable, and `y` owns the markers that were on
+`x`. A `match` expression that extracts a linear or relevant value from every
+branch should use the same take form:
+
+```llg
+let y <- match x {
+    A(v) => v,
+    B(v) => v,
+};
+```
+
+The copy form should reject the same program when the branch result has a
+non-copyable marker:
+
+```llg
+let y = match x {
+    A(v) => v,
+    B(v) => v,
+}; // rejected for linear branch results
+```
+
+Function parameters should also say whether they copy or take an argument.
+This is better than putting `consumes` in ordinary function signatures:
+
+```llg
+fn inspect(value: Message) -> u32;
+fn handle(take value: Message with Event) -> ();
+```
+
+A normal parameter receives a copied argument. Passing a relevant argument to a
+normal parameter therefore leaves the caller's place live and creates a
+relevant parameter place inside the callee. A normal parameter cannot receive a
+linear argument, because linear markers are not copyable. A `take` parameter
+moves the argument into the callee, so the caller's place is no longer live.
+The call site should not need an additional `take` marker. The function
+signature already says whether the argument is copied or taken:
+
+```llg
+handle(message);
+```
+
+If later code tries to use `message`, the compiler can point at the call that
+took it and suggest a fix, such as copying earlier when the marker mode allows
+it, or using an explicit duplication operation if relevant markers later gain
+one.
+
+Consuming a marker should be a trusted operation, not an ordinary parameter
+mode. It is the opposite of introducing a marker:
+
+```llg
+unsafe {
+    Event::mark(value);
+}
+
+unsafe {
+    Event::consume(value);
+}
+```
+
+`mark` asserts that the marker contract is true for the place. `consume`
+asserts that a relevant or linear obligation has been meaningfully discharged.
+Safe code can move, copy when allowed, and require markers, but introducing or
+discharging a marker contract remains explicit trusted code.
+
+This also means implicit drops must become visible to the marker checker. End
+of scope, assignment overwrite, `return`, `exit`, and `go` all drop or move
+places. Dropping a place with an unused relevant or linear marker is a compile
+error unless that marker has been taken out of the place or consumed.
+
+Open questions:
+
+- Should `let x = read_u32();` be allowed because the right-hand side is a fresh
+  value rather than a copy from an existing place? It probably should.
+- Should arithmetic operators copy or take their operands by default? The
+  operator signature or companion rule may need to say whether markers are
+  copied, moved to the result, or not accepted.
+- If `a + b` takes a relevant marker from `b` and produces `result`, does the
+  marker move to `result`, or does arithmetic count as using the event? Moving
+  to the result seems safer because dropping the result should still be
+  rejected.
