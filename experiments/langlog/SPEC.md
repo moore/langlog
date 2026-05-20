@@ -15,6 +15,7 @@ Compiler-facing docs:
 - [HIR.md](./HIR.md)
 - [SEMANTICS.md](./SEMANTICS.md)
 - [PROOF_IR.md](./PROOF_IR.md)
+- [MARKER_MODES.md](./MARKER_MODES.md)
 - [WASM.md](./WASM.md)
 - [TOOLS.md](./TOOLS.md)
 

@@ -1146,3 +1146,139 @@ obligation inside the operation. If an operation should move an obligation from
 input to output, it should take the input, consume the input marker, and mark
 the result. There is no special rule where `a + b` automatically makes the
 result inherit placeness or markers from `b`.
+
+## Places, values, markings, and modes
+
+We should use `place` as the central storage term and stop treating
+`destination` as a separate kind of thing. A destination is just a place in the
+role of receiving a value.
+
+A place is any source-level or IR-level storage identity that can hold a value
+and carry a current structural mode. Places include:
+
+- local variables;
+- function arguments;
+- fields and other projections of composite values;
+- enum payload positions;
+- pattern bindings;
+- return slots;
+- call or parameter slots;
+- SSA temporaries materialized by lowering;
+- the discard place `_`.
+
+Not every expression result is a place. A produced value can exist while
+evaluating an expression without having a place mode. It becomes associated
+with a mode when it flows into a place.
+
+Source places can be named or projected in source and read from later. IR
+places are compiler-visible storage identities introduced during lowering, such
+as a return slot or an SSA temporary that has to be copied, moved, discarded,
+projected, or diagnosed independently. `_` is a place, but it is not readable
+and does not bind a name. It receives a value and immediately checks whether
+the value's current mode permits discard.
+
+Places can contain other places. A struct place contains field places. An enum
+place contains the active variant's payload places. This matters because a
+field can carry a restrictive mode, and the containing place must surface that
+restriction when copied, moved, or discarded.
+
+A value is distinct from a place. A value is what an expression produces before
+or while it flows into a place. It has:
+
+- runtime payload or storage;
+- a concrete type, such as `u32`, `String`, or a struct type;
+- zero or more markings.
+
+The payload/storage should not necessarily imply heap allocation. It just means
+there is some runtime representation of the value.
+
+A marker type defines a marking shape and carries a mode obligation:
+
+```llg
+marker Event() : relevant;
+marker LessThan(left: place, right: place) : unrestricted;
+```
+
+A marking, or marker fact, is an instance of a marker type:
+
+```llg
+Event()
+LessThan(index, array.length)
+```
+
+The marker type carries the mode obligation. The marking is the proof fact. The
+mode obligation is not an independently mutable field on the marking.
+
+A place has a current structural mode:
+
+```text
+unrestricted | affine | relevant | linear
+```
+
+The place mode is checker state for the current SSA place/version. It controls
+copy and discard:
+
+- unrestricted: copy allowed, discard allowed;
+- affine: copy rejected, discard allowed;
+- relevant: copy allowed, discard rejected;
+- linear: copy rejected, discard rejected.
+
+The mode of a place is computed differently depending on how the value reaches
+the place:
+
+- If a value is copied from an existing place, the new place receives copies of
+  the source value's markings and a copy of the source place's current mode.
+- If a value is moved from an existing place, the new place receives the source
+  value's markings and current mode, and the source place becomes unavailable.
+- If a value comes from a non-place expression, the receiving place's mode is
+  computed by merging the mode obligations contributed by the value's markings
+  and by any moved subvalues.
+
+This mode merge is the high-water mark of structural restrictions. Affine
+contributes "cannot copy"; relevant contributes "cannot discard"; together
+they behave as linear. Unrestricted contributes no restriction.
+
+`mark`, `use`, and `consume` are value-transforming trusted operations rather
+than side effects on an existing place:
+
+```llg
+let marked = unsafe { Event::mark(value) };
+let used = unsafe { use(marked) };
+```
+
+`mark` adds a marking to the returned value. When that value is placed, the
+marker type's mode obligation contributes to the receiving place's mode. `use`
+and `consume` take a placed value and return a new produced value with updated
+mode state. They do not remove or mutate markings. `use` turns a relevant mode
+into unrestricted. `consume` turns a linear mode into affine.
+
+The hierarchy is:
+
+```text
+place
+  is a source-level or IR-level storage identity
+  has value state
+  has current structural mode
+  may contain subplaces
+
+value
+  has runtime payload/storage
+  has concrete type
+  has markings
+
+marking / marker fact
+  is an instance of a marker type
+  has a proof shape
+
+marker type
+  defines the marker shape
+  carries a mode obligation
+```
+
+With this terminology, every produced value must flow into a place. We do not
+need a separate destination category. Assignment, return, function argument
+passing, field storage, and `_` are all ways for a value to flow into a place.
+The compiler should only introduce an IR place for an intermediate expression
+result when that intermediate result has to be tracked as storage in its own
+right. Otherwise, intermediate expression results can remain values whose mode
+contribution is computed when they are finally placed.

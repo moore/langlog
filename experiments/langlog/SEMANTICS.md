@@ -12,6 +12,8 @@ This document complements, but does not replace, the other traceable specs:
   behavior.
 - [HIR.md](./HIR.md) defines compiler-facing semantic IR requirements.
 - [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific IR boundary.
+- [MARKER_MODES.md](./MARKER_MODES.md) defines structural marker modes for
+  copy, take, discard, and implicit-discard checks.
 - [WASM.md](./WASM.md) defines backend and host-ABI requirements.
 - [INTEGER_SAFETY.md](./INTEGER_SAFETY.md) gives non-normative rationale for
   the integer safety model.
