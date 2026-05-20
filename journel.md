@@ -1079,14 +1079,70 @@ of scope, assignment overwrite, `return`, `exit`, and `go` all drop or move
 places. Dropping a place with an unused relevant or linear marker is a compile
 error unless that marker has been taken out of the place or consumed.
 
-Open questions:
+Fresh expression results are not source-level places. When the right-hand side
+is a produced value rather than an existing place, `=` is allowed because there
+is no source place to copy from or take from:
 
-- Should `let x = read_u32();` be allowed because the right-hand side is a fresh
-  value rather than a copy from an existing place? It probably should.
-- Should arithmetic operators copy or take their operands by default? The
-  operator signature or companion rule may need to say whether markers are
-  copied, moved to the result, or not accepted.
-- If `a + b` takes a relevant marker from `b` and produces `result`, does the
-  marker move to `result`, or does arithmetic count as using the event? Moving
-  to the result seems safer because dropping the result should still be
-  rejected.
+```llg
+let x = read_u32();
+```
+
+Every `let` initializes a place. The copy and take rules apply when the
+right-hand side denotes an existing place:
+
+```llg
+let y = x;   // copy x
+let z <- x;  // take x
+```
+
+To avoid silently losing produced values, every produced value must have a
+destination. A destination can be an assignable place, a function argument, a
+returned value, a stored field, the discard place `_`, or an explicit marker
+`consume`. An assignable place includes a place being initialized and a place
+declared mutable that can receive a replacement value. A bare expression
+statement has no destination, so it is accepted only when it produces unit:
+
+```llg
+read_u32();  // rejected: unused non-unit value
+log("done"); // accepted if log returns ()
+```
+
+`_` is the discard place. It is a valid destination, but it does not bind a
+name and cannot be read from later. Sending a value to `_` is an explicit
+discard:
+
+```llg
+let _ = read_u32(); // discard a produced value
+let _ <- x;         // take x and discard it
+```
+
+`_` is also usable inside patterns, where it discards that component:
+
+```llg
+let Pair(keep, _) <- pair;
+```
+
+Discarding through `_` checks marker modes. It may discard unrestricted and
+affine values, but it rejects relevant and linear values unless their marker
+obligations have already been consumed or moved elsewhere.
+
+Arithmetic operators copy their operands. An expression such as:
+
+```llg
+let y = x + 7;
+```
+
+does not make `x + 7` a place and does not make the result inherit placeness
+from `x`. Instead, the place occurrence `x` is checked as an operand to `+`.
+Because `+` copies its operands, this expression is rejected if `x` has a
+linear or affine marker. If the operand checks succeed, the result of `x + 7`
+is a produced value and may flow to an ordinary destination such as `y`.
+
+Any marker relationship between copied operands and a produced result should be
+expressed by that function or operator's marker implementation, not inferred
+from the expression shape. If an operation preserves an input obligation, its
+marker implementation can mark the result while also consuming the copied input
+obligation inside the operation. If an operation should move an obligation from
+input to output, it should take the input, consume the input marker, and mark
+the result. There is no special rule where `a + b` automatically makes the
+result inherit placeness or markers from `b`.
