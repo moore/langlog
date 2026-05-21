@@ -467,26 +467,29 @@ Marker modes decide whether obligations can be copied, moved, or discarded.
 They do not by themselves prove that an obligation has been semantically
 fulfilled. That semantic boundary is represented by trusted marker operations.
 
-`mark`, `use`, and `consume` are trusted checker-state operations on places.
-They update the current proof and mode state for a live place/version. This is
-the right default for marker facts because many facts are learned by observing a
-boolean condition or an operation result and then marking an input place. For
-example, observing `index < array.length` should add `LessThan(index,
-array.length)` to the existing `index` place on the continuing path.
+`Marker::mark`, `Structural::use`, and `Structural::consume` are trusted
+checker-state operations on places. `Marker::mark` belongs to a marker family
+and introduces a marker fact. `Structural::use` and `Structural::consume`
+belong to the reserved `Structural` namespace and transform only place mode
+state. This is the right default for marker facts because many facts are
+learned by observing a boolean condition or an operation result and then
+marking an input place. For example, observing `index < array.length` should
+add `LessThan(index, array.length)` to the existing `index` place on the
+continuing path.
 
 These operations are side effects in the checker, not runtime mutation. They do
 not create a new runtime value, and they do not change older copied places. A
 copy made before a marker operation keeps the facts and mode it had at the copy
 point.
 
-`mark` introduces a marker fact into the checker and merges that marker type's
-base mode into the target place mode. `use` discharges the "must be used" part
-of a relevant place mode by changing the target place to unrestricted mode.
-`consume` discharges the "must be consumed" part of a linear place mode by
-changing the target place to affine mode. `use` and `consume` do not add,
-remove, or change marker facts. Keeping these operations trusted prevents
-ordinary safe code from simply asserting that important resource obligations
-were satisfied.
+`Marker::mark` introduces a marker fact into the checker and merges that marker
+type's base mode into the target place mode. `Structural::use` discharges the
+"must be used" part of a relevant place mode by changing the target place to
+unrestricted mode. `Structural::consume` discharges the "must be consumed" part
+of a linear place mode by changing the target place to affine mode.
+`Structural::use` and `Structural::consume` do not add, remove, or change
+marker facts. Keeping these operations trusted prevents ordinary safe code from
+simply asserting that important resource obligations were satisfied.
 
 - Introducing a marker fact MUST be a trusted operation.
 - Transforming a relevant place mode into unrestricted mode MUST be a trusted
@@ -496,6 +499,8 @@ were satisfied.
 - Safe code MAY move, copy when allowed, require markers, and pass marker facts
   through checked operations.
 - Safe code MUST NOT introduce or transform marker contracts directly.
+- `Structural` MUST be a reserved trusted namespace, not a marker family.
+- Marker families MUST NOT provide `use` or `consume` structural operations.
 - `Marker::mark(place)` MUST target an existing live place.
 - `Marker::mark(place)` asserts that the marker contract is true for the target
   place.
@@ -504,43 +509,48 @@ were satisfied.
 - `Marker::mark(place)` MUST merge the marker type's base structural mode into
   the target place's current mode.
 - `Marker::mark(place)` MUST NOT create a new runtime value.
-- `use(place)` asserts that a relevant obligation represented by the target
-  place mode has been meaningfully used.
-- `use(place)` MUST require the target place to have relevant current mode.
-- `use(place)` MUST update the target place's current mode to unrestricted.
-- `use(place)` MUST preserve the target place's marker facts.
-- `use(place)` MUST NOT add, remove, or change any marker fact.
-- `use(place)` MUST be rejected when the target place's current mode is not
-  `relevant`.
-- `consume(place)` asserts that a linear obligation represented by the target
-  place mode has been meaningfully consumed.
-- `consume(place)` MUST require the target place to have linear current mode.
-- `consume(place)` MUST update the target place's current mode to affine.
-- `consume(place)` MUST preserve the target place's marker facts.
-- `consume(place)` MUST NOT add, remove, or change any marker fact.
-- `consume(place)` MUST be rejected when the target place's current mode is not
-  `linear`.
-- After `use(place)` or `consume(place)`, the target place MUST still satisfy
-  ordinary requirements for all marker facts preserved on that place.
+- `Structural::use(place)` asserts that a relevant obligation represented by
+  the target place mode has been meaningfully used.
+- `Structural::use(place)` MUST require the target place to have relevant
+  current mode.
+- `Structural::use(place)` MUST update the target place's current mode to
+  unrestricted.
+- `Structural::use(place)` MUST preserve the target place's marker facts.
+- `Structural::use(place)` MUST NOT add, remove, or change any marker fact.
+- `Structural::use(place)` MUST be rejected when the target place's current
+  mode is not `relevant`.
+- `Structural::consume(place)` asserts that a linear obligation represented by
+  the target place mode has been meaningfully consumed.
+- `Structural::consume(place)` MUST require the target place to have linear
+  current mode.
+- `Structural::consume(place)` MUST update the target place's current mode to
+  affine.
+- `Structural::consume(place)` MUST preserve the target place's marker facts.
+- `Structural::consume(place)` MUST NOT add, remove, or change any marker fact.
+- `Structural::consume(place)` MUST be rejected when the target place's current
+  mode is not `linear`.
+- After `Structural::use(place)` or `Structural::consume(place)`, the target
+  place MUST still satisfy ordinary requirements for all marker facts preserved
+  on that place.
 - Trusted marker operations MUST NOT make older copied places inherit the
   updated facts or mode.
 
 ```llg
 unsafe { Event::mark(value); }
-unsafe { use(value); }
+unsafe { Structural::use(value); }
 
 unsafe { Resource::mark(resource); }
-unsafe { consume(resource); }
+unsafe { Structural::consume(resource); }
 ```
 
 - Marker implementations for functions and operators MAY use trusted marker
   operations to describe marker relationships between inputs and results.
 - A marker implementation that proves a fact about an input place SHOULD mark
   that input place directly.
-- A marker implementation that observes a relevant input obligation SHOULD use
-  that input place.
+- A marker implementation that observes a relevant input obligation SHOULD call
+  `Structural::use` on that input place.
 - A marker implementation that consumes a linear input obligation SHOULD
-  consume that input place.
+  call `Structural::consume` on that input place.
 - A marker implementation that creates a new obligation on a result SHOULD mark
   the result place, adding the marker fact and merging the marker type's base
   mode into the result place mode.

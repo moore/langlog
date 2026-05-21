@@ -41,6 +41,11 @@ This document complements, but does not replace, the main language spec:
 - Proof IR MUST distinguish ordinary marker facts, immutable marker facts, and
   diagnostic-only hints.
 - Diagnostic-only hints MUST NOT discharge marker obligations.
+- Trusted structural operations from the `Structural` namespace MUST remain
+  distinct from marker-family construction when they are retained in Proof IR
+  expressions.
+- `Structural::use` and `Structural::consume` MUST NOT create marker facts,
+  change marker fact requirements, or use `MarkerFactSource::UnsafeConstruction`.
 
 ## LLG-PIR-03 Marker Obligations And Fact Sources
 
@@ -55,6 +60,10 @@ This document complements, but does not replace, the main language spec:
 - Marker fact sources MUST include control-flow truth markers, successful
   `observe` statements, unsafe marker construction, companion-rule
   implications, assignment identity, and immutable marker carry-forward.
+- Unsafe marker construction MUST create marker facts only for marker-family
+  `Marker::mark` operations.
+- Trusted structural operations MUST lower distinctly and MUST NOT emit marker
+  facts.
 - Comparison-based control-flow tests MUST lower to truth-marker facts on the
   condition result place.
 - Direct checked `u32` arithmetic lowers to a successful payload place that can
@@ -257,6 +266,8 @@ The first HIR-to-Proof-IR lowering is expected to follow these rules:
 - Assignment lowers as marker identity propagation.
 - Mutation lowers as a new `PlaceId` for the new SSA version of the mutated
   value.
+- `Structural::use` and `Structural::consume` lower as structural trusted
+  operations for mode-state checking and do not lower as marker facts.
 - Function, task, state, field, and return boundaries lower with their
   declared structural place modes so copy, move, and discard checks can use the
   same receiving-mode compatibility rules as source checking.

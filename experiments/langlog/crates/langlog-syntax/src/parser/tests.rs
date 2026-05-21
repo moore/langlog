@@ -1,4 +1,7 @@
-use crate::ast::{BinaryOp, ExprKind, Item, MarkerArgKind, ObserveOp, PatternKind, Stmt, TypeKind};
+use crate::ast::{
+    BinaryOp, ExprKind, Item, MarkerArgKind, ObserveOp, PatternKind, Stmt, TrustedOperation,
+    TypeKind,
+};
 use crate::lexer::lex;
 use crate::parser::{parse_lexed, Parser};
 use crate::token::TokenTag;
@@ -111,6 +114,13 @@ fn keep(value: u32 with (Event, LessThan(value, values.length)), values: [u32; 4
         function.body.statements.as_slice(),
         [Stmt::UnsafeMarker(_), Stmt::Let(_)]
     ));
+    let Stmt::UnsafeMarker(stmt) = &function.body.statements[0] else {
+        panic!("expected unsafe marker statement");
+    };
+    assert!(matches!(
+        &stmt.construction.operation,
+        TrustedOperation::MarkerMark { marker } if marker.value == "Event"
+    ));
     let Stmt::Let(stmt) = &function.body.statements[1] else {
         panic!("expected marker let statement");
     };
@@ -118,6 +128,84 @@ fn keep(value: u32 with (Event, LessThan(value, values.length)), values: [u32; 4
         stmt.value.as_ref().map(|expr| &expr.kind),
         Some(ExprKind::UnsafeMarker(_))
     ));
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# Trusted structural mode operations MUST use the `Structural` namespace.
+#[test]
+fn requirement_llg_mark_03_parses_structural_operations() {
+    let parsed = parse_lexed(lex(
+        "markers.llg",
+        r#"
+fn main(event: u32, resource: u32) {
+    unsafe { Structural::use(event); }
+    let consumed: u32 = unsafe { Structural::consume(resource) };
+}
+"#,
+    ));
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let function = match &parsed.module.items[0] {
+        Item::Function(function) => function,
+        other => panic!("expected function item, got {other:?}"),
+    };
+    let Stmt::UnsafeMarker(stmt) = &function.body.statements[0] else {
+        panic!("expected structural statement");
+    };
+    assert!(matches!(
+        &stmt.construction.operation,
+        TrustedOperation::StructuralUse { namespace, method }
+            if namespace.value == "Structural" && method.value == "use"
+    ));
+    let Stmt::Let(stmt) = &function.body.statements[1] else {
+        panic!("expected structural let");
+    };
+    assert!(matches!(
+        stmt.value.as_ref().map(|expr| &expr.kind),
+        Some(ExprKind::UnsafeMarker(construction))
+            if matches!(
+                &construction.operation,
+                TrustedOperation::StructuralConsume { namespace, method }
+                    if namespace.value == "Structural" && method.value == "consume"
+            )
+    ));
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# Marker families MUST NOT provide structural operation names.
+#[test]
+fn requirement_llg_mark_03_rejects_wrong_trusted_operation_names() {
+    let marker_use = parse_lexed(lex(
+        "markers.llg",
+        "fn main(value: u32) { unsafe { Event::use(value); } }",
+    ));
+    assert!(marker_use.diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("unsafe marker construction must call `mark`")));
+
+    let marker_consume = parse_lexed(lex(
+        "markers.llg",
+        "fn main(value: u32) { unsafe { Event::consume(value); } }",
+    ));
+    assert!(marker_consume
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic
+            .message
+            .contains("unsafe marker construction must call `mark`")));
+
+    let structural_drop = parse_lexed(lex(
+        "markers.llg",
+        "fn main(value: u32) { unsafe { Structural::drop(value); } }",
+    ));
+    assert!(structural_drop
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic
+            .message
+            .contains("unknown structural operation `Structural::drop`")));
 }
 
 //= SPEC.md#llg-mark-03-marker-construction

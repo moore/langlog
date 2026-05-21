@@ -1,7 +1,7 @@
 use langlog_sema::{
     analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction,
     HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirParamTransfer, HirPlaceMode,
-    HirStmt, HirTask, HirType, HostBuiltin,
+    HirStmt, HirTask, HirTrustedOperation, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt, Task};
 use langlog_syntax::{parse, LabelStyle, Span};
@@ -1025,7 +1025,7 @@ fn keep(value: u32 with Trusted, bound: u32) -> u32 with Trusted {
 
 //= SPEC.md#llg-mark-04-builtin-marker-families
 //= type=test
-//# User marker family declarations MUST NOT duplicate another source marker family or shadow a builtin marker family.
+//# User marker family declarations MUST NOT duplicate another source marker family, shadow a builtin marker family, or use the reserved trusted namespace `Structural`.
 #[test]
 fn requirement_llg_mark_04_rejects_duplicate_and_builtin_shadowing_marker_families() {
     let checked = analyze_ok(
@@ -1033,6 +1033,7 @@ fn requirement_llg_mark_04_rejects_duplicate_and_builtin_shadowing_marker_famili
 marker Trusted();
 marker Trusted();
 marker Event();
+marker Structural();
 "#,
     );
 
@@ -1041,6 +1042,65 @@ marker Event();
     assert_diagnostic_message_contains(
         &checked,
         "marker family `Event` conflicts with a builtin marker family",
+    );
+    assert_diagnostic_message_contains(
+        &checked,
+        "marker family `Structural` conflicts with a builtin trusted namespace",
+    );
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# Trusted structural operations MUST lower distinctly from marker fact construction.
+#[test]
+fn requirement_llg_mark_03_lowers_structural_operations_distinctly() {
+    let checked = analyze_ok(
+        r#"
+fn main(event: u32, resource: u32) {
+    unsafe { Structural::use(event); }
+    let consumed: u32 = unsafe { Structural::consume(resource) };
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let main = hir_function(&checked, "main");
+    let HirStmt::UnsafeMarker(stmt) = &main.body.statements[0] else {
+        panic!("expected HIR unsafe marker statement");
+    };
+    assert_eq!(stmt.operation, HirTrustedOperation::StructuralUse);
+
+    let consumed = hir_let_stmt(&main.body, 1);
+    let value = consumed.value.as_ref().expect("expected initializer");
+    assert!(matches!(
+        &value.kind,
+        HirExprKind::UnsafeMarker { operation, .. }
+            if *operation == HirTrustedOperation::StructuralConsume
+    ));
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# `Structural::use` and `Structural::consume` MUST require one argument.
+#[test]
+fn requirement_llg_mark_03_checks_structural_operation_arity() {
+    let checked = analyze_ok(
+        r#"
+fn main(a: u32, b: u32) {
+    unsafe { Structural::use(); }
+    unsafe { Structural::consume(a, b); }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "wrong number of arguments for `Structural::use`: expected 1, found 0",
+    );
+    assert_diagnostic_message_contains(
+        &checked,
+        "wrong number of arguments for `Structural::consume`: expected 1, found 2",
     );
 }
 

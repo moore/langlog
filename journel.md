@@ -1067,12 +1067,13 @@ unsafe {
 }
 
 unsafe {
-    Event::consume(value);
+    Structural::consume(value);
 }
 ```
 
-`mark` asserts that the marker contract is true for the place. `consume`
-asserts that a relevant or linear obligation has been meaningfully discharged.
+`mark` asserts that the marker contract is true for the place. The
+`Structural` namespace contains trusted operations that discharge relevant or
+linear place-mode obligations.
 Safe code can move, copy when allowed, and require markers, but introducing or
 discharging a marker contract remains explicit trusted code.
 
@@ -1240,20 +1241,22 @@ This mode merge is the high-water mark of structural restrictions. Affine
 contributes "cannot copy"; relevant contributes "cannot discard"; together
 they behave as linear. Unrestricted contributes no restriction.
 
-`mark`, `use`, and `consume` are trusted checker-state operations on existing
-places. This lets observations and companion rules mark the inputs of an
-operation, not only the operation's result:
+`Marker::mark`, `Structural::use`, and `Structural::consume` are trusted
+checker-state operations on existing places. This lets observations and
+companion rules mark the inputs of an operation, not only the operation's
+result:
 
 ```llg
 unsafe { Event::mark(value); }
-unsafe { use(value); }
+unsafe { Structural::use(value); }
 ```
 
 `mark` adds a marking to the target place and merges the marker type's mode
-obligation into that place's current mode. `use` and `consume` update the
-target place's mode state. They do not remove or mutate markings. `use` turns a
-relevant mode into unrestricted. `consume` turns a linear mode into affine.
-These are checker effects, not runtime mutation.
+obligation into that place's current mode. `Structural::use` and
+`Structural::consume` update the target place's mode state. They do not remove
+or mutate markings. `Structural::use` turns a relevant mode into unrestricted.
+`Structural::consume` turns a linear mode into affine. These are checker
+effects, not runtime mutation.
 
 The hierarchy is:
 

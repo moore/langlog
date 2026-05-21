@@ -5,7 +5,7 @@ use crate::ast::{
     MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt, MarkerRuleParam,
     MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param,
     ParamTransfer, Pattern, PatternKind, PlaceMode, ReturnStmt, Stmt, Task, TaskField, TaskState,
-    Type, TypeKind, UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
+    TrustedOperation, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -1097,16 +1097,17 @@ impl<'a> Parser<'a> {
     ) -> Option<UnsafeMarkerConstruction> {
         let start = self.expect_tag(TokenTag::Unsafe, "expected `unsafe`")?;
         self.expect_tag(TokenTag::LBrace, "expected `{` after `unsafe`")?;
-        let marker = self.expect_identifier("expected a marker name")?;
-        self.expect_tag(TokenTag::PathSep, "expected `::` after marker name")?;
-        let method = self.expect_identifier("expected marker constructor name")?;
-        if method.value != "mark" {
-            self.diagnostics.push(
-                Diagnostic::error("unsafe marker construction must call `mark`")
-                    .with_label(Label::primary(method.span, "expected `mark` here")),
-            );
-        }
-        self.expect_tag(TokenTag::LParen, "expected `(` after `mark`")?;
+        let namespace = self.expect_identifier("expected a trusted operation namespace")?;
+        self.expect_tag(
+            TokenTag::PathSep,
+            "expected `::` after trusted operation namespace",
+        )?;
+        let method = self.expect_identifier("expected trusted operation name")?;
+        let operation = self.parse_trusted_operation(namespace, method);
+        self.expect_tag(
+            TokenTag::LParen,
+            "expected `(` after trusted operation name",
+        )?;
         let args = self.parse_call_arguments(TokenTag::RParen)?;
         self.expect_tag(TokenTag::RParen, "expected `)` after marker arguments")?;
         if require_inner_semicolon {
@@ -1120,7 +1121,46 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect_tag(TokenTag::RBrace, "expected `}` after unsafe marker")?;
         let span = start.span.cover(end.span).unwrap_or(start.span);
-        Some(UnsafeMarkerConstruction { span, marker, args })
+        Some(UnsafeMarkerConstruction {
+            span,
+            operation,
+            args,
+        })
+    }
+
+    fn parse_trusted_operation(
+        &mut self,
+        namespace: Spanned<String>,
+        method: Spanned<String>,
+    ) -> TrustedOperation {
+        if namespace.value == "Structural" {
+            return match method.value.as_str() {
+                "use" => TrustedOperation::StructuralUse { namespace, method },
+                "consume" => TrustedOperation::StructuralConsume { namespace, method },
+                _ => {
+                    self.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "unknown structural operation `Structural::{}`",
+                            method.value
+                        ))
+                        .with_label(Label::primary(
+                            method.span,
+                            "expected `use` or `consume` here",
+                        )),
+                    );
+                    TrustedOperation::StructuralUse { namespace, method }
+                }
+            };
+        }
+
+        if method.value != "mark" {
+            self.diagnostics.push(
+                Diagnostic::error("unsafe marker construction must call `mark`")
+                    .with_label(Label::primary(method.span, "expected `mark` here")),
+            );
+        }
+
+        TrustedOperation::MarkerMark { marker: namespace }
     }
 
     fn parse_observe_operator(&mut self) -> Option<ObserveOp> {

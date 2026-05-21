@@ -308,7 +308,7 @@ fn requirement_llg_syn_01_allows_omitted_return_types() {
 
 //= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A task item MUST use the form `task name(param: Type, ...) -> Type { ... }`.
+//# A task item MUST use the form `task name(param: PlaceType, ...) -> PlaceType { ... }`.
 #[test]
 fn requirement_llg_syn_01_parses_task_item_syntax() {
     let parsed =

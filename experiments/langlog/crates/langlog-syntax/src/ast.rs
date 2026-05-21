@@ -395,8 +395,23 @@ pub enum ExprKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsafeMarkerConstruction {
     pub span: Span,
-    pub marker: Spanned<String>,
+    pub operation: TrustedOperation,
     pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustedOperation {
+    MarkerMark {
+        marker: Spanned<String>,
+    },
+    StructuralUse {
+        namespace: Spanned<String>,
+        method: Spanned<String>,
+    },
+    StructuralConsume {
+        namespace: Spanned<String>,
+        method: Spanned<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

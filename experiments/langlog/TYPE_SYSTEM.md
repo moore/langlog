@@ -500,7 +500,7 @@ both restrictions together behave as `linear`.
 let event = read_event();
 unsafe { Event::mark(event); }
 let copy = event;
-unsafe { use(event); }
+unsafe { Structural::use(event); }
 
 go loop(); // rejected if copy is still live with relevant mode
 ```
@@ -511,7 +511,7 @@ existed at the copy point.
 ```llg
 let event = read_event();
 unsafe { Event::mark(event); }
-unsafe { use(event); }
+unsafe { Structural::use(event); }
 let copy = event; // copy receives unrestricted mode
 ```
 
@@ -647,25 +647,29 @@ copies.
 - `Marker::mark(place)` MUST merge the marker type's base mode obligation into
   the target place's current mode.
 - `Marker::mark(place)` MUST NOT create a new runtime value.
-- `use(place)` MUST require the target place to have relevant current mode.
-- `use(place)` MUST update the target place's current mode to unrestricted.
-- `consume(place)` MUST require the target place to have linear current mode.
-- `consume(place)` MUST update the target place's current mode to affine.
-- `use(place)` and `consume(place)` MUST preserve marker facts on the target
-  place.
-- `use(place)` and `consume(place)` MUST NOT add, remove, or change marker
-  facts.
+- `Structural::use(place)` MUST require the target place to have relevant
+  current mode.
+- `Structural::use(place)` MUST update the target place's current mode to
+  unrestricted.
+- `Structural::consume(place)` MUST require the target place to have linear
+  current mode.
+- `Structural::consume(place)` MUST update the target place's current mode to
+  affine.
+- `Structural::use(place)` and `Structural::consume(place)` MUST preserve
+  marker facts on the target place.
+- `Structural::use(place)` and `Structural::consume(place)` MUST NOT add,
+  remove, or change marker facts.
 - Trusted marker operations MUST NOT make older copied places inherit the
   updated facts or mode.
 
 ```llg
 let event = read_event();
 unsafe { Event::mark(event); }
-unsafe { use(event); }
+unsafe { Structural::use(event); }
 
 let resource = open_resource();
 unsafe { Resource::mark(resource); }
-unsafe { consume(resource); }
+unsafe { Structural::consume(resource); }
 ```
 
 The marker facts remain facts. The trusted operations change the checker state
@@ -742,7 +746,7 @@ let packet = make_packet();
 go loop(); // rejected if packet.payload still has relevant mode
 
 let payload <- packet.payload;
-unsafe { use(payload); }
+unsafe { Structural::use(payload); }
 ```
 
 The outer `packet` place is blocked because it owns a subplace with relevant
@@ -844,7 +848,7 @@ implicit discard checks.
 state read() {
     let event = read_event();
     unsafe { Event::mark(event); }
-    unsafe { use(event); }
+    unsafe { Structural::use(event); }
     go read();
 }
 ```

@@ -360,8 +360,20 @@ in its return type.
 - Safe code MAY require marker facts and pass marker facts through checked
   operations.
 - Code that creates a marker fact MUST do so inside an `unsafe` block.
-- Code that transforms a structural marker mode with `use` or `consume` MUST
-  do so inside an `unsafe` block.
+- Code that transforms a structural marker mode with `Structural::use` or
+  `Structural::consume` MUST do so inside an `unsafe` block.
+- Trusted structural mode operations MUST use the `Structural` namespace.
+- Trusted structural operations MUST lower distinctly from marker fact
+  construction.
+- `Structural::use(place)` MUST be the trusted operation that transforms a
+  relevant place mode to unrestricted.
+- `Structural::consume(place)` MUST be the trusted operation that transforms a
+  linear place mode to affine.
+- `Structural::use` and `Structural::consume` MUST require one argument.
+- `Structural` MUST be reserved as a builtin trusted namespace, not a marker
+  family.
+- Marker families MUST NOT provide structural operation names such as `use` or
+  `consume`.
 - Marker constructor syntax outside `unsafe` MUST be rejected with a syntax
   diagnostic.
 - Unsafe marker construction MUST assert that the marker contract is true for
@@ -374,6 +386,7 @@ For example:
 ```llg
 unsafe {
     Event::mark(value);
+    Structural::use(value);
 }
 ```
 
@@ -401,8 +414,9 @@ User marker family parameter names MUST be unique and every parameter MUST have
 type `place`.
 User marker family names MUST live in a marker namespace separate from
 functions and tasks.
-User marker family declarations MUST NOT duplicate another source marker family
-or shadow a builtin marker family.
+User marker family declarations MUST NOT duplicate another source marker family,
+shadow a builtin marker family, or use the reserved trusted namespace
+`Structural`.
 User marker families MAY appear in marker-qualified types, unsafe marker
 construction, and companion rule refinements and implications.
 In marker rule bodies, a user marker family MUST be written with its full

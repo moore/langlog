@@ -42,6 +42,11 @@ This document complements, but does not replace, the main language spec:
   behavior separately from structural place mode and concrete type.
 - HIR task fields MUST record structural place modes separately from concrete
   types.
+- HIR unsafe trusted-operation nodes MUST distinguish marker-family
+  `Marker::mark` construction from `Structural::use` and
+  `Structural::consume`.
+- `Structural::use` and `Structural::consume` MUST lower as trusted structural
+  operations, not as marker facts or marker-family calls.
 
 ## LLG-HIR-04 Normalization Boundary
 
@@ -231,6 +236,7 @@ ExprKind::Unary { op: UnaryOp, expr: Box<Expr> }
 ExprKind::Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> }
 ExprKind::Call { callee: Box<Expr>, args: Vec<Expr> }
 ExprKind::Index { target: Box<Expr>, index: Box<Expr> }
+ExprKind::UnsafeMarker { operation: TrustedOperation, args: Vec<Expr> }
 ```
 
 This is intentionally not final. It is the smallest semantic IR that makes
@@ -273,6 +279,10 @@ The first HIR elaboration is expected to follow these rules:
 - A surface parameter or local binding lowers to one HIR binding with a stable
   `BindingId`, mutability flag, concrete type, place mode when known, parameter
   transfer behavior when applicable, and declaration span.
+- Unsafe trusted operations lower with an explicit operation kind:
+  marker-family `mark` operations retain their marker family, while
+  `Structural::use` and `Structural::consume` retain their structural
+  operation identity.
 - A surface name expression lowers to either `ExprKind::Binding` or
   `ExprKind::Item` depending on semantic resolution.
 - A block lowers to a list of HIR statements plus an optional trailing result

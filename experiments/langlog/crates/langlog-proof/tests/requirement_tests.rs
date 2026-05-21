@@ -2,8 +2,7 @@ use langlog_proof::{
     check, CheckedProof, MarkerFactSource, MarkerPattern, ObligationSource, ProofBlock, ProofEntry,
     ProofExpr, ProofExprKind, ProofMarkerRuleStmt, ProofMarkerTemplateArg, ProofProgram,
 };
-use langlog_sema::HirMarkerFamily;
-use langlog_sema::{analyze, CheckedProgram, HirType};
+use langlog_sema::{analyze, CheckedProgram, HirMarkerFamily, HirTrustedOperation, HirType};
 use langlog_syntax::{parse, LabelStyle, Severity};
 
 fn check_proof(source: &str) -> (CheckedProgram, CheckedProof) {
@@ -210,6 +209,49 @@ fn assert_expr_well_formed(expr: &ProofExpr, proof: &CheckedProof) {
         ProofExprKind::UnsafeMarker { args, .. } => {
             for arg in args {
                 assert_expr_well_formed(arg, proof);
+            }
+        }
+    }
+}
+
+fn collect_trusted_operations<'a>(
+    expr: &'a ProofExpr,
+    operations: &mut Vec<&'a HirTrustedOperation>,
+) {
+    match &expr.kind {
+        ProofExprKind::Binding(_)
+        | ProofExprKind::Item(_)
+        | ProofExprKind::HostBuiltin(_)
+        | ProofExprKind::Int(_)
+        | ProofExprKind::Bool(_) => {}
+        ProofExprKind::Tuple(elements) | ProofExprKind::Array(elements) => {
+            for element in elements {
+                collect_trusted_operations(element, operations);
+            }
+        }
+        ProofExprKind::Unary { expr } => collect_trusted_operations(expr, operations),
+        ProofExprKind::Binary { left, right, .. } => {
+            collect_trusted_operations(left, operations);
+            collect_trusted_operations(right, operations);
+        }
+        ProofExprKind::Recover { result, fallback } => {
+            collect_trusted_operations(result, operations);
+            collect_trusted_operations(fallback, operations);
+        }
+        ProofExprKind::Call { callee, args } => {
+            collect_trusted_operations(callee, operations);
+            for arg in args {
+                collect_trusted_operations(arg, operations);
+            }
+        }
+        ProofExprKind::Index { target, index } => {
+            collect_trusted_operations(target, operations);
+            collect_trusted_operations(index, operations);
+        }
+        ProofExprKind::UnsafeMarker { operation, args } => {
+            operations.push(operation);
+            for arg in args {
+                collect_trusted_operations(arg, operations);
             }
         }
     }
@@ -1727,6 +1769,42 @@ fn main() {
         .iter()
         .any(|fact| fact.source == MarkerFactSource::UnsafeConstruction
             && matches!(fact.marker, MarkerPattern::Event)));
+}
+
+//= PROOF_IR.md#llg-pir-03-marker-obligations-and-fact-sources
+//= type=test
+//# Trusted structural operations MUST lower distinctly and MUST NOT emit marker facts.
+#[test]
+fn requirement_llg_pir_03_structural_operations_do_not_emit_marker_facts() {
+    let (_, proof) = check_ok(
+        r#"
+fn sink(value: u32) {}
+
+fn main(value: u32) {
+    sink(unsafe { Structural::use(value) });
+    sink(unsafe { Structural::consume(value) });
+}
+"#,
+    );
+
+    assert!(!proof
+        .facts
+        .iter()
+        .any(|fact| fact.source == MarkerFactSource::UnsafeConstruction));
+
+    let mut operations = Vec::new();
+    for entry in proof_entries(&proof) {
+        if let ProofEntry::Eval { expr, .. } = entry {
+            collect_trusted_operations(expr, &mut operations);
+        }
+    }
+
+    assert!(operations
+        .iter()
+        .any(|operation| matches!(operation, HirTrustedOperation::StructuralUse)));
+    assert!(operations
+        .iter()
+        .any(|operation| matches!(operation, HirTrustedOperation::StructuralConsume)));
 }
 
 //= SPEC.md#llg-proof-01-marker-required-operations

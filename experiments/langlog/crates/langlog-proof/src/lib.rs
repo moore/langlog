@@ -4,7 +4,7 @@ use langlog_sema::{
     CheckedProgram, HirBinding, HirBindingId, HirBlock, HirElseBranch, HirExpr, HirExprKind,
     HirFunction, HirItemId, HirMarkerFamily, HirMarkerPlace, HirMarkerRequirement, HirMarkerRule,
     HirMarkerRuleStmt, HirMarkerTemplateArg, HirMatchBody, HirPattern, HirPatternKind, HirProgram,
-    HirStateId, HirStmt, HirTask, HirTaskState, HirType, HostBuiltin,
+    HirStateId, HirStmt, HirTask, HirTaskState, HirTrustedOperation, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{BinaryOp, ObserveOp};
 use langlog_syntax::{ByteOffset, Diagnostic, FileId, Label, Severity, Span};
@@ -369,7 +369,7 @@ pub enum ProofExprKind {
         index: Box<ProofExpr>,
     },
     UnsafeMarker {
-        marker: HirMarkerFamily,
+        operation: HirTrustedOperation,
         args: Vec<ProofExpr>,
     },
 }
@@ -851,7 +851,7 @@ impl ProofLowerer {
                     .iter()
                     .filter_map(|arg| self.lower_expr(arg, entries))
                     .collect();
-                if let Some(fact) = self.unsafe_marker_fact(&stmt.marker, &args, stmt.span) {
+                if let Some(fact) = self.trusted_operation_fact(&stmt.operation, &args, stmt.span) {
                     entries.push(ProofEntry::Fact {
                         span: stmt.span,
                         fact,
@@ -1011,13 +1011,13 @@ impl ProofLowerer {
                     place,
                 )
             }
-            HirExprKind::UnsafeMarker { marker, args } => {
+            HirExprKind::UnsafeMarker { operation, args } => {
                 let args = args
                     .iter()
                     .filter_map(|arg| self.lower_expr(arg, entries))
                     .collect::<Vec<_>>();
                 let place = args.first()?.place;
-                if let Some(fact) = self.unsafe_marker_fact(marker, &args, expr.span) {
+                if let Some(fact) = self.trusted_operation_fact(operation, &args, expr.span) {
                     entries.push(ProofEntry::Fact {
                         span: expr.span,
                         fact,
@@ -1025,7 +1025,7 @@ impl ProofLowerer {
                 }
                 (
                     ProofExprKind::UnsafeMarker {
-                        marker: marker.clone(),
+                        operation: operation.clone(),
                         args,
                     },
                     place,
@@ -1307,6 +1307,20 @@ impl ProofLowerer {
             source: MarkerFactSource::UnsafeConstruction,
             origin_span,
         })
+    }
+
+    fn trusted_operation_fact(
+        &mut self,
+        operation: &HirTrustedOperation,
+        args: &[ProofExpr],
+        origin_span: Span,
+    ) -> Option<MarkerFact> {
+        match operation {
+            HirTrustedOperation::MarkerMark { marker } => {
+                self.unsafe_marker_fact(marker, args, origin_span)
+            }
+            HirTrustedOperation::StructuralUse | HirTrustedOperation::StructuralConsume => None,
+        }
     }
 
     fn marker_pattern(
@@ -3434,8 +3448,12 @@ fn task_statement_continuations(
             out
         }
         HirStmt::UnsafeMarker(stmt) => {
-            let has_fresh_event = stmt.marker == HirMarkerFamily::Event
-                || stmt.args.iter().any(hir_expr_direct_fresh_event);
+            let has_fresh_event = matches!(
+                stmt.operation,
+                HirTrustedOperation::MarkerMark {
+                    marker: HirMarkerFamily::Event
+                }
+            ) || stmt.args.iter().any(hir_expr_direct_fresh_event);
             let mut paths = incoming;
             if has_fresh_event {
                 paths.iter_mut().for_each(|path| *path = true);
@@ -3477,8 +3495,13 @@ fn hir_expr_direct_fresh_event(expr: &HirExpr) -> bool {
             matches!(callee.kind, HirExprKind::HostBuiltin(HostBuiltin::ReadU32))
                 || args.iter().any(hir_expr_direct_fresh_event)
         }
-        HirExprKind::UnsafeMarker { marker, args } => {
-            *marker == HirMarkerFamily::Event || args.iter().any(hir_expr_direct_fresh_event)
+        HirExprKind::UnsafeMarker { operation, args } => {
+            matches!(
+                operation,
+                HirTrustedOperation::MarkerMark {
+                    marker: HirMarkerFamily::Event
+                }
+            ) || args.iter().any(hir_expr_direct_fresh_event)
         }
         HirExprKind::Tuple(elements) | HirExprKind::Array(elements) => {
             elements.iter().any(hir_expr_direct_fresh_event)
@@ -3550,8 +3573,12 @@ fn task_statement_has_direct_fresh_event(statement: &HirStmt) -> bool {
                 || task_block_has_direct_fresh_event(&stmt.else_block)
         }
         HirStmt::UnsafeMarker(stmt) => {
-            stmt.marker == HirMarkerFamily::Event
-                || stmt.args.iter().any(hir_expr_direct_fresh_event)
+            matches!(
+                stmt.operation,
+                HirTrustedOperation::MarkerMark {
+                    marker: HirMarkerFamily::Event
+                }
+            ) || stmt.args.iter().any(hir_expr_direct_fresh_event)
         }
     }
 }

@@ -4,7 +4,7 @@ use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MarkerAnnotation,
     MarkerArg, MarkerArgKind, MarkerFamily, MarkerImplicationStmt, MarkerRefinement, MarkerRule,
     MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, ParamTransfer, Pattern, PatternKind,
-    PlaceMode, Stmt, Task, Type, TypeKind, UnaryOp,
+    PlaceMode, Stmt, Task, TrustedOperation, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -1240,7 +1240,9 @@ impl<'a> TypeChecker<'a> {
             let Item::MarkerFamily(family) = item else {
                 continue;
             };
-            if is_builtin_marker_family_name(&family.name.value) {
+            if family.name.value == "Structural" {
+                self.report_structural_namespace_shadow(family.name.span);
+            } else if is_builtin_marker_family_name(&family.name.value) {
                 self.report_builtin_marker_family_shadow(
                     family.name.span,
                     family.name.value.as_str(),
@@ -1747,8 +1749,7 @@ impl<'a> TypeChecker<'a> {
             }
             Stmt::UnsafeMarker(stmt) => {
                 self.check_unsafe_marker_construction(
-                    stmt.construction.marker.span,
-                    stmt.construction.marker.value.as_str(),
+                    &stmt.construction.operation,
                     &stmt.construction.args,
                     scopes,
                 );
@@ -1891,8 +1892,7 @@ impl<'a> TypeChecker<'a> {
                 SemanticType::Bool
             }
             ExprKind::UnsafeMarker(construction) => self.check_unsafe_marker_construction(
-                construction.marker.span,
-                construction.marker.value.as_str(),
+                &construction.operation,
                 &construction.args,
                 scopes,
             ),
@@ -2005,11 +2005,16 @@ impl<'a> TypeChecker<'a> {
 
     fn check_unsafe_marker_construction(
         &mut self,
-        marker_span: Span,
-        marker_name: &str,
+        operation: &TrustedOperation,
         args: &[Expr],
         scopes: &mut TypeScopeStack,
     ) -> SemanticType {
+        let TrustedOperation::MarkerMark { marker } = operation else {
+            return self.check_structural_operation(operation, args, scopes);
+        };
+
+        let marker_span = marker.span;
+        let marker_name = marker.value.as_str();
         let Some(family) = self.resolve_marker_family(marker_name) else {
             self.report_unknown_marker(marker_span, marker_name);
             for arg in args {
@@ -2021,6 +2026,37 @@ impl<'a> TypeChecker<'a> {
         let expected = self.unsafe_marker_arity(&family);
         if args.len() != expected {
             self.report_marker_constructor_arity(marker_span, marker_name, expected, args.len());
+        }
+
+        let mut arg_types = Vec::new();
+        for arg in args {
+            arg_types.push(self.check_expr(arg, scopes));
+        }
+
+        arg_types
+            .into_iter()
+            .next()
+            .unwrap_or(SemanticType::Unknown)
+    }
+
+    fn check_structural_operation(
+        &mut self,
+        operation: &TrustedOperation,
+        args: &[Expr],
+        scopes: &mut TypeScopeStack,
+    ) -> SemanticType {
+        let (span, name) = match operation {
+            TrustedOperation::StructuralUse { method, .. } => (method.span, "Structural::use"),
+            TrustedOperation::StructuralConsume { method, .. } => {
+                (method.span, "Structural::consume")
+            }
+            TrustedOperation::MarkerMark { .. } => {
+                unreachable!("marker operations are checked separately")
+            }
+        };
+
+        if args.len() != 1 {
+            self.report_structural_operation_arity(span, name, args.len());
         }
 
         let mut arg_types = Vec::new();
@@ -2901,6 +2937,18 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
+    fn report_structural_namespace_shadow(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                "marker family `Structural` conflicts with a builtin trusted namespace",
+            )
+            .with_label(Label::primary(
+                span,
+                "choose a marker family name that is not reserved",
+            )),
+        );
+    }
+
     fn report_duplicate_marker_family_param(&mut self, span: Span, previous: Span, name: &str) {
         self.diagnostics.push(
             Diagnostic::error(format!("duplicate marker family parameter `{name}`"))
@@ -2957,6 +3005,15 @@ impl<'a> TypeChecker<'a> {
                     previous,
                     "first marker rule declared here",
                 )),
+        );
+    }
+
+    fn report_structural_operation_arity(&mut self, span: Span, name: &str, found: usize) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "wrong number of arguments for `{name}`: expected 1, found {found}"
+            ))
+            .with_label(Label::primary(span, "structural operation arity mismatch")),
         );
     }
 

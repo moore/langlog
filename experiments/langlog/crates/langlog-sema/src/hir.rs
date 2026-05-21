@@ -4,7 +4,7 @@ use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MarkerAnnotation, MarkerArg,
     MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt, MarkerRefinement,
     MarkerRule, MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, ParamTransfer, Pattern,
-    PatternKind, PlaceMode, Stmt, Task, Type, TypeKind, UnaryOp,
+    PatternKind, PlaceMode, Stmt, Task, TrustedOperation, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -336,9 +336,16 @@ pub struct HirObserveStmt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirUnsafeMarkerStmt {
-    pub marker: HirMarkerFamily,
+    pub operation: HirTrustedOperation,
     pub args: Vec<HirExpr>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirTrustedOperation {
+    MarkerMark { marker: HirMarkerFamily },
+    StructuralUse,
+    StructuralConsume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,7 +402,7 @@ pub enum HirExprKind {
         index: Box<HirExpr>,
     },
     UnsafeMarker {
-        marker: HirMarkerFamily,
+        operation: HirTrustedOperation,
         args: Vec<HirExpr>,
     },
 }
@@ -909,9 +916,9 @@ impl<'a> HirLowerer<'a> {
                 span: stmt.span,
             }),
             Stmt::UnsafeMarker(stmt) => HirStmt::UnsafeMarker(HirUnsafeMarkerStmt {
-                marker: self
-                    .lower_marker_family(&stmt.construction.marker.value)
-                    .expect("checked marker statements must name a known marker"),
+                operation: self
+                    .lower_trusted_operation(&stmt.construction.operation)
+                    .expect("checked trusted operations must be valid"),
                 args: stmt
                     .construction
                     .args
@@ -1085,9 +1092,9 @@ impl<'a> HirLowerer<'a> {
             },
             ExprKind::UnsafeMarker(construction) => HirExpr {
                 kind: HirExprKind::UnsafeMarker {
-                    marker: self
-                        .lower_marker_family(&construction.marker.value)
-                        .expect("checked marker expressions must name a known marker"),
+                    operation: self
+                        .lower_trusted_operation(&construction.operation)
+                        .expect("checked trusted operations must be valid"),
                     args: construction
                         .args
                         .iter()
@@ -1196,6 +1203,18 @@ impl<'a> HirLowerer<'a> {
                 .contains_key(name)
                 .then(|| HirMarkerFamily::User(name.to_owned()))
         })
+    }
+
+    fn lower_trusted_operation(&self, operation: &TrustedOperation) -> Option<HirTrustedOperation> {
+        match operation {
+            TrustedOperation::MarkerMark { marker } => self
+                .lower_marker_family(&marker.value)
+                .map(|marker| HirTrustedOperation::MarkerMark { marker }),
+            TrustedOperation::StructuralUse { .. } => Some(HirTrustedOperation::StructuralUse),
+            TrustedOperation::StructuralConsume { .. } => {
+                Some(HirTrustedOperation::StructuralConsume)
+            }
+        }
     }
 
     fn marker_family_arity(&self, family: &HirMarkerFamily) -> Option<usize> {
