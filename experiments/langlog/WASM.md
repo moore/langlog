@@ -122,5 +122,5 @@ This document complements, but does not replace, the main language spec:
 - The playground example programs MUST include a runnable finite task-state
   cycle example.
 - The playground example programs MUST include a task `go` transition example.
-- The playground example programs MUST include marker-qualified value and user
-  marker-family examples.
+- The playground example programs MUST include marker-qualified value, user
+  marker-family, and structural-mode examples.

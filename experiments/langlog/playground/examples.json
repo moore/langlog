@@ -1,94 +1,98 @@
 [
   {
     "name": "01 - Task Main and Exit",
-    "source": "// Tasks run through state start and terminate with exit.\ntask main() -> u32 {\n    state start() {\n        exit 42;\n    }\n}\n"
+    "source": "// A runnable program starts at task main and leaves through exit.\ntask main() -> u32 {\n    state start() {\n        exit 42;\n    }\n}\n"
   },
   {
-    "name": "02 - Task State Loop",
-    "source": "// go transitions replace primitive forever loops.\ntask main() -> u32 {\n    state start() {\n        go count(0);\n    }\n\n    state count(value: u32) {\n        if value == 42 {\n            exit value;\n        }\n\n        let pulse: u32 with Event = unsafe { Event::mark(value) };\n        go count(pulse + 1 or(err) 0);\n    }\n}\n"
-  },
-  {
-    "name": "03 - Task Go",
-    "source": "// go transfers control to another state in the same task.\ntask main() -> u32 {\n    state start() {\n        go worker(42);\n    }\n\n    state worker(value: u32) {\n        exit value;\n    }\n}\n"
-  },
-  {
-    "name": "04 - Cyclic Task Countdown",
-    "source": "// Cyclic go transitions are bounded by the dispatcher state bank.\ntask main() -> u32 {\n    state start() {\n        go count(3);\n    }\n\n    state count(value: u32) {\n        if value == 0 {\n            exit 42;\n        } else {\n            let pulse: u32 with Event = unsafe { Event::mark(value) };\n            go count(pulse - 1 or(err) 0);\n        }\n    }\n}\n"
-  },
-  {
-    "name": "05 - Go Argument State",
-    "source": "// go arguments are evaluated before active state arguments are replaced.\ntask main() -> u32 {\n    state start() {\n        go swap(7, 42);\n    }\n\n    state swap(first: u32, second: u32) {\n        if first == 42 {\n            exit second;\n        } else {\n            let fresh_first: u32 with Event = unsafe { Event::mark(first) };\n            go swap(second, fresh_first);\n        }\n    }\n}\n"
-  },
-  {
-    "name": "06 - Functions",
+    "name": "02 - Functions",
     "source": "// Functions are total helpers that tasks can call.\nfn scale_then_add(left: u32, right: u32) -> u32 {\n    left * right or(err) 0\n}\n\ntask main() -> u32 {\n    state start() {\n        exit scale_then_add(6, 7);\n    }\n}\n"
   },
   {
-    "name": "07 - Let, Mut, Blocks",
-    "source": "// let introduces bindings. mut allows assignment.\ntask main() -> u32 {\n    state start() {\n        let start: u32 = 10;\n        let mut total: u32 = start;\n\n        total = {\n            let bonus: u32 = 32;\n            total + bonus or(err) 0\n        };\n\n        exit total;\n    }\n}\n"
+    "name": "03 - Let, Mut, Blocks",
+    "source": "// let introduces bindings, mut allows assignment, and blocks produce values.\ntask main() -> u32 {\n    state start() {\n        let start: u32 = 10;\n        let mut total: u32 = start;\n\n        total = {\n            let bonus: u32 = 32;\n            total + bonus or(err) 0\n        };\n\n        exit total;\n    }\n}\n"
   },
   {
-    "name": "08 - Input and Output",
-    "source": "// read_u32 consumes one token from stdin.\ntask main() -> u32 {\n    state start() {\n        let value: u32 = read_u32();\n        let doubled: u32 = value * 2 or(err) 0;\n\n        print_u32(doubled);\n        print_newline();\n        print_bool(doubled > value);\n        print_newline();\n\n        exit doubled;\n    }\n}\n"
+    "name": "04 - Input and Output",
+    "source": "// read_u32 consumes one token from the playground stdin field.\ntask main() -> u32 {\n    state start() {\n        let value: u32 = read_u32();\n        let doubled: u32 = value * 2 or(err) 0;\n\n        print_u32(doubled);\n        print_newline();\n        print_bool(doubled > value);\n        print_newline();\n\n        exit doubled;\n    }\n}\n"
   },
   {
-    "name": "09 - If and Logic",
-    "source": "// if is a statement. Conditions are bool values.\ntask main() -> u32 {\n    state start() {\n        let value: u32 = 42;\n\n        if (value > 10 && value < 100) || value == 7 {\n            exit value;\n        }\n\n        exit 0;\n    }\n}\n"
+    "name": "05 - If and Logic",
+    "source": "// if is a statement and conditions are bool values.\ntask main() -> u32 {\n    state start() {\n        let value: u32 = 42;\n\n        if (value > 10 && value < 100) || value == 7 {\n            exit value;\n        }\n\n        exit 0;\n    }\n}\n"
   },
   {
-    "name": "10 - Match Patterns",
+    "name": "06 - Match Patterns",
     "source": "// match supports literal, wildcard, and binding patterns.\nfn choose(flag: bool, code: u32) -> u32 {\n    let mut value: u32 = 0;\n\n    match flag {\n        true => { value = 10; },\n        false => { value = 20; }\n    }\n\n    match code {\n        0 => { value = value + 1 or(err) 0; },\n        7 => { value = value + 32 or(err) 0; },\n        _ => { value = value + code or(err) 0; }\n    }\n\n    value\n}\n\ntask main() -> u32 {\n    state start() {\n        exit choose(true, 7);\n    }\n}\n"
   },
   {
-    "name": "11 - Checked Arithmetic",
+    "name": "07 - Checked Arithmetic",
     "source": "// Ordinary u32 arithmetic returns Result<u32, ArithmeticError>.\ntask main() -> u32 {\n    state start() {\n        let added: u32 = 40 + 2 or(err) 0;\n        let subtracted: u32 = 50 - 8 or(err) 0;\n        let multiplied: u32 = 6 * 7 or(err) 0;\n        let divided: u32 = 84 / 2 or(err) 0;\n        let remainder: u32 = 85 % 43 or(err) 0;\n        let mut failures: u32 = 0;\n\n        4294967295 + 1 or(err) {\n            if err == arithmetic_overflow() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        0 - 1 or(err) {\n            if err == arithmetic_underflow() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        1 / 0 or(err) {\n            if err == divide_by_zero() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        1 % 0 or(err) {\n            if err == remainder_by_zero() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        if added == 42 && subtracted == 42 && multiplied == 42 && divided == 42 && remainder == 42 && failures == 4 {\n            exit 42;\n        }\n\n        exit 0;\n    }\n}\n"
   },
   {
-    "name": "12 - Option Recovery",
+    "name": "08 - Option Recovery",
     "source": "// Option<T> is either some(value) or none().\ntask main() -> u32 {\n    state start() {\n        let present: Option<u32> = some(40);\n        let missing: Option<u32> = none();\n        let left: u32 = present or 0;\n        let right: u32 = missing or 2;\n        exit left + right or(err) 0;\n    }\n}\n"
   },
   {
-    "name": "13 - Result Recovery",
+    "name": "09 - Result Recovery",
     "source": "// Result recovery can bind the error payload.\nfn parse_like(flag: bool) -> Result<u32, bool> {\n    if flag {\n        return ok(40);\n    }\n\n    err(true)\n}\n\ntask main() -> u32 {\n    state start() {\n        let recovered: u32 = parse_like(false) or(failed) {\n            if failed {\n                exit 42;\n            }\n            0\n        };\n\n        exit recovered;\n    }\n}\n"
   },
   {
-    "name": "14 - Tuples and Equality",
+    "name": "10 - Tuples and Equality",
     "source": "// Tuples can be passed, returned, and compared structurally.\nfn pair(value: u32, flag: bool) -> (u32, bool) {\n    (value, flag)\n}\n\ntask main() -> u32 {\n    state start() {\n        let actual: (u32, bool) = pair(42, true);\n        let expected: (u32, bool) = (42, true);\n\n        if actual == expected && actual != (0, false) {\n            exit 42;\n        }\n\n        exit 0;\n    }\n}\n"
   },
   {
-    "name": "15 - Arrays and Indexing",
-    "source": "// observe proves that a dynamic index is in bounds.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [10, 20, 30, 40];\n        let index: u32 = 2;\n\n        observe index < 4 else {\n            exit 0;\n        }\n\n        exit values[0] + values[index] or(err) 0;\n    }\n}\n"
+    "name": "11 - Arrays and Observe",
+    "source": "// observe proves a dynamic index is in bounds before indexing.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [10, 20, 30, 40];\n        let index: u32 = 2;\n\n        observe index < 4 else {\n            exit 0;\n        }\n\n        exit values[0] + values[index] or(err) 0;\n    }\n}\n"
   },
   {
-    "name": "16 - Aggregate Arrays",
+    "name": "12 - Aggregate Arrays",
     "source": "// Arrays can contain flattened aggregate values like tuples.\ntask main() -> u32 {\n    state start() {\n        let pairs: [(u32, bool); 2] = [(10, false), (42, true)];\n        let index: u32 = 1;\n\n        observe index < 2 else {\n            exit 0;\n        }\n\n        if pairs[index] == (42, true) {\n            exit 42;\n        }\n\n        exit 0;\n    }\n}\n"
   },
   {
-    "name": "17 - For Over Arrays",
+    "name": "13 - For Over Arrays",
     "source": "// for loops over fixed arrays are bounded.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [9, 10, 11, 12];\n        let mut total: u32 = 0;\n\n        for value in values {\n            total = total + value or(err) 0;\n        }\n\n        exit total;\n    }\n}\n"
   },
   {
-    "name": "18 - For Over Ranges",
+    "name": "14 - For Over Ranges",
     "source": "// Ranges are start-inclusive and end-exclusive.\ntask main() -> u32 {\n    state start() {\n        let range = 0..7;\n        let mut total: u32 = 0;\n\n        for value in range {\n            total = total + value or(err) 0;\n        }\n\n        exit total * 2 or(err) 0;\n    }\n}\n"
   },
   {
-    "name": "19 - Observe Facts",
-    "source": "// The proof checker can use observe facts for dynamic indexing.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [10, 20, 30, 42];\n        let index: u32 = 3;\n\n        observe index < 4 else {\n            exit 0;\n        }\n\n        exit values[index];\n    }\n}\n"
+    "name": "15 - Task Go",
+    "source": "// go transfers control to another state in the same task.\ntask main() -> u32 {\n    state start() {\n        go worker(42);\n    }\n\n    state worker(value: u32) {\n        exit value;\n    }\n}\n"
   },
   {
-    "name": "20 - Marker Qualified Values",
+    "name": "16 - Task State Loop",
+    "source": "// Cyclic go paths need fresh Event evidence on each loop.\ntask main() -> u32 {\n    state start() {\n        go count(0);\n    }\n\n    state count(value: u32) {\n        if value == 42 {\n            exit value;\n        }\n\n        let pulse: u32 with Event = unsafe { Event::mark(value) };\n        go count(pulse + 1 or(err) 0);\n    }\n}\n"
+  },
+  {
+    "name": "17 - Go Argument State",
+    "source": "// go arguments are evaluated before active state arguments are replaced.\ntask main() -> u32 {\n    state start() {\n        go swap(7, 42);\n    }\n\n    state swap(first: u32, second: u32) {\n        if first == 42 {\n            exit second;\n        } else {\n            let fresh_first: u32 with Event = unsafe { Event::mark(first) };\n            go swap(second, fresh_first);\n        }\n    }\n}\n"
+  },
+  {
+    "name": "18 - Marker Qualified Values",
     "source": "// Markers are compile-time facts attached to value places.\nmarker Trusted();\n\nfn accept(value: u32 with Trusted) -> u32 with Trusted {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let raw: u32 = 42;\n        let marked: u32 with Trusted = unsafe { Trusted::mark(raw) };\n        let copied: u32 with Trusted = marked;\n        exit accept(copied);\n    }\n}\n"
   },
   {
-    "name": "21 - Marker Companion Rules",
-    "source": "// Companion rules preserve user marker facts.\nmarker UpperBound(value: place, bound: place);\n\nmark Sub(a: place, amount: place, result: place) {\n    if a with UpperBound(a, ?bound) {\n        implies UpperBound(result, bound) for result;\n    }\n}\n\nfn keep_upper_bound(value: u32 with UpperBound(4)) -> u32 with UpperBound(4) {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let index: u32 with UpperBound(4) = unsafe { UpperBound::mark(3, 4) };\n        let fallback: u32 with UpperBound(4) = unsafe { UpperBound::mark(0, 4) };\n        let smaller: u32 with UpperBound(4) = index - 1 or(err) fallback;\n        exit keep_upper_bound(smaller) + 40 or(err) 0;\n    }\n}\n"
+    "name": "19 - Marker Companion Rules",
+    "source": "// Companion rules preserve user marker facts through operators.\nmarker UpperBound(value: place, bound: place);\n\nmark Sub(a: place, amount: place, result: place) {\n    if a with UpperBound(a, ?bound) {\n        implies UpperBound(result, bound) for result;\n    }\n}\n\nfn keep_upper_bound(value: u32 with UpperBound(4)) -> u32 with UpperBound(4) {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let index: u32 with UpperBound(4) = unsafe { UpperBound::mark(3, 4) };\n        let fallback: u32 with UpperBound(4) = unsafe { UpperBound::mark(0, 4) };\n        let smaller: u32 with UpperBound(4) = index - 1 or(err) fallback;\n        exit keep_upper_bound(smaller) + 40 or(err) 0;\n    }\n}\n"
   },
   {
-    "name": "22 - Builtin Operator Facts",
+    "name": "20 - Builtin Operator Facts",
     "source": "// Built-in companion rules attach facts to checked operator results.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [7, 14, 21, 42];\n        let raw: u32 = 19;\n        let fallback: u32 with LessThan(4) = unsafe { LessThan::mark(0, 4) };\n        let index: u32 with LessThan(4) = raw % 4 or(err) fallback;\n\n        exit values[index];\n    }\n}\n"
   },
   {
-    "name": "23 - Custom Operator Marking",
-    "source": "// User companion rules can teach operators domain-specific markers.\nmarker Minimum(value: place, bound: place);\n\nmark Add(left: place, right: place, result: place) {\n    if left with Minimum(left, ?bound) {\n        implies Minimum(result, bound) for result;\n    }\n\n    if right with Minimum(right, ?bound) {\n        implies Minimum(result, bound) for result;\n    }\n}\n\nfn accept_minimum(value: u32 with Minimum(10)) -> u32 {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let left: u32 with Minimum(10) = unsafe { Minimum::mark(40, 10) };\n        let right: u32 = 2;\n        let fallback: u32 with Minimum(10) = unsafe { Minimum::mark(10, 10) };\n        let total: u32 with Minimum(10) = left + right or(err) fallback;\n\n        exit accept_minimum(total);\n    }\n}\n"
+    "name": "21 - Relevant Mode Copies",
+    "source": "// Relevant parameters copy by default, so caller and callee each use one place.\nfn remember(event: relevant u32) -> () {\n    unsafe { Structural::use(event); }\n}\n\ntask main() -> u32 {\n    state start() {\n        let event: relevant u32 = 42;\n        remember(event);\n        unsafe { Structural::use(event); }\n        exit 42;\n    }\n}\n"
+  },
+  {
+    "name": "22 - Take Relevant Mode",
+    "source": "// take moves a relevant place into the callee instead of copying it.\nfn handle(take event: relevant u32) -> () {\n    unsafe { Structural::use(event); }\n}\n\ntask main() -> u32 {\n    state start() {\n        let event: relevant u32 = 42;\n        handle(event);\n        exit 42;\n    }\n}\n"
+  },
+  {
+    "name": "23 - Linear Mode Moves",
+    "source": "// Linear parameters move their argument even without writing take.\nfn close(handle: linear u32) -> () {\n    unsafe { Structural::consume(handle); }\n}\n\ntask main() -> u32 {\n    state start() {\n        let handle: linear u32 = 42;\n        close(handle);\n        exit 42;\n    }\n}\n"
+  },
+  {
+    "name": "24 - Structural Trusted Operations",
+    "source": "// Structural trusted operations discharge place-mode obligations.\ntask main() -> u32 {\n    state start() {\n        let event: relevant u32 = 40;\n        let handle: linear u32 = 2;\n\n        unsafe { Structural::use(event); }\n        unsafe { Structural::consume(handle); }\n\n        exit event + handle or(err) 0;\n    }\n}\n"
   }
 ]
