@@ -269,7 +269,7 @@ fn requirement_llg_pir_01_lowers_checked_hir_into_marker_proof_ir_before_dischar
     let (_, proof) = check_err(
         r#"
 fn main(values: [u32; 4], index: u32) {
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -467,6 +467,7 @@ fn requirement_llg_proof_03_productivity_accepts_cycle_with_fresh_event() {
 task main() -> u32 {
     state start() {
         let token = read_u32();
+        unsafe { Structural::use(token); }
         go start();
     }
 }
@@ -485,9 +486,9 @@ fn requirement_llg_pir_02_preserves_marker_proof_ir_source_spans() {
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
-        values[index];
+        let _ = values[index];
     } else {
-        values[4];
+        let _ = values[4];
     }
 }
 "#,
@@ -551,8 +552,8 @@ fn requirement_llg_pir_03_lowers_operations_to_marker_obligations() {
     let (_, proof) = check_err(
         r#"
 fn main(values: [u32; 4], table: Map<u32, bool, 16>, index: u32) {
-    values[index];
-    table[index];
+    let _ = values[index];
+    let _ = table[index];
 }
 "#,
     );
@@ -589,7 +590,7 @@ fn main(value: u32) {
         return;
     }
     if value != 0 && value <= 4 {
-        value;
+        let _ = value;
     }
 }
 "#,
@@ -665,7 +666,7 @@ fn requirement_llg_mark_06_emits_comparison_facts_as_companion_rule_facts() {
         r#"
 fn main(left: u32, right: u32) {
     if left < right {
-        left;
+        let _ = left;
     }
 }
 "#,
@@ -686,7 +687,7 @@ fn requirement_llg_mark_06_uses_trusted_builtin_companion_rules_by_default() {
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -699,7 +700,7 @@ fn main(values: [u32; 4], index: u32) {
     if index >= 4 {
         return;
     } else {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -710,7 +711,7 @@ fn main(values: [u32; 4], index: u32) {
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index <= 3 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -723,7 +724,7 @@ fn main(values: [u32; 4], index: u32) {
     observe index < 4 else {
         return;
     }
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -739,7 +740,7 @@ fn requirement_llg_mark_06_normalizes_less_or_equal_successor_bounds() {
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index <= 3 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -770,7 +771,7 @@ mark LessThan(a: place, b: place, result: place) {
 
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -792,7 +793,7 @@ mark LessThan(a: place, b: place, result: place) {
 
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -808,7 +809,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let smaller = index - 1 or(err) fallback;
-        values[smaller];
+        let _ = values[smaller];
     }
 }
 "#,
@@ -833,7 +834,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let smaller = index - 1 or(err) fallback;
-        values[smaller];
+        let _ = values[smaller];
     }
 }
 "#,
@@ -875,7 +876,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let divided = index / 1 or(err) fallback;
-        values[divided];
+        let _ = values[divided];
     }
 }
 "#,
@@ -895,7 +896,7 @@ fn main(values: [u32; 4], index: u32) {
     let fallback = 0;
     unsafe { LessThan::mark(fallback, 4); }
     let reduced = index % 4 or(err) fallback;
-    values[reduced];
+    let _ = values[reduced];
 }
 "#,
     );
@@ -919,7 +920,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let product = index * 1 or(err) fallback;
-        values[product];
+        let _ = values[product];
     }
 }
 "#,
@@ -941,7 +942,7 @@ fn main(values: [u32; 4], index: u32) {
         unsafe { LessThan::mark(fallback, 4); }
         unsafe { LessOrEqual::mark(fallback, 3); }
         let smaller = index - 1 or(err) fallback;
-        values[smaller];
+        let _ = values[smaller];
     }
 }
 "#,
@@ -972,7 +973,7 @@ fn main(left: u32, right: u32) {
     unsafe { GreaterThan::mark(fallback, 1); }
     unsafe { GreaterOrEqual::mark(fallback, 2); }
     let sum = left + right or(err) fallback;
-    sum;
+    let _ = sum;
 }
 "#,
     );
@@ -1001,7 +1002,7 @@ fn main(values: [u32; 4], index: u32) {
         unsafe { LessThan::mark(fallback, 4); }
         unsafe { LessOrEqual::mark(fallback, 3); }
         let divided = index / 1 or(err) fallback;
-        values[divided];
+        let _ = values[divided];
     }
 }
 "#,
@@ -1029,7 +1030,7 @@ fn main(values: [u32; 4], raw: u32) {
     let fallback = 0;
     unsafe { LessThan::mark(fallback, 4); }
     let reduced = raw % 4 or(err) fallback;
-    values[reduced];
+    let _ = values[reduced];
 }
 "#,
     );
@@ -1053,7 +1054,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let product = index * 1 or(err) fallback;
-        values[product];
+        let _ = values[product];
     }
 }
 "#,
@@ -1122,7 +1123,7 @@ fn main(values: [u32; 4], index: u32) {
     if index < 4 {
         let fallback = 0;
         let smaller = index - 1 or(err) fallback;
-        values[smaller];
+        let _ = values[smaller];
     }
 }
 "#,
@@ -1153,7 +1154,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let smaller = checked - 1 or(err) fallback;
-        values[smaller];
+        let _ = values[smaller];
     }
 }
 "#,
@@ -1173,7 +1174,7 @@ fn main(values: [u32; 4], raw: u32) {
     let fallback = 0;
     unsafe { LessThan::mark(fallback, 4); }
     let reduced = checked % 4 or(err) fallback;
-    values[reduced];
+    let _ = values[reduced];
 }
 "#,
     );
@@ -1212,7 +1213,7 @@ fn main(values: [u32; 4], index: u32) {
         let fallback = 0;
         unsafe { LessThan::mark(fallback, 4); }
         let smaller = index - 1 or(err) fallback;
-        values[smaller];
+        let _ = values[smaller];
     }
 }
 "#,
@@ -1240,7 +1241,7 @@ mark LessThan(a: place, b: place, result: place) {
 fn main(index: u32) {
     unsafe { LessThan::mark(index, 4); }
     if index < 10 {
-        index;
+        let _ = index;
     }
 }
 "#,
@@ -1273,7 +1274,7 @@ fn main(values: [u32; 4], index: u32) {
     observe index < 4 else {
         return;
     }
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -1297,7 +1298,7 @@ fn main(values: [u32; 4], index: u32) {
     observe index < 4 else {
         return;
     }
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -1336,7 +1337,7 @@ fn requirement_llg_rel_01_propagates_set_membership_to_map_presence() {
         r#"
 fn main(keys: Set<u32, 16>, table: Map<u32, bool, 32>) {
     for key in keys {
-        table[key];
+        let _ = table[key];
     }
 }
 "#,
@@ -1352,7 +1353,7 @@ fn main(keys: Set<u32, 16>, table: Map<u32, bool, 32>) {
 fn main(keys: Set<u32, 16>, table: Map<u32, bool, 32>) {
     for key in keys {
         let copied = key;
-        table[copied];
+        let _ = table[copied];
     }
 }
 "#,
@@ -1362,7 +1363,7 @@ fn main(keys: Set<u32, 16>, table: Map<u32, bool, 32>) {
     let (checked, unproven) = check_err(
         r#"
 fn main(key: u32, table: Map<u32, bool, 32>) {
-    table[key];
+    let _ = table[key];
 }
 "#,
     );
@@ -1383,7 +1384,7 @@ fn requirement_llg_proof_02_discharges_array_bounds_with_direct_less_than_marker
     let (_, literal_safe) = check_ok(
         r#"
 fn main() {
-    [10, 20, 30][2];
+    let _ = [10, 20, 30][2];
 }
 "#,
     );
@@ -1395,7 +1396,7 @@ fn main(values: [u32; 4], index: u32) {
     observe index < 4 else {
         return;
     }
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -1409,7 +1410,7 @@ fn main(values: [u32; 4], index: u32) {
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -1420,7 +1421,7 @@ fn main(values: [u32; 4], index: u32) {
         r#"
 fn main(values: [u32; 4], index: u32) {
     if index <= 3 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -1439,7 +1440,7 @@ fn main(values: [u32; 4], index: u32) {
     if index >= 4 {
         return;
     } else {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -1461,7 +1462,7 @@ fn requirement_llg_mark_04_introduces_equal_marker_facts() {
         r#"
 fn main(left: u32, right: u32) {
     if left == right {
-        left;
+        let _ = left;
     }
 }
 "#,
@@ -1482,6 +1483,7 @@ fn requirement_llg_mark_04_read_u32_produces_event_marker() {
         r#"
 fn main() {
     let value: u32 with Event = read_u32();
+    unsafe { Structural::use(value); }
 }
 "#,
     );
@@ -1504,7 +1506,9 @@ fn requirement_llg_mark_04_user_marker_families_require_explicit_facts() {
 marker Trusted();
 
 fn main() {
-    let value: u32 with Trusted = unsafe { Trusted::mark(1) };
+    let value: u32 = 1;
+    unsafe { Trusted::mark(value); }
+    let marked: u32 with Trusted = value;
 }
 "#,
     );
@@ -1546,7 +1550,9 @@ fn keep(value: u32 with Trusted) -> u32 with Trusted {
 fn needs(value: u32 with Trusted) {}
 
 fn main() {
-    needs(keep(unsafe { Trusted::mark(1) }));
+    let value: u32 = 1;
+    unsafe { Trusted::mark(value); }
+    needs(keep(value));
 }
 "#,
     );
@@ -1560,7 +1566,9 @@ fn strip(value: u32 with Trusted) -> u32 {
 }
 
 fn main() {
-    let value: u32 with Trusted = strip(unsafe { Trusted::mark(1) });
+    let raw: u32 = 1;
+    unsafe { Trusted::mark(raw); }
+    let value: u32 with Trusted = strip(raw);
 }
 "#,
     );
@@ -1577,7 +1585,8 @@ fn requirement_llg_mark_05_assignment_copies_user_marker_facts() {
 marker Trusted();
 
 fn main() {
-    let value = unsafe { Trusted::mark(1) };
+    let value = 1;
+    unsafe { Trusted::mark(value); }
     let copied: u32 with Trusted = value;
 }
 "#,
@@ -1688,7 +1697,9 @@ fn requirement_llg_mark_02_requires_call_site_markers_for_marker_qualified_param
 fn needs_event(value: u32 with Event) {}
 
 fn main() {
-    needs_event(read_u32());
+    let value = read_u32();
+    unsafe { Structural::use(value); }
+    needs_event(value);
 }
 "#,
     );
@@ -1718,7 +1729,9 @@ fn strip(value: u32 with Event) -> u32 {
 }
 
 fn main() {
-    let value: u32 with Event = strip(read_u32());
+    let raw = read_u32();
+    unsafe { Structural::use(raw); }
+    let value: u32 with Event = strip(raw);
 }
 "#,
     );
@@ -1731,7 +1744,9 @@ fn keep(value: u32 with Event) -> u32 with Event {
 }
 
 fn main() {
-    let value: u32 with Event = keep(read_u32());
+    let raw = read_u32();
+    unsafe { Structural::use(raw); }
+    let value: u32 with Event = keep(raw);
 }
 "#,
     );
@@ -1748,6 +1763,8 @@ fn main() {
     let value: u32 = 1;
     unsafe { Event::mark(value); }
     let copied: u32 with Event = value;
+    unsafe { Structural::use(value); }
+    unsafe { Structural::use(copied); }
 }
 "#,
     );
@@ -1760,7 +1777,10 @@ fn main() {
     let (_, expression_proof) = check_ok(
         r#"
 fn main() {
-    let copied: u32 with Event = unsafe { Event::mark(1) };
+    let value: u32 = 1;
+    let copied: u32 with Event = unsafe { Event::mark(value) };
+    unsafe { Structural::use(value); }
+    unsafe { Structural::use(copied); }
 }
 "#,
     );
@@ -1778,11 +1798,9 @@ fn main() {
 fn requirement_llg_pir_03_structural_operations_do_not_emit_marker_facts() {
     let (_, proof) = check_ok(
         r#"
-fn sink(value: u32) {}
-
-fn main(value: u32) {
-    sink(unsafe { Structural::use(value) });
-    sink(unsafe { Structural::consume(value) });
+fn main(event: relevant u32, resource: linear u32) {
+    unsafe { Structural::use(event); }
+    unsafe { Structural::consume(resource); }
 }
 "#,
     );
@@ -1796,6 +1814,13 @@ fn main(value: u32) {
     for entry in proof_entries(&proof) {
         if let ProofEntry::Eval { expr, .. } = entry {
             collect_trusted_operations(expr, &mut operations);
+        }
+        if let ProofEntry::Scope { block, .. } = entry {
+            for nested in &block.entries {
+                if let ProofEntry::Eval { expr, .. } = nested {
+                    collect_trusted_operations(expr, &mut operations);
+                }
+            }
         }
     }
 
@@ -1815,7 +1840,7 @@ fn requirement_llg_proof_01_rejects_possible_out_of_bounds_indexing_without_mark
     let (checked, failing_proof) = check_err(
         r#"
 fn main(values: [u32; 4], index: u32) {
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -1832,17 +1857,17 @@ fn main(values: [u32; 4], index: u32) {
     let (checked, proof) = check_err(
         r#"
 fn main(values: [u32; 4], exact: u32, range: u32) {
-    values[4];
+    let _ = values[4];
 
     observe exact <= 4 else {
         return;
     }
-    values[exact];
+    let _ = values[exact];
 
     observe range < 5 else {
         return;
     }
-    values[range];
+    let _ = values[range];
 }
 "#,
     );
@@ -1877,7 +1902,7 @@ fn requirement_llg_mark_05_assignment_copies_markers_and_mutation_creates_new_pl
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
         let copied = index;
-        values[copied];
+        let _ = values[copied];
     }
 }
 "#,
@@ -1893,7 +1918,7 @@ fn main(values: [u32; 4], index: u32) {
 fn main(values: [u32; 4]) {
     let mut index = 0;
     if index < 4 {
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -1912,7 +1937,7 @@ fn main(values: [u32; 4]) {
     observe index < 4 else {
         return;
     }
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -1929,7 +1954,7 @@ fn main(values: [u32; 4]) {
     let mut index = 0;
     if index < 4 {
         index = 4;
-        values[index];
+        let _ = values[index];
     }
 }
 "#,
@@ -1953,7 +1978,7 @@ fn main(values: [u32; 4]) {
         return;
     }
     index = 4;
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -1983,7 +2008,7 @@ fn id(value: u32) -> u32 {
 fn main(values: [u32; 4], index: u32) {
     if index < 4 {
         let copied = id(index);
-        values[copied];
+        let _ = values[copied];
     }
 }
 "#,

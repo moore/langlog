@@ -36,6 +36,8 @@ This document complements, but does not replace, the main language spec:
   from HIR parameters, return slots, task fields, and state parameters.
 - Proof IR MUST keep structural place mode separate from concrete value type
   and marker fact requirements.
+- Proof IR place state MUST be able to use marker-family base modes when
+  trusted `Marker::mark` operations introduce facts.
 - User-defined marker family facts MUST retain the source marker family name and
   instantiated place arguments.
 - Proof IR MUST distinguish ordinary marker facts, immutable marker facts, and

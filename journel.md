@@ -1063,7 +1063,7 @@ mode. It is the opposite of introducing a marker:
 
 ```llg
 unsafe {
-    Event::mark(value);
+    Resource::mark(value);
 }
 
 unsafe {
@@ -1071,9 +1071,9 @@ unsafe {
 }
 ```
 
-`mark` asserts that the marker contract is true for the place. The
-`Structural` namespace contains trusted operations that discharge relevant or
-linear place-mode obligations.
+`mark` asserts that the marker contract is true for the place and may make the
+place more restrictive. The `Structural` namespace contains trusted operations
+that discharge relevant or linear place-mode obligations.
 Safe code can move, copy when allowed, and require markers, but introducing or
 discharging a marker contract remains explicit trusted code.
 
@@ -1115,7 +1115,7 @@ name and cannot be read from later. Sending a value to `_` is an explicit
 discard:
 
 ```llg
-let _ = read_u32(); // discard a produced value
+let _ = 0;          // discard a produced value
 let _ <- x;         // take x and discard it
 ```
 
@@ -1353,3 +1353,99 @@ This keeps per-function checking possible. The callee does not need to inspect
 its callers to know whether a parameter is unrestricted, affine, relevant, or
 linear. The caller checks whether its source place can flow into that receiving
 mode and whether the signature copies or moves the source.
+
+## Structural mode semantics implementation notes
+
+We decided the mode feature is not just syntax on signatures. The checker must
+maintain mode state for every compiler-visible SSA place and enforce that state
+at copies, moves, discards, and boundaries.
+
+There are two places where modes appear in source:
+
+- marker type declarations declare the mode obligation introduced when that
+  marker is trusted onto a place;
+- place type annotations declare the mode of the receiving place.
+
+Place type annotations are used anywhere a signature or explicit binding needs
+to say what kind of place receives the value:
+
+```text
+PlaceType := Mode? Type
+Mode := unrestricted | affine | relevant | linear
+Param := take? name: PlaceType
+Return := -> PlaceType
+```
+
+For example:
+
+```llg
+let handle: linear Handle = open_handle();
+let event: relevant Message with Event = read_message();
+
+fn inspect(message: Message with Event) -> u32;          // unrestricted place
+fn remember(message: relevant Message with Event) -> (); // relevant place
+fn close(handle: linear Handle) -> ();                   // moved by mode
+fn close2(take handle: linear Handle) -> ();             // redundant take
+fn open() -> linear Handle;
+```
+
+The mode in `linear Handle` or `relevant Message with Event` annotates the
+place, not the concrete runtime type. `Message with Event` is a marker fact
+requirement; it does not by itself make the parameter relevant. This separation
+keeps marker requirements and structural behavior independent.
+
+Omitted modes at separately checked boundaries default to `unrestricted`:
+function parameters, task parameters, state parameters, task fields, and return
+slots. Local `let` bindings may infer the mode from their initializer because
+the initializer is checked in the same function. A local annotation can also
+strengthen a value, such as `let x: linear u32 = 7`, but it cannot weaken an
+incoming restrictive source place.
+
+Function signatures carry both receiving-place mode and transfer behavior.
+`take` always moves. Affine and linear parameters imply move even without
+`take`. Unrestricted and relevant parameters copy unless `take` is written.
+The caller checks that the source place can flow into the receiving mode:
+unrestricted may flow to any mode, affine may flow to affine or linear,
+relevant may flow to relevant or linear, and linear may flow only to linear.
+
+Marker type declarations can now carry a base structural mode:
+
+```llg
+marker EventLike(value: place) : relevant;
+marker Resource(value: place) : linear;
+marker LessThan(left: place, right: place); // defaults to unrestricted
+```
+
+`Marker::mark(place)` targets an existing live place, adds the marker fact to
+that place, and raises the place mode by merging in the marker type's base
+mode. `Structural::use(place)` and `Structural::consume(place)` are separate
+trusted operations: they update only the place mode state and leave marker
+facts intact. `Structural::use` requires relevant mode and turns it into
+unrestricted. `Structural::consume` requires linear mode and turns it into
+affine.
+
+The assignment forms are now distinct:
+
+```llg
+let copy = source;   // copy context
+let moved <- source; // move context
+target <- moved;     // move assignment
+let _ <- target;     // explicit discard place after a move
+```
+
+`_` is the discard place. It accepts unrestricted and affine values, and rejects
+relevant or linear values. It is useful because it gives intentional discard one
+syntax that also works naturally in future destructuring patterns.
+
+Produced expression results are still not source-level places. They must flow
+into a receiving place, return slot, call argument slot, state slot, or `_`, but
+they are not copied from an anonymous source place. Place occurrences inside
+expressions are checked by the expression's use context. Arithmetic,
+comparisons, indexing, tuple/array construction, and ordinary call arguments
+copy their place operands unless the receiving boundary says to move.
+
+Composite values compute an effective mode from owned parts. If a tuple,
+array, option, or result owns a relevant or linear part, the containing place
+surfaces that restriction for copy and discard checking. This keeps the user
+model simple: modes are observed on places, while values contribute mode when
+they are placed.

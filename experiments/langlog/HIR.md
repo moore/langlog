@@ -36,10 +36,14 @@ This document complements, but does not replace, the main language spec:
 
 - Every HIR binding MUST record its mutability and type directly, and every
   HIR expression MUST record its type directly.
+- HIR marker family declarations MUST record the declared structural marker
+  mode.
 - HIR bindings and return slots MUST record structural place modes separately
   from concrete types.
 - HIR function, task, and state parameters MUST record parameter transfer
   behavior separately from structural place mode and concrete type.
+- HIR let bindings and assignments MUST record whether the source was copied
+  or moved.
 - HIR task fields MUST record structural place modes separately from concrete
   types.
 - HIR unsafe trusted-operation nodes MUST distinguish marker-family
@@ -279,6 +283,10 @@ The first HIR elaboration is expected to follow these rules:
 - A surface parameter or local binding lowers to one HIR binding with a stable
   `BindingId`, mutability flag, concrete type, place mode when known, parameter
   transfer behavior when applicable, and declaration span.
+- A surface marker family declaration lowers with its declared or defaulted
+  base structural mode.
+- A surface `let` or assignment lowers with an explicit copy or move transfer
+  kind.
 - Unsafe trusted operations lower with an explicit operation kind:
   marker-family `mark` operations retain their marker family, while
   `Structural::use` and `Structural::consume` retain their structural

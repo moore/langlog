@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use langlog_syntax::ast::{
-    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MarkerAnnotation, MarkerArg,
-    MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt, MarkerRefinement,
-    MarkerRule, MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, ParamTransfer, Pattern,
-    PatternKind, PlaceMode, Stmt, Task, TrustedOperation, Type, TypeKind, UnaryOp,
+    AssignmentTransfer, BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item,
+    MarkerAnnotation, MarkerArg, MarkerArgKind, MarkerFamily, MarkerFamilyParam,
+    MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleStmt,
+    MatchBody, ObserveOp, ParamTransfer, Pattern, PatternKind, PlaceMode, Stmt, Task,
+    TrustedOperation, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -34,6 +35,7 @@ pub struct HirProgram {
 pub struct HirMarkerFamilyDecl {
     pub name: String,
     pub params: Vec<HirMarkerFamilyParam>,
+    pub mode: HirPlaceMode,
     pub span: Span,
 }
 
@@ -234,6 +236,7 @@ impl HirStmt {
 pub struct HirLetStmt {
     pub binding: HirBinding,
     pub annotation: Option<HirType>,
+    pub transfer: HirAssignmentTransfer,
     pub value: Option<HirExpr>,
     pub span: Span,
 }
@@ -241,8 +244,15 @@ pub struct HirLetStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirAssignStmt {
     pub target: HirExpr,
+    pub transfer: HirAssignmentTransfer,
     pub value: HirExpr,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirAssignmentTransfer {
+    Copy,
+    Move,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +559,7 @@ fn lower_marker_family_decl(family: &MarkerFamily) -> HirMarkerFamilyDecl {
             .iter()
             .map(lower_marker_family_param)
             .collect(),
+        mode: lower_place_mode(family.mode),
         span: family.span,
     }
 }
@@ -826,6 +837,14 @@ impl<'a> HirLowerer<'a> {
         task_states: Option<&HashMap<String, HirStateId>>,
     ) -> HirStmt {
         match statement {
+            Stmt::Let(stmt) if stmt.discard => HirStmt::Expr(HirExprStmt {
+                expr: self.lower_expr(
+                    stmt.value
+                        .as_ref()
+                        .expect("checked discard bindings must have an initializer"),
+                ),
+                span: stmt.span,
+            }),
             Stmt::Let(stmt) => HirStmt::Let(HirLetStmt {
                 binding: self.lower_named_binding_with_type(
                     &stmt.name,
@@ -836,11 +855,13 @@ impl<'a> HirLowerer<'a> {
                     None,
                 ),
                 annotation: stmt.ty.as_ref().map(lower_ast_type),
+                transfer: lower_assignment_transfer(stmt.transfer),
                 value: stmt.value.as_ref().map(|expr| self.lower_expr(expr)),
                 span: stmt.span,
             }),
             Stmt::Assign(stmt) => HirStmt::Assign(HirAssignStmt {
                 target: self.lower_expr(&stmt.target),
+                transfer: lower_assignment_transfer(stmt.transfer),
                 value: self.lower_expr(&stmt.value),
                 span: stmt.span,
             }),
@@ -1141,7 +1162,9 @@ impl<'a> HirLowerer<'a> {
             name: name.value.clone(),
             kind,
             mutable,
-            place_mode: place_mode.map(lower_place_mode),
+            place_mode: place_mode
+                .or_else(|| self.types.binding_mode(name.span))
+                .map(lower_place_mode),
             param_transfer: param_transfer.map(lower_param_transfer),
             ty: self.lower_binding_type(name.span),
             markers: ty
@@ -1393,6 +1416,13 @@ fn lower_param_transfer(transfer: ParamTransfer) -> HirParamTransfer {
     match transfer {
         ParamTransfer::Copy => HirParamTransfer::Copy,
         ParamTransfer::Take => HirParamTransfer::Take,
+    }
+}
+
+fn lower_assignment_transfer(transfer: AssignmentTransfer) -> HirAssignmentTransfer {
+    match transfer {
+        AssignmentTransfer::Copy => HirAssignmentTransfer::Copy,
+        AssignmentTransfer::Move => HirAssignmentTransfer::Move,
     }
 }
 

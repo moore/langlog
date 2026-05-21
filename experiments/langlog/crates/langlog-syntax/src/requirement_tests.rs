@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, MarkerRuleStmt, ObserveOp, ParamTransfer,
-    PatternKind, PlaceMode, Stmt, Task, TypeKind, UnaryOp,
+    AssignmentTransfer, BinaryOp, Expr, ExprKind, Function, GenericArg, Item, MarkerRuleStmt,
+    ObserveOp, ParamTransfer, PatternKind, PlaceMode, Stmt, Task, TypeKind, UnaryOp,
 };
 use crate::diagnostic::LabelStyle;
 use crate::lexer::lex;
@@ -255,18 +255,28 @@ fn requirement_llg_syn_01_rejects_non_item_top_level_forms_with_a_syntax_diagnos
 
 //= SPEC.md#llg-syn-01-top-level-items
 //= type=test
-//# A marker-family declaration item MUST use `marker Name(param: place, ...);` and MUST be proof-only metadata rather than executable code.
+//# A marker-family declaration item MUST use `marker Name(param: place, ...) (: Mode)?;` and MUST be proof-only metadata rather than executable code.
 #[test]
 fn requirement_llg_syn_01_parses_marker_family_declaration_items() {
-    let parsed = parse_ok("marker OwnedBy(value: place, owner: place);");
+    let parsed = parse_ok(
+        r#"
+marker OwnedBy(value: place, owner: place) : relevant;
+marker Trusted();
+"#,
+    );
 
-    let [Item::MarkerFamily(family)] = parsed.module.items.as_slice() else {
-        panic!("expected one marker family item");
+    let [Item::MarkerFamily(family), Item::MarkerFamily(defaulted)] =
+        parsed.module.items.as_slice()
+    else {
+        panic!("expected marker family items");
     };
     assert_eq!(family.name.value, "OwnedBy");
     assert_eq!(family.params.len(), 2);
     assert_eq!(family.params[0].name.value, "value");
     assert_eq!(family.params[1].name.value, "owner");
+    assert_eq!(family.mode, PlaceMode::Relevant);
+    assert_eq!(defaulted.name.value, "Trusted");
+    assert_eq!(defaulted.mode, PlaceMode::Unrestricted);
 
     let missing_semicolon = parse_err("marker Trusted()");
     assert_diagnostic_contains(
@@ -334,6 +344,48 @@ fn requirement_llg_syn_01_rejects_task_items_without_return_types() {
     let parsed = parse_err("task main() { exit 0; }");
 
     assert_diagnostic_contains(&parsed, "expected `->` before task return type");
+}
+
+//= SPEC.md#llg-syn-02-statements
+//= type=test
+//# A `let` statement with an initializer MUST preserve whether it used copy transfer with `=` or move transfer with `<-`.
+#[test]
+fn requirement_llg_syn_02_preserves_assignment_transfer_syntax() {
+    let parsed = parse_ok(
+        r#"
+fn main() {
+    let mut source: linear u32 = 1;
+    let moved <- source;
+    source <- moved;
+    let _ <- source;
+}
+"#,
+    );
+    let function = first_function(&parsed);
+
+    let Stmt::Let(source) = &function.body.statements[0] else {
+        panic!("expected source let");
+    };
+    assert!(!source.discard);
+    assert_eq!(source.transfer, AssignmentTransfer::Copy);
+
+    let Stmt::Let(moved) = &function.body.statements[1] else {
+        panic!("expected move let");
+    };
+    assert!(!moved.discard);
+    assert_eq!(moved.transfer, AssignmentTransfer::Move);
+
+    let Stmt::Assign(assign) = &function.body.statements[2] else {
+        panic!("expected move assignment");
+    };
+    assert_eq!(assign.transfer, AssignmentTransfer::Move);
+
+    let Stmt::Let(discard) = &function.body.statements[3] else {
+        panic!("expected discard let");
+    };
+    assert!(discard.discard);
+    assert_eq!(discard.name.value, "_");
+    assert_eq!(discard.transfer, AssignmentTransfer::Move);
 }
 
 //= SPEC.md#llg-mark-06-companion-marker-rules
@@ -470,7 +522,7 @@ task main() -> u32 {
 
 //= SPEC.md#llg-syn-08-target-task-state-syntax
 //= type=test
-//# The target task-state syntax MUST allow `state name(param: Type, ...) { ... }` items nested directly inside task bodies.
+//# The target task-state syntax MUST allow `state name(param: PlaceType, ...) { ... }` items nested directly inside task bodies.
 #[test]
 fn requirement_llg_syn_08_accepts_nested_states() {
     let parsed = parse_ok(
@@ -547,7 +599,7 @@ task main() -> u32 {
 
 //= SPEC.md#llg-syn-02-statements
 //= type=test
-//# The current parser allows a `let` statement to include `mut`, a type annotation, and an initializer.
+//# A `let` statement MAY include `mut`, a place type annotation, and an initializer.
 #[test]
 fn requirement_llg_syn_02_allows_mut_type_and_initializer_on_let() {
     let parsed = parse_ok("fn main() { let mut total: u32 = 0; }");

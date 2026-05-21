@@ -95,7 +95,9 @@ impl Lexer {
                     }
                 }
                 '<' => {
-                    if self.peek_next('=') {
+                    if self.peek_next('-') {
+                        self.push_compound(TokenKind::LeftArrow, 2);
+                    } else if self.peek_next('=') {
                         self.push_compound(TokenKind::LtEq, 2);
                     } else {
                         self.push_simple(TokenKind::Lt, 1);

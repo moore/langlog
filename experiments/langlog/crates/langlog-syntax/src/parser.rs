@@ -1,11 +1,12 @@
 use crate::ast::{
-    AssignStmt, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr, ExprKind, ExprStmt,
-    ForStmt, ForeverStmt, Function, GenericArg, GoStmt, IfStmt, Item, LetStmt, MarkerAnnotation,
-    MarkerArg, MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt,
-    MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt, MarkerRuleParam,
-    MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param,
-    ParamTransfer, Pattern, PatternKind, PlaceMode, ReturnStmt, Stmt, Task, TaskField, TaskState,
-    TrustedOperation, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
+    AssignStmt, AssignmentTransfer, BinaryOp, Block, DelegateStmt, ElseBranch, ExitStmt, Expr,
+    ExprKind, ExprStmt, ForStmt, ForeverStmt, Function, GenericArg, GoStmt, IfStmt, Item, LetStmt,
+    MarkerAnnotation, MarkerArg, MarkerArgKind, MarkerFamily, MarkerFamilyParam,
+    MarkerImplicationStmt, MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt,
+    MarkerRuleParam, MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp,
+    ObserveStmt, Param, ParamTransfer, Pattern, PatternKind, PlaceMode, ReturnStmt, Stmt, Task,
+    TaskField, TaskState, TrustedOperation, Type, TypeKind, UnaryOp, UnsafeMarkerConstruction,
+    UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -236,13 +237,23 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("expected a marker family name")?;
         self.expect_tag(TokenTag::LParen, "expected `(` after marker family name")?;
         let params = self.parse_marker_family_params()?;
+        let mode = if self.bump_if(TokenTag::Colon) {
+            self.parse_required_place_mode()
+        } else {
+            PlaceMode::Unrestricted
+        };
         let end = self.expect_tag(
             TokenTag::Semi,
             "expected `;` after marker family declaration",
         )?;
         let span = start.span.cover(end.span).unwrap_or(start.span);
 
-        Some(MarkerFamily { span, name, params })
+        Some(MarkerFamily {
+            span,
+            name,
+            params,
+            mode,
+        })
     }
 
     fn parse_marker_family_params(&mut self) -> Option<Vec<MarkerFamilyParam>> {
@@ -467,6 +478,24 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         Some(mode)
+    }
+
+    fn parse_required_place_mode(&mut self) -> PlaceMode {
+        let mode = match self.current_identifier() {
+            Some("unrestricted") => PlaceMode::Unrestricted,
+            Some("affine") => PlaceMode::Affine,
+            Some("relevant") => PlaceMode::Relevant,
+            Some("linear") => PlaceMode::Linear,
+            _ => {
+                self.error_current(
+                    "expected a structural mode",
+                    "expected `unrestricted`, `affine`, `relevant`, or `linear` here",
+                );
+                return PlaceMode::Unrestricted;
+            }
+        };
+        self.bump();
+        mode
     }
 
     fn parse_type(&mut self) -> Option<Type> {
@@ -757,7 +786,14 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            if self.bump_if(TokenTag::Eq) {
+            let transfer = if self.bump_if(TokenTag::Eq) {
+                Some(AssignmentTransfer::Copy)
+            } else if self.bump_if(TokenTag::LeftArrow) {
+                Some(AssignmentTransfer::Move)
+            } else {
+                None
+            };
+            if let Some(transfer) = transfer {
                 let value = match self.parse_expression(0) {
                     Some(value) => value,
                     None => {
@@ -776,6 +812,7 @@ impl<'a> Parser<'a> {
                 statements.push(Stmt::Assign(AssignStmt {
                     span,
                     target: expr,
+                    transfer,
                     value,
                 }));
                 continue;
@@ -856,17 +893,19 @@ impl<'a> Parser<'a> {
     fn parse_let_statement(&mut self) -> Option<LetStmt> {
         let start = self.expect_tag(TokenTag::Let, "expected `let`")?;
         let mutable = self.bump_if(TokenTag::Mut);
-        let name = self.expect_identifier("expected a binding name")?;
+        let (name, discard) = self.parse_let_target()?;
         let (mode, ty) = if self.bump_if(TokenTag::Colon) {
             let (mode, ty) = self.parse_place_type()?;
             (mode, Some(ty))
         } else {
             (None, None)
         };
-        let value = if self.bump_if(TokenTag::Eq) {
-            Some(self.parse_expression(0)?)
+        let (transfer, value) = if self.bump_if(TokenTag::Eq) {
+            (AssignmentTransfer::Copy, Some(self.parse_expression(0)?))
+        } else if self.bump_if(TokenTag::LeftArrow) {
+            (AssignmentTransfer::Move, Some(self.parse_expression(0)?))
         } else {
-            None
+            (AssignmentTransfer::Copy, None)
         };
         let end = self.expect_tag(TokenTag::Semi, "expected `;` after `let` statement")?;
         let span = start.span.cover(end.span).unwrap_or(start.span);
@@ -875,10 +914,30 @@ impl<'a> Parser<'a> {
             span,
             mutable,
             name,
+            discard,
             mode,
             ty,
+            transfer,
             value,
         })
+    }
+
+    fn parse_let_target(&mut self) -> Option<(Spanned<String>, bool)> {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Identifier(name) => {
+                self.bump();
+                Some((Spanned::new(token.span, name), false))
+            }
+            TokenKind::Underscore => {
+                self.bump();
+                Some((Spanned::new(token.span, "_".to_owned()), true))
+            }
+            _ => {
+                self.error_current("expected a binding name", "binding name expected here");
+                None
+            }
+        }
     }
 
     fn parse_if_statement(&mut self) -> Option<IfStmt> {

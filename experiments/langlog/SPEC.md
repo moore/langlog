@@ -121,8 +121,8 @@ properties that should be enforced structurally rather than by convention:
 - A marker companion-rule item MUST use `mark Name(param: place, ...) { ... }`
   and MUST be proof-only metadata rather than executable code.
 - A marker-family declaration item MUST use
-  `marker Name(param: place, ...);` and MUST be proof-only metadata rather than
-  executable code.
+  `marker Name(param: place, ...) (: Mode)?;` and MUST be proof-only metadata
+  rather than executable code.
 - Future root task configuration MAY allow other root task names or signatures.
 
 ## LLG-SYN-02 Statements
@@ -133,8 +133,13 @@ properties that should be enforced structurally rather than by convention:
   shapes in the AST.
 - Task state bodies MUST additionally accept `exit` and contextual `go`
   statements.
-- The current parser allows a `let` statement to include `mut`, a type
-  annotation, and an initializer.
+- A `let` statement MAY include `mut`, a place type annotation, and an
+  initializer.
+- A `let` statement with an initializer MUST preserve whether it used copy
+  transfer with `=` or move transfer with `<-`.
+- Assignment statements MUST preserve whether they used copy transfer with `=`
+  or move transfer with `<-`.
+- `let _ = expr;` and `let _ <- expr;` MUST parse `_` as the discard place.
 - A statement form that requires a semicolon MUST reject the form if the
   semicolon is absent.
 
@@ -201,7 +206,7 @@ issue direct diagnostics for obsolete source.
 ## LLG-SYN-08 Target Task State Syntax
 
 - The target task-state syntax MUST allow
-  `state name(param: Type, ...) { ... }` items nested directly inside task
+  `state name(param: PlaceType, ...) { ... }` items nested directly inside task
   bodies.
 - The target task-state syntax MUST allow task field declarations as top-level
   `let` declarations inside task bodies.
@@ -370,6 +375,8 @@ in its return type.
 - `Structural::consume(place)` MUST be the trusted operation that transforms a
   linear place mode to affine.
 - `Structural::use` and `Structural::consume` MUST require one argument.
+- `Structural::use` and `Structural::consume` MUST target an existing live
+  place with the required current structural mode.
 - `Structural` MUST be reserved as a builtin trusted namespace, not a marker
   family.
 - Marker families MUST NOT provide structural operation names such as `use` or
@@ -378,6 +385,9 @@ in its return type.
   diagnostic.
 - Unsafe marker construction MUST assert that the marker contract is true for
   the marked place.
+- Unsafe marker construction MUST target an existing live place.
+- Unsafe marker construction MUST merge the marker family's base structural
+  mode into the target place's current structural mode.
 - Compiler-derived marker facts MAY still be created by built-in control-flow
   and companion marker rules specified by this document.
 
@@ -404,12 +414,16 @@ unsafe {
 - `MemberOf(key, map)` MUST mark that `key` is known to be present in `map`.
 - `Event` MUST mark a value that represents fresh external input or a fresh
   externally scheduled occurrence.
+- Proof-like builtin marker families such as `LessThan` and `MemberOf` MUST be
+  unrestricted.
+- `Event` MUST contribute relevant mode when it is marked onto a place.
 - The trusted `read_u32()` host builtin MUST return a value marked with
   `Event`.
 
 User-defined marker-family declarations MUST use
-`marker Name(param: place, ...);`. A zero-parameter marker family MUST still use
-parentheses, such as `marker Trusted();`.
+`marker Name(param: place, ...) (: Mode)?;`. A zero-parameter marker family
+MUST still use parentheses, such as `marker Trusted();`.
+An omitted marker-family mode MUST default to `unrestricted`.
 User marker family parameter names MUST be unique and every parameter MUST have
 type `place`.
 User marker family names MUST live in a marker namespace separate from
@@ -428,7 +442,9 @@ Unsafe construction of a zero-parameter user marker family MUST use one target
 argument. Unsafe construction of a nonzero-parameter user marker family MUST use
 the declared arity.
 User marker families define no semantics by themselves; they become facts only
-through unsafe construction or companion-rule implications.
+through unsafe construction or companion-rule implications. Their declared
+structural mode is used only when a trusted marker construction adds the fact
+to a live place.
 
 ## LLG-MARK-05 Marker Transfer
 

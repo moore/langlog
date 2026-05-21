@@ -808,7 +808,7 @@ separate `drop` operator because `_` also works in patterns.
   discards for places that cease to be live.
 
 ```llg
-let _ = read_u32(); // explicit discard of a produced value
+let _ = 0;          // explicit discard of a produced value
 let _ <- x;         // move x into the discard place
 
 let Pair(keep, _) <- pair; // discard one destructured component

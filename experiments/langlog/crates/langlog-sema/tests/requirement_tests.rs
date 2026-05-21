@@ -1,7 +1,7 @@
 use langlog_sema::{
-    analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction,
-    HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirParamTransfer, HirPlaceMode,
-    HirStmt, HirTask, HirTrustedOperation, HirType, HostBuiltin,
+    analyze, BindingKind, CheckedProgram, HirAssignmentTransfer, HirBlock, HirExpr, HirExprKind,
+    HirFunction, HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirParamTransfer,
+    HirPlaceMode, HirStmt, HirTask, HirTrustedOperation, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt, Task};
 use langlog_syntax::{parse, LabelStyle, Span};
@@ -88,13 +88,6 @@ fn expr_stmt(block: &Block, index: usize) -> &Expr {
     }
 }
 
-fn block_expr(block: &Block, index: usize) -> &Block {
-    match &expr_stmt(block, index).kind {
-        ExprKind::Block(block) => block,
-        other => panic!("expected block expression at index {index}, got {other:?}"),
-    }
-}
-
 fn first_for_stmt(block: &Block) -> &ForStmt {
     block
         .statements
@@ -124,6 +117,13 @@ fn hir_let_stmt(block: &HirBlock, index: usize) -> &langlog_sema::HirLetStmt {
     match &block.statements[index] {
         HirStmt::Let(stmt) => stmt,
         other => panic!("expected HIR let statement at index {index}, got {other:?}"),
+    }
+}
+
+fn hir_assign_stmt(block: &HirBlock, index: usize) -> &langlog_sema::HirAssignStmt {
+    match &block.statements[index] {
+        HirStmt::Assign(stmt) => stmt,
+        other => panic!("expected HIR assignment statement at index {index}, got {other:?}"),
     }
 }
 
@@ -238,13 +238,13 @@ fn helper() {}
 
 fn main(param: u32) {
     let local = helper; // item binding
-    {
+    let _ = {
         let helper = local; // outer local binding
         helper              // inner local binding
     };
-    helper; // item binding again after leaving the inner block
-    param;  // parameter binding
-    local;  // outer local binding
+    let _ = helper; // item binding again after leaving the inner block
+    let _ = param;  // parameter binding
+    let _ = local;  // outer local binding
 }
 "#,
     );
@@ -253,7 +253,16 @@ fn main(param: u32) {
     let helper = function(&checked, "helper");
     let main = function(&checked, "main");
     let outer_let = let_stmt(&main.body, 0);
-    let inner_block = block_expr(&main.body, 1);
+    let inner_discard = let_stmt(&main.body, 1);
+    let inner_block = match &inner_discard
+        .value
+        .as_ref()
+        .expect("expected discarded block")
+        .kind
+    {
+        ExprKind::Block(block) => block,
+        other => panic!("expected block expression, got {other:?}"),
+    };
     let inner_let = let_stmt(inner_block, 0);
     let inner_helper_expr = inner_block
         .trailing_expr
@@ -290,28 +299,37 @@ fn main(param: u32) {
         "inner block trailing expression",
     );
 
-    // After the inner block ends, `helper;` should resolve back to the top-level item.
+    // After the inner block ends, `helper` should resolve back to the top-level item.
     assert_resolves_to(
         &checked,
-        expr_stmt(&main.body, 2),
+        let_stmt(&main.body, 2)
+            .value
+            .as_ref()
+            .expect("expected discarded helper"),
         BindingKind::Item,
         helper.name.span,
         "outer helper expression",
     );
 
-    // `param;` should resolve to the function parameter.
+    // `param` should resolve to the function parameter.
     assert_resolves_to(
         &checked,
-        expr_stmt(&main.body, 3),
+        let_stmt(&main.body, 3)
+            .value
+            .as_ref()
+            .expect("expected discarded param"),
         BindingKind::Param,
         main.params[0].name.span,
         "parameter expression",
     );
 
-    // `local;` should resolve to the outer local binding introduced by the first let.
+    // `local` should resolve to the outer local binding introduced by the first let.
     assert_resolves_to(
         &checked,
-        expr_stmt(&main.body, 4),
+        let_stmt(&main.body, 4)
+            .value
+            .as_ref()
+            .expect("expected discarded local"),
         BindingKind::Local,
         outer_let.name.span,
         "outer local expression",
@@ -390,7 +408,7 @@ fn requirement_llg_sema_01_rejects_references_to_undefined_bindings() {
     let checked = analyze_ok(
         r#"
 fn main() {
-    missing;           // no matching item, parameter, or local binding
+    let _ = missing;   // no matching item, parameter, or local binding
     let local = other; // initializer also refers to an undefined name
 }
 "#,
@@ -398,7 +416,10 @@ fn main() {
     assert!(checked.has_errors());
 
     let main = function(&checked, "main");
-    let missing_expr = expr_stmt(&main.body, 0);
+    let missing_expr = let_stmt(&main.body, 0)
+        .value
+        .as_ref()
+        .expect("expected missing initializer");
     let other_expr = let_stmt(&main.body, 1)
         .value
         .as_ref()
@@ -602,7 +623,7 @@ fn main(values: Set<u32, 16>) {
         r#"
 fn main(entries: Map<u32, bool, 16>) {
     for entry in entries {
-        entry == entry;
+        let _ = entry == entry;
     }
 }
 "#,
@@ -743,7 +764,7 @@ fn main(total: u32, limit: u32) {
         }
     }
 
-    total;
+    let _ = total;
 }
 "#,
     );
@@ -1023,6 +1044,26 @@ fn keep(value: u32 with Trusted, bound: u32) -> u32 with Trusted {
     );
 }
 
+//= HIR.md#llg-hir-03-types-and-mutability
+//= type=test
+//# HIR marker family declarations MUST record the declared structural marker mode.
+#[test]
+fn requirement_llg_hir_03_records_marker_family_modes() {
+    let checked = analyze_ok(
+        r#"
+marker Plain();
+marker Token(value: place) : linear;
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let hir = checked.hir.as_ref().expect("expected lowered HIR");
+    assert_eq!(hir.marker_families[0].name, "Plain");
+    assert_eq!(hir.marker_families[0].mode, HirPlaceMode::Unrestricted);
+    assert_eq!(hir.marker_families[1].name, "Token");
+    assert_eq!(hir.marker_families[1].mode, HirPlaceMode::Linear);
+}
+
 //= SPEC.md#llg-mark-04-builtin-marker-families
 //= type=test
 //# User marker family declarations MUST NOT duplicate another source marker family, shadow a builtin marker family, or use the reserved trusted namespace `Structural`.
@@ -1056,9 +1097,9 @@ marker Structural();
 fn requirement_llg_mark_03_lowers_structural_operations_distinctly() {
     let checked = analyze_ok(
         r#"
-fn main(event: u32, resource: u32) {
+fn main(event: relevant u32, resource: linear u32) {
     unsafe { Structural::use(event); }
-    let consumed: u32 = unsafe { Structural::consume(resource) };
+    unsafe { Structural::consume(resource); }
 }
 "#,
     );
@@ -1070,12 +1111,10 @@ fn main(event: u32, resource: u32) {
     };
     assert_eq!(stmt.operation, HirTrustedOperation::StructuralUse);
 
-    let consumed = hir_let_stmt(&main.body, 1);
-    let value = consumed.value.as_ref().expect("expected initializer");
     assert!(matches!(
-        &value.kind,
-        HirExprKind::UnsafeMarker { operation, .. }
-            if *operation == HirTrustedOperation::StructuralConsume
+        &main.body.statements[1],
+        HirStmt::UnsafeMarker(stmt)
+            if stmt.operation == HirTrustedOperation::StructuralConsume
     ));
 }
 
@@ -1102,6 +1141,66 @@ fn main(a: u32, b: u32) {
         &checked,
         "wrong number of arguments for `Structural::consume`: expected 1, found 2",
     );
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# `Structural::use` and `Structural::consume` MUST target an existing live place with the required current structural mode.
+#[test]
+fn requirement_llg_mark_03_checks_structural_operation_targets_and_modes() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let plain = 1;
+    let event: relevant u32 = 2;
+    unsafe { Structural::use(plain); }
+    unsafe { Structural::consume(event); }
+    unsafe { Structural::use(event); }
+    unsafe { Structural::consume(3); }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "Structural::use requires a relevant place, found unrestricted",
+    );
+    assert_diagnostic_message_contains(
+        &checked,
+        "Structural::consume requires a linear place, found relevant",
+    );
+    assert_diagnostic_message_contains(&checked, "Structural::consume must target a place");
+}
+
+//= SPEC.md#llg-mark-03-marker-construction
+//= type=test
+//# Unsafe marker construction MUST target an existing live place.
+#[test]
+fn requirement_llg_mark_03_marker_construction_targets_places_and_raises_modes() {
+    let literal = analyze_ok(
+        r#"
+fn main() {
+    unsafe { Event::mark(1); }
+}
+"#,
+    );
+    assert!(literal.has_errors());
+    assert_diagnostic_message_contains(&literal, "unsafe marker `Event` must target a place");
+
+    let marked = analyze_ok(
+        r#"
+marker Resource(value: place) : linear;
+
+fn main() {
+    let resource = 1;
+    unsafe { Resource::mark(resource); }
+    let copy = resource;
+}
+"#,
+    );
+    assert!(marked.has_errors());
+    assert_diagnostic_message_contains(&marked, "cannot copy linear place");
 }
 
 //= SPEC.md#llg-mark-04-builtin-marker-families
@@ -1383,7 +1482,7 @@ fn main(flag: bool) -> u32 {
     let total: u32 = true;
     let mut count = 0;
     count = false;
-    id(true);
+    let _ = id(true);
     return flag;
 }
 "#,
@@ -1396,7 +1495,11 @@ fn main(flag: bool) -> u32 {
         Stmt::Assign(stmt) => &stmt.value,
         other => panic!("expected assignment statement, got {other:?}"),
     };
-    let call_arg = match &expr_stmt(&main.body, 3).kind {
+    let call_expr = let_stmt(&main.body, 3)
+        .value
+        .as_ref()
+        .expect("expected discarded call");
+    let call_arg = match &call_expr.kind {
         ExprKind::Call { args, .. } => &args[0],
         other => panic!("expected call expression, got {other:?}"),
     };
@@ -1532,8 +1635,8 @@ fn requirement_llg_sema_04_requires_u32_for_arithmetic_ordering_and_ranges() {
     let valid = analyze_ok(
         r#"
 fn main(value: u32, limit: u32) {
-    value + limit;
-    value < limit;
+    let _ = value + limit;
+    let _ = value < limit;
     for index in 0 .. limit {
         observe index < limit else {
             return;
@@ -1548,8 +1651,8 @@ fn main(value: u32, limit: u32) {
     let invalid = analyze_ok(
         r#"
 fn main(flag: bool, limit: u32) {
-    flag + limit;
-    flag < limit;
+    let _ = flag + limit;
+    let _ = flag < limit;
     for index in true .. limit {
         return;
     }
@@ -1565,14 +1668,22 @@ fn main(flag: bool, limit: u32) {
     assert_primary_diagnostic(
         &invalid,
         "arithmetic operators must have type u32 or Result<u32, ArithmeticError>",
-        expr_stmt(&main.body, 0).span,
+        let_stmt(&main.body, 0)
+            .value
+            .as_ref()
+            .expect("expected discarded arithmetic")
+            .span,
     );
 
     // Reject ordering comparisons that are not `u32`.
     assert_primary_diagnostic(
         &invalid,
         "ordering comparisons must have type u32",
-        expr_stmt(&main.body, 1).span,
+        let_stmt(&main.body, 1)
+            .value
+            .as_ref()
+            .expect("expected discarded comparison")
+            .span,
     );
 
     // Reject range bounds that are not `u32`.
@@ -1678,7 +1789,7 @@ fn requirement_llg_sema_04_requires_homogeneous_arrays_and_typed_indexing() {
         r#"
 fn main(index: u32, entries: Map<u32, bool, 16>) -> bool {
     let values = [1, 2, 3];
-    values[index];
+    let _ = values[index];
     entries[index]
 }
 "#,
@@ -1690,8 +1801,8 @@ fn main(index: u32, entries: Map<u32, bool, 16>) -> bool {
         r#"
 fn main(flag: bool) {
     let values = [1, false];
-    values[flag];
-    flag[0];
+    let _ = values[flag];
+    let _ = flag[0];
 }
 "#,
     );
@@ -1706,7 +1817,12 @@ fn main(flag: bool) {
         ExprKind::Array(elements) => &elements[1],
         other => panic!("expected array literal, got {other:?}"),
     };
-    let bad_index = match &expr_stmt(&main.body, 1).kind {
+    let bad_index = match &let_stmt(&main.body, 1)
+        .value
+        .as_ref()
+        .expect("expected discarded index")
+        .kind
+    {
         ExprKind::Index { index, .. } => index,
         other => panic!("expected index expression, got {other:?}"),
     };
@@ -1725,7 +1841,11 @@ fn main(flag: bool) {
     assert_primary_diagnostic(
         &invalid,
         "indexing requires an array or map target",
-        expr_stmt(&main.body, 2).span,
+        let_stmt(&main.body, 2)
+            .value
+            .as_ref()
+            .expect("expected discarded bad index")
+            .span,
     );
 }
 
@@ -1754,11 +1874,11 @@ fn main(
     let outcome_copy: Result<u32, Error> = outcome_id(outcome);
     let members_copy: Set<u32, 16> = set_id(members);
     let table_copy: Map<u32, bool, 32> = map_id(table);
-    pair_copy == pair;
-    maybe_copy == maybe;
-    outcome_copy == outcome;
-    members_copy == members;
-    table_copy == table;
+    let _ = pair_copy == pair;
+    let _ = maybe_copy == maybe;
+    let _ = outcome_copy == outcome;
+    let _ = members_copy == members;
+    let _ = table_copy == table;
 }
 "#,
     );
@@ -1839,9 +1959,9 @@ fn requirement_llg_sem_01_adds_builtin_option_result_and_arithmetic_error_types(
     let checked = analyze_ok(
         r#"
 fn main(error: ArithmeticError, maybe: Option<u32>, result: Result<u32, ArithmeticError>) {
-    error;
-    maybe;
-    result;
+    let _ = error;
+    let _ = maybe;
+    let _ = result;
 }
 "#,
     );
@@ -1871,8 +1991,8 @@ fn main() {
     let underflow: ArithmeticError = arithmetic_underflow();
     let divide: ArithmeticError = divide_by_zero();
     let remainder: ArithmeticError = remainder_by_zero();
-    overflow == underflow;
-    divide != remainder;
+    let _ = overflow == underflow;
+    let _ = divide != remainder;
 }
 "#,
     );
@@ -1915,12 +2035,12 @@ fn main() {
     let nested_bool_error: Result<Option<u32>, bool> = ok(none());
     let nested_bool_error_copy: Result<Option<u32>, bool> = ok(some(1));
     let recovered: Option<u32> = nested_result or(err) some(0);
-    present == absent;
-    present == grouped;
-    nested_option == some(recovered);
-    success == failure;
-    bool_error_success == bool_error_failure;
-    nested_bool_error == nested_bool_error_copy;
+    let _ = present == absent;
+    let _ = present == grouped;
+    let _ = nested_option == some(recovered);
+    let _ = success == failure;
+    let _ = bool_error_success == bool_error_failure;
+    let _ = nested_bool_error == nested_bool_error_copy;
 }
 "#,
     );
@@ -1996,8 +2116,8 @@ fn main() {
     let underflow: ArithmeticError = arithmetic_underflow();
     let divide: ArithmeticError = divide_by_zero();
     let remainder: ArithmeticError = remainder_by_zero();
-    overflow != underflow;
-    divide != remainder;
+    let _ = overflow != underflow;
+    let _ = divide != remainder;
 }
 "#,
     );
@@ -2861,7 +2981,7 @@ fn helper(value: u32) -> u32 { value }
 
 fn main(param: u32) {
     let local = helper(param);
-    helper(local);
+    let _ = helper(local);
 }
 "#,
     );
@@ -2930,7 +3050,7 @@ fn add_one(value: u32) -> u32 { value + 1 or(err) 0 }
 fn main(flag: bool, input: u32) {
     let mut total = add_one(input);
     let pair = (total, flag);
-    pair;
+    let _ = pair;
 }
 "#,
     );
@@ -2967,6 +3087,8 @@ fn requirement_llg_hir_03_records_place_modes_separately_from_types() {
         r#"
 fn close(take handle: linear Handle) -> affine u32 {
     let token: relevant u32 = 1;
+    unsafe { Structural::consume(handle); }
+    unsafe { Structural::use(token); }
     0
 }
 
@@ -2974,6 +3096,7 @@ task main(seed: relevant u32) -> linear u32 {
     let field: affine u32 = 1;
 
     state start(seed: relevant u32) {
+        unsafe { Structural::use(seed); }
         exit 0;
     }
 }
@@ -3002,6 +3125,42 @@ task main(seed: relevant u32) -> linear u32 {
         Some(HirPlaceMode::Relevant)
     );
     assert_eq!(task.return_mode, HirPlaceMode::Linear);
+}
+
+//= HIR.md#llg-hir-03-types-and-mutability
+//= type=test
+//# HIR let bindings and assignments MUST record whether the source was copied or moved.
+#[test]
+fn requirement_llg_hir_03_records_assignment_transfer_kinds() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let source: linear u32 = 1;
+    let moved <- source;
+    unsafe { Structural::consume(moved); }
+
+    let mut slot = 0;
+    let next = 1;
+    slot <- next;
+    let _ = slot;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+    let main = hir_function(&checked, "main");
+    assert_eq!(
+        hir_let_stmt(&main.body, 0).transfer,
+        HirAssignmentTransfer::Copy
+    );
+    assert_eq!(
+        hir_let_stmt(&main.body, 1).transfer,
+        HirAssignmentTransfer::Move
+    );
+    assert_eq!(
+        hir_assign_stmt(&main.body, 5).transfer,
+        HirAssignmentTransfer::Move
+    );
 }
 
 //= SPEC.md#llg-type-04-place-mode-annotations
@@ -3102,12 +3261,14 @@ fn main() {
 fn requirement_llg_mm_06_relevant_parameter_copies_without_take() {
     let checked = analyze_ok(
         r#"
-fn remember(value: relevant u32) {}
+fn remember(value: relevant u32) {
+    unsafe { Structural::use(value); }
+}
 
 fn main() {
     let event: relevant u32 = 1;
     remember(event);
-    event;
+    unsafe { Structural::use(event); }
 }
 "#,
     );
@@ -3160,6 +3321,212 @@ fn main() {
     );
 }
 
+//= MARKER_MODES.md#llg-mm-03-copy-and-move-assignment
+//= type=test
+//# Copying a place MUST copy the source place's current mode to the receiving place.
+#[test]
+fn requirement_llg_mm_03_relevant_copy_preserves_mode_snapshot() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let source: relevant u32 = 1;
+    let before = source;
+    unsafe { Structural::use(source); }
+    let after = source;
+    unsafe { Structural::use(before); }
+    let _ = after;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let source: relevant u32 = 1;
+    let before = source;
+    unsafe { Structural::use(source); }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "cannot discard relevant place");
+}
+
+//= MARKER_MODES.md#llg-mm-03-copy-and-move-assignment
+//= type=test
+//# After a place is taken, later use of that source place MUST be rejected unless the place has been assigned a new value.
+#[test]
+fn requirement_llg_mm_03_move_transfer_rejects_later_source_use() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let event: relevant u32 = 1;
+    let moved <- event;
+    unsafe { Structural::use(moved); }
+    event;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "use of moved place");
+}
+
+//= MARKER_MODES.md#llg-mm-04-produced-values-must-flow-to-places
+//= type=test
+//# Every produced non-unit value MUST flow into a place.
+#[test]
+fn requirement_llg_mm_04_rejects_non_unit_expression_statements() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    1 + 1 or(err) 0;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "value of type u32 has no receiving place");
+}
+
+//= MARKER_MODES.md#llg-mm-05-the-discard-place
+//= type=test
+//# Discarding through `_` MUST reject values whose current place mode is `relevant` or `linear`.
+#[test]
+fn requirement_llg_mm_05_discard_place_checks_current_mode() {
+    let accepted = analyze_ok(
+        r#"
+fn main() {
+    let plain = 1;
+    let _ = plain;
+    let handle: affine u32 = 2;
+    let _ <- handle;
+}
+"#,
+    );
+    assert!(!accepted.has_errors(), "{:#?}", accepted.diagnostics);
+
+    let rejected = analyze_ok(
+        r#"
+fn main() {
+    let event: relevant u32 = 1;
+    let handle: linear u32 = 2;
+    let _ <- event;
+    let _ <- handle;
+}
+"#,
+    );
+
+    assert!(rejected.has_errors());
+    assert_diagnostic_message_contains(&rejected, "cannot discard relevant place");
+    assert_diagnostic_message_contains(&rejected, "cannot discard linear place");
+}
+
+//= MARKER_MODES.md#llg-mm-07-trusted-marker-operations
+//= type=test
+//# `Marker::mark(place)` MUST merge the marker type's base structural mode into the target place's current mode.
+#[test]
+fn requirement_llg_mm_07_event_mark_creates_relevant_mode_state() {
+    let rejected = analyze_ok(
+        r#"
+fn main() {
+    let event = 1;
+    unsafe { Event::mark(event); }
+}
+"#,
+    );
+    assert!(rejected.has_errors());
+    assert_diagnostic_message_contains(&rejected, "cannot discard relevant place");
+
+    let accepted = analyze_ok(
+        r#"
+fn main() {
+    let event = 1;
+    unsafe { Event::mark(event); }
+    unsafe { Structural::use(event); }
+}
+"#,
+    );
+    assert!(!accepted.has_errors(), "{:#?}", accepted.diagnostics);
+}
+
+//= MARKER_MODES.md#llg-mm-08-composite-structural-summaries
+//= type=test
+//# Composite places MUST surface the current structural modes of their reachable parts.
+#[test]
+fn requirement_llg_mm_08_composite_values_surface_restrictive_parts() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let event: relevant u32 = 1;
+    let pair = (event, 2);
+    unsafe { Structural::use(event); }
+    let _ = pair;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "cannot discard relevant place");
+}
+
+//= MARKER_MODES.md#llg-mm-11-implicit-discard-points
+//= type=test
+//# Implicitly discarding a place whose current mode is relevant or linear MUST be rejected.
+#[test]
+fn requirement_llg_mm_11_merges_branch_mode_state() {
+    let accepted = analyze_ok(
+        r#"
+fn main(flag: bool) {
+    let event: relevant u32 = 1;
+    if flag {
+        unsafe { Structural::use(event); }
+    } else {
+        unsafe { Structural::use(event); }
+    }
+}
+"#,
+    );
+    assert!(!accepted.has_errors(), "{:#?}", accepted.diagnostics);
+
+    let rejected = analyze_ok(
+        r#"
+fn main(flag: bool) {
+    let event: relevant u32 = 1;
+    if flag {
+        unsafe { Structural::use(event); }
+    } else {
+    }
+}
+"#,
+    );
+    assert!(rejected.has_errors());
+    assert_diagnostic_message_contains(&rejected, "cannot discard relevant place");
+}
+
+//= MARKER_MODES.md#llg-mm-10-arithmetic-and-operators
+//= type=test
+//# Arithmetic operators MUST reject operands whose place occurrence has affine or linear current mode.
+#[test]
+fn requirement_llg_mm_10_expression_operands_obey_copy_rules() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let handle: linear u32 = 1;
+    let _ = handle + 1 or(err) 0;
+    let _ = handle < 2;
+    unsafe { Structural::consume(handle); }
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "cannot copy linear place");
+}
+
 //= HIR.md#llg-hir-04-normalization-boundary
 //= type=test
 //# Omitted surface function return types MUST lower to explicit `()` return types in HIR, grouped expressions MUST NOT survive as distinct HIR nodes, and HIR blocks MUST represent trailing result positions explicitly.
@@ -3171,7 +3538,7 @@ fn helper(value: u32) -> u32 { value }
 
 fn main(input: u32) {
     let value = (helper(input));
-    {
+    let _ = {
         value
     };
 }
@@ -3245,7 +3612,7 @@ fn helper(value: u32) -> u32 { value }
 
 fn main(input: u32) {
     let copy = helper(input);
-    copy;
+    let _ = copy;
 }
 "#,
     );
@@ -3301,6 +3668,7 @@ fn requirement_llg_wasm_05_resolves_host_builtins_without_user_declarations() {
         r#"
 fn main() -> u32 {
     let value: u32 = read_u32();
+    unsafe { Structural::use(value); }
     print_u32(value);
     print_bool(true);
     print_newline();

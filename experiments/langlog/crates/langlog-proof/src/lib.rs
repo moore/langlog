@@ -856,6 +856,25 @@ impl ProofLowerer {
                         span: stmt.span,
                         fact,
                     });
+                } else if matches!(
+                    stmt.operation,
+                    HirTrustedOperation::StructuralUse | HirTrustedOperation::StructuralConsume
+                ) {
+                    if let Some(first) = args.first() {
+                        let place = first.place;
+                        entries.push(ProofEntry::Eval {
+                            span: stmt.span,
+                            expr: ProofExpr {
+                                kind: ProofExprKind::UnsafeMarker {
+                                    operation: stmt.operation.clone(),
+                                    args,
+                                },
+                                ty: HirType::Unit,
+                                span: stmt.span,
+                                place,
+                            },
+                        });
+                    }
                 }
             }
             HirStmt::Observe(stmt) => {

@@ -69,6 +69,7 @@ pub struct MarkerFamily {
     pub span: Span,
     pub name: Spanned<String>,
     pub params: Vec<MarkerFamilyParam>,
+    pub mode: PlaceMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,8 +206,10 @@ pub struct LetStmt {
     pub span: Span,
     pub mutable: bool,
     pub name: Spanned<String>,
+    pub discard: bool,
     pub mode: Option<PlaceMode>,
     pub ty: Option<Type>,
+    pub transfer: AssignmentTransfer,
     pub value: Option<Expr>,
 }
 
@@ -214,7 +217,14 @@ pub struct LetStmt {
 pub struct AssignStmt {
     pub span: Span,
     pub target: Expr,
+    pub transfer: AssignmentTransfer,
     pub value: Expr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentTransfer {
+    Copy,
+    Move,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

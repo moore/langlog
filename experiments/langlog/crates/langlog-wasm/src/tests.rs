@@ -1213,7 +1213,9 @@ fn requirement_llg_wasm_05_emits_host_builtin_imports() {
         r#"
 fn main() -> u32 {
     let maybe: Option<u32> = some(1);
-    print_u32(read_u32());
+    let input: relevant u32 = read_u32();
+    unsafe { Structural::use(input); }
+    print_u32(input);
     maybe or 0
 }
 "#,
@@ -1236,9 +1238,9 @@ fn requirement_llg_wasm_05_emits_host_builtin_imports_from_nested_else_branches(
         r#"
 fn main() -> u32 {
     if false {
-        0;
+        let _ = 0;
     } else if false {
-        1;
+        let _ = 1;
     } else {
         print_u32(42);
     }
@@ -1261,7 +1263,8 @@ fn requirement_llg_wasm_05_executes_host_builtin_imports() {
     let (result, output) = run_main_with_host(
         r#"
 fn main() -> u32 {
-    let value: u32 = read_u32();
+    let value: relevant u32 = read_u32();
+    unsafe { Structural::use(value); }
     print_u32(value);
     value
 }

@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use langlog_syntax::ast::{
-    BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MarkerAnnotation,
-    MarkerArg, MarkerArgKind, MarkerFamily, MarkerImplicationStmt, MarkerRefinement, MarkerRule,
-    MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, ParamTransfer, Pattern, PatternKind,
-    PlaceMode, Stmt, Task, TrustedOperation, Type, TypeKind, UnaryOp,
+    AssignmentTransfer, BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item,
+    MarkerAnnotation, MarkerArg, MarkerArgKind, MarkerFamily, MarkerImplicationStmt,
+    MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp,
+    ParamTransfer, Pattern, PatternKind, PlaceMode, Stmt, Task, TrustedOperation, Type, TypeKind,
+    UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -38,6 +39,7 @@ enum ItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MarkerFamilySignature {
     arity: usize,
+    mode: PlaceMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +316,7 @@ impl SemanticType {
 struct TypeFacts {
     expr_types: HashMap<Span, SemanticType>,
     binding_types: HashMap<Span, SemanticType>,
+    binding_modes: HashMap<Span, PlaceMode>,
 }
 
 impl TypeFacts {
@@ -326,12 +329,20 @@ impl TypeFacts {
         self.binding_types.insert(span, ty);
     }
 
+    fn record_binding_mode(&mut self, span: Span, mode: PlaceMode) {
+        self.binding_modes.insert(span, mode);
+    }
+
     fn expr_type(&self, span: Span) -> Option<&SemanticType> {
         self.expr_types.get(&span)
     }
 
     fn binding_type(&self, span: Span) -> Option<&SemanticType> {
         self.binding_types.get(&span)
+    }
+
+    fn binding_mode(&self, span: Span) -> Option<PlaceMode> {
+        self.binding_modes.get(&span).copied()
     }
 }
 
@@ -600,20 +611,22 @@ impl<'a> Analyzer<'a> {
                 if let Some(value) = &stmt.value {
                     self.analyze_expr(value, scopes, context);
                 }
-                scopes.insert(
-                    stmt.name.value.clone(),
-                    Binding {
-                        kind: BindingKind::Local,
-                        span: stmt.name.span,
-                        loop_bound: stmt.ty.as_ref().is_some_and(is_bounded_iterable_type)
-                            || stmt
-                                .value
-                                .as_ref()
-                                .and_then(|expr| self.iterable_bound(expr, scopes))
-                                .unwrap_or(false),
-                        mutable: stmt.mutable,
-                    },
-                );
+                if !stmt.discard {
+                    scopes.insert(
+                        stmt.name.value.clone(),
+                        Binding {
+                            kind: BindingKind::Local,
+                            span: stmt.name.span,
+                            loop_bound: stmt.ty.as_ref().is_some_and(is_bounded_iterable_type)
+                                || stmt
+                                    .value
+                                    .as_ref()
+                                    .and_then(|expr| self.iterable_bound(expr, scopes))
+                                    .unwrap_or(false),
+                            mutable: stmt.mutable,
+                        },
+                    );
+                }
                 if let Some(ty) = &stmt.ty {
                     self.analyze_type_marker_args(ty, scopes);
                 }
@@ -1204,6 +1217,7 @@ impl<'a> TypeChecker<'a> {
                     family.name.value.clone(),
                     MarkerFamilySignature {
                         arity: family.params.len(),
+                        mode: family.mode,
                     },
                 )),
                 Item::Function(_) | Item::Task(_) | Item::MarkerRule(_) => None,
@@ -1286,6 +1300,10 @@ impl<'a> TypeChecker<'a> {
             let param_type = lower_type(&param.ty);
             self.facts
                 .record_binding(param.name.span, param_type.clone());
+            self.facts.record_binding_mode(
+                param.name.span,
+                param.mode.unwrap_or(PlaceMode::Unrestricted),
+            );
             scopes.insert_with_mode(
                 param.name.value.clone(),
                 param_type,
@@ -1328,6 +1346,10 @@ impl<'a> TypeChecker<'a> {
             let param_type = lower_type(&param.ty);
             self.facts
                 .record_binding(param.name.span, param_type.clone());
+            self.facts.record_binding_mode(
+                param.name.span,
+                param.mode.unwrap_or(PlaceMode::Unrestricted),
+            );
             scopes.insert_with_mode(
                 param.name.value.clone(),
                 param_type,
@@ -1363,6 +1385,7 @@ impl<'a> TypeChecker<'a> {
             );
             self.facts
                 .record_binding(field.name.span, field_type.clone());
+            self.facts.record_binding_mode(field.name.span, field_mode);
             scopes.insert_with_mode(field.name.value.clone(), field_type, field_mode);
         }
 
@@ -1419,6 +1442,10 @@ impl<'a> TypeChecker<'a> {
                 let param_type = lower_type(&param.ty);
                 self.facts
                     .record_binding(param.name.span, param_type.clone());
+                self.facts.record_binding_mode(
+                    param.name.span,
+                    param.mode.unwrap_or(PlaceMode::Unrestricted),
+                );
                 scopes.insert_with_mode(
                     param.name.value.clone(),
                     param_type,
@@ -1437,7 +1464,7 @@ impl<'a> TypeChecker<'a> {
             if !is_terminal_block(&state.body, TerminalKind::TaskState) {
                 self.report_task_state_fallthrough(state.body.span);
             }
-            scopes.pop();
+            self.pop_scope(&mut scopes, state.span);
         }
         self.task_state_stack.pop();
 
@@ -1614,8 +1641,18 @@ impl<'a> TypeChecker<'a> {
                 result
             })
             .unwrap_or(SemanticType::Unit);
-        scopes.pop();
+        self.pop_scope(scopes, block.span);
         result
+    }
+
+    fn pop_scope(&mut self, scopes: &mut TypeScopeStack, span: Span) {
+        if let Some(scope) = scopes.pop() {
+            for place in scope.values() {
+                if place.live {
+                    self.check_discard_mode(span, place.mode);
+                }
+            }
+        }
     }
 
     fn check_statement(
@@ -1634,6 +1671,9 @@ impl<'a> TypeChecker<'a> {
                 if stmt.ty.is_none() && stmt.value.is_none() {
                     self.report_let_requires_type_or_initializer(stmt.name.span);
                 }
+                if stmt.discard && stmt.value.is_none() {
+                    self.report_discard_requires_initializer(stmt.name.span);
+                }
                 if let (Some(annotation_type), Some(value_type)) = (&annotation_type, &value_type) {
                     self.require_same_type(stmt.span, annotation_type, value_type);
                 }
@@ -1643,38 +1683,64 @@ impl<'a> TypeChecker<'a> {
                     .map(lower_type)
                     .or(value_type)
                     .unwrap_or(SemanticType::Unknown);
-                self.facts
-                    .record_binding(stmt.name.span, binding_type.clone());
                 let binding_mode = self.let_binding_mode(stmt, scopes);
-                scopes.insert_with_mode(stmt.name.value.clone(), binding_type, binding_mode);
+                if stmt.discard {
+                    if let Some(value) = &stmt.value {
+                        self.check_discard_flow(value, binding_mode);
+                    }
+                } else {
+                    self.facts
+                        .record_binding(stmt.name.span, binding_type.clone());
+                    self.facts.record_binding_mode(stmt.name.span, binding_mode);
+                    scopes.insert_with_mode(stmt.name.value.clone(), binding_type, binding_mode);
+                }
                 if let Some(ty) = &stmt.ty {
                     self.check_marker_qualified_type(ty, scopes, true);
                 }
             }
             Stmt::Assign(stmt) => {
-                let target = self.check_expr(&stmt.target, scopes);
+                let target = self.check_assignment_target_type(&stmt.target, scopes);
                 let value = self.check_expr_with_expected(&stmt.value, scopes, Some(&target));
                 self.require_same_type(stmt.value.span, &target, &value);
+                self.check_assignment_flow(stmt, value, scopes);
             }
             Stmt::Expr(stmt) => {
-                self.check_expr(&stmt.expr, scopes);
+                let ty = self.check_expr(&stmt.expr, scopes);
+                if ty != SemanticType::Unit {
+                    self.report_unreceived_value(stmt.expr.span, &ty);
+                }
             }
             Stmt::If(stmt) => {
                 let condition_type = self.check_expr(&stmt.condition, scopes);
                 self.require_bool(stmt.condition.span, &condition_type, "if conditions");
+                self.check_copy_use(&stmt.condition, scopes);
+                let base = scopes.clone();
+                let mut then_scopes = base.clone();
                 self.check_block(
                     &stmt.then_block,
-                    scopes,
+                    &mut then_scopes,
                     expected_return,
                     expected_return_mode,
                 );
+                let mut else_scopes = base.clone();
                 if let Some(else_branch) = &stmt.else_branch {
                     self.check_else_branch(
                         else_branch,
-                        scopes,
+                        &mut else_scopes,
                         expected_return,
                         expected_return_mode,
                     );
+                }
+                let then_continues = block_can_continue(&stmt.then_block);
+                let else_continues = stmt
+                    .else_branch
+                    .as_ref()
+                    .is_none_or(else_branch_can_continue);
+                match (then_continues, else_continues) {
+                    (true, true) => scopes.merge_from_branches(&then_scopes, &else_scopes),
+                    (true, false) => *scopes = then_scopes,
+                    (false, true) => *scopes = else_scopes,
+                    (false, false) => {}
                 }
             }
             Stmt::Match(stmt) => {
@@ -1690,7 +1756,7 @@ impl<'a> TypeChecker<'a> {
                             self.check_expr(expr, scopes);
                         }
                     }
-                    scopes.pop();
+                    self.pop_scope(scopes, arm.span);
                 }
             }
             Stmt::For(stmt) => {
@@ -1702,7 +1768,7 @@ impl<'a> TypeChecker<'a> {
                     &iterable_item_type(&iterable_type).unwrap_or(SemanticType::Unknown),
                 );
                 self.check_block(&stmt.body, scopes, expected_return, expected_return_mode);
-                scopes.pop();
+                self.pop_scope(scopes, stmt.span);
             }
             Stmt::Return(stmt) => {
                 let value_type = stmt
@@ -1739,6 +1805,8 @@ impl<'a> TypeChecker<'a> {
             Stmt::Observe(stmt) => {
                 let left = self.check_expr(&stmt.left, scopes);
                 let right = self.check_expr(&stmt.right, scopes);
+                self.check_copy_use(&stmt.left, scopes);
+                self.check_copy_use(&stmt.right, scopes);
                 self.require_observe_types(stmt.span, stmt.op, &left, &right);
                 self.check_block(
                     &stmt.else_block,
@@ -1831,7 +1899,11 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Tuple(elements) => SemanticType::Tuple(
                 elements
                     .iter()
-                    .map(|element| self.check_expr(element, scopes))
+                    .map(|element| {
+                        let ty = self.check_expr(element, scopes);
+                        self.check_copy_use(element, scopes);
+                        ty
+                    })
                     .collect(),
             ),
             ExprKind::Array(elements) => self.check_array_expr(expr.span, elements, scopes),
@@ -1843,6 +1915,7 @@ impl<'a> TypeChecker<'a> {
             ),
             ExprKind::Unary { op, expr } => {
                 let operand = self.check_expr(expr, scopes);
+                self.check_copy_use(expr, scopes);
                 match op {
                     UnaryOp::Neg => {
                         self.require_u32(expr.span, &operand, "arithmetic operators");
@@ -1857,6 +1930,8 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Binary { op, left, right } => {
                 let left_type = self.check_expr(left, scopes);
                 let right_type = self.check_expr(right, scopes);
+                self.check_copy_use(left, scopes);
+                self.check_copy_use(right, scopes);
                 self.check_binary_expr(expr.span, *op, &left_type, &right_type)
             }
             ExprKind::Recover {
@@ -1883,6 +1958,8 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Index { target, index } => {
                 let target_type = self.check_expr(target, scopes);
                 let index_type = self.check_expr(index, scopes);
+                self.check_copy_use(target, scopes);
+                self.check_copy_use(index, scopes);
                 self.check_index_expr(expr.span, &target_type, index.span, &index_type)
             }
             ExprKind::MarkerRefinement { subject, marker } => {
@@ -2003,6 +2080,25 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
+    fn marker_family_mode(&self, family: &HirMarkerFamily) -> PlaceMode {
+        match family {
+            HirMarkerFamily::Event => PlaceMode::Relevant,
+            HirMarkerFamily::User(name) => self
+                .marker_families
+                .get(name)
+                .map(|signature| signature.mode)
+                .unwrap_or(PlaceMode::Unrestricted),
+            HirMarkerFamily::True
+            | HirMarkerFamily::False
+            | HirMarkerFamily::Equal
+            | HirMarkerFamily::LessThan
+            | HirMarkerFamily::GreaterThan
+            | HirMarkerFamily::LessOrEqual
+            | HirMarkerFamily::GreaterOrEqual
+            | HirMarkerFamily::MemberOf => PlaceMode::Unrestricted,
+        }
+    }
+
     fn check_unsafe_marker_construction(
         &mut self,
         operation: &TrustedOperation,
@@ -2033,6 +2129,15 @@ impl<'a> TypeChecker<'a> {
             arg_types.push(self.check_expr(arg, scopes));
         }
 
+        if let Some(target) = args.first() {
+            if let Some(name) = expr_place_name(target) {
+                let mode = self.marker_family_mode(&family);
+                scopes.merge_mode(name.value.as_str(), mode);
+            } else if args.len() == expected {
+                self.report_marker_constructor_target(marker_span, marker_name, target.span);
+            }
+        }
+
         arg_types
             .into_iter()
             .next()
@@ -2045,23 +2150,49 @@ impl<'a> TypeChecker<'a> {
         args: &[Expr],
         scopes: &mut TypeScopeStack,
     ) -> SemanticType {
-        let (span, name) = match operation {
-            TrustedOperation::StructuralUse { method, .. } => (method.span, "Structural::use"),
-            TrustedOperation::StructuralConsume { method, .. } => {
-                (method.span, "Structural::consume")
-            }
+        let (span, op_name, expected_mode, replacement_mode) = match operation {
+            TrustedOperation::StructuralUse { method, .. } => (
+                method.span,
+                "Structural::use",
+                PlaceMode::Relevant,
+                PlaceMode::Unrestricted,
+            ),
+            TrustedOperation::StructuralConsume { method, .. } => (
+                method.span,
+                "Structural::consume",
+                PlaceMode::Linear,
+                PlaceMode::Affine,
+            ),
             TrustedOperation::MarkerMark { .. } => {
                 unreachable!("marker operations are checked separately")
             }
         };
 
         if args.len() != 1 {
-            self.report_structural_operation_arity(span, name, args.len());
+            self.report_structural_operation_arity(span, op_name, args.len());
         }
 
         let mut arg_types = Vec::new();
         for arg in args {
             arg_types.push(self.check_expr(arg, scopes));
+        }
+
+        if let Some(target) = args.first() {
+            if let Some(name) = expr_place_name(target) {
+                let mode = self.expr_mode(target, scopes);
+                if mode != expected_mode {
+                    self.report_structural_operation_mode(
+                        target.span,
+                        op_name,
+                        expected_mode,
+                        mode,
+                    );
+                } else {
+                    scopes.set_mode(name.value.as_str(), replacement_mode);
+                }
+            } else if args.len() == 1 {
+                self.report_structural_operation_target(target.span, op_name);
+            }
         }
 
         arg_types
@@ -2101,6 +2232,7 @@ impl<'a> TypeChecker<'a> {
         let mut element_type = None;
         for element in elements {
             let current = self.check_expr(element, scopes);
+            self.check_copy_use(element, scopes);
             if let Some(expected) = &element_type {
                 self.require_same_type(element.span, expected, &current);
             } else {
@@ -2198,6 +2330,7 @@ impl<'a> TypeChecker<'a> {
                     _ => None,
                 };
                 let value = self.check_expr_with_expected(&args[0], scopes, expected_inner);
+                self.check_copy_use(&args[0], scopes);
                 let return_type = SemanticType::Option(Box::new(value.clone()));
                 self.record_builtin_callee_type(
                     callee,
@@ -2236,6 +2369,7 @@ impl<'a> TypeChecker<'a> {
                     _ => (None, None),
                 };
                 let value = self.check_expr_with_expected(&args[0], scopes, expected_ok);
+                self.check_copy_use(&args[0], scopes);
                 if let Some(expected_ok) = expected_ok {
                     self.require_same_type(args[0].span, expected_ok, &value);
                 }
@@ -2274,6 +2408,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 };
                 let err_type = self.check_expr_with_expected(&args[0], scopes, expected_err);
+                self.check_copy_use(&args[0], scopes);
                 if let Some(expected_err) = expected_err {
                     self.require_same_type(args[0].span, expected_err, &err_type);
                 }
@@ -2360,6 +2495,7 @@ impl<'a> TypeChecker<'a> {
         scopes: &mut TypeScopeStack,
     ) -> SemanticType {
         let target_type = self.check_expr(target, scopes);
+        self.check_copy_use(target, scopes);
         match (error_binding, target_type) {
             (None, SemanticType::Option(inner)) => {
                 let fallback_type =
@@ -2373,7 +2509,7 @@ impl<'a> TypeChecker<'a> {
                 scopes.insert(binding.value.clone(), (*err).clone());
                 let fallback_type =
                     self.check_expr_with_expected(fallback, scopes, Some(ok.as_ref()));
-                scopes.pop();
+                self.pop_scope(scopes, fallback.span);
                 self.require_same_type(fallback.span, ok.as_ref(), &fallback_type);
                 *ok
             }
@@ -2420,13 +2556,11 @@ impl<'a> TypeChecker<'a> {
         let receiving_mode = stmt.mode.unwrap_or(source_mode);
 
         if let Some(value) = &stmt.value {
-            self.check_receiving_flow(
-                value,
-                source_mode,
-                receiving_mode,
-                TransferContext::Copy,
-                scopes,
-            );
+            let transfer = match stmt.transfer {
+                AssignmentTransfer::Copy => TransferContext::Copy,
+                AssignmentTransfer::Move => TransferContext::Move,
+            };
+            self.check_receiving_flow(value, source_mode, receiving_mode, transfer, scopes);
         }
 
         receiving_mode
@@ -2439,8 +2573,50 @@ impl<'a> TypeChecker<'a> {
         scopes: &mut TypeScopeStack,
     ) {
         let source_mode = self.expr_mode(value, scopes);
-        if !mode_compatible(source_mode, receiving_mode) {
-            self.report_mode_incompatible(value.span, source_mode, receiving_mode);
+        self.check_receiving_flow(
+            value,
+            source_mode,
+            receiving_mode,
+            TransferContext::Move,
+            scopes,
+        );
+    }
+
+    fn check_assignment_flow(
+        &mut self,
+        stmt: &langlog_syntax::ast::AssignStmt,
+        value_type: SemanticType,
+        scopes: &mut TypeScopeStack,
+    ) {
+        let Some(target_name) = expr_place_name(&stmt.target) else {
+            return;
+        };
+        if let Some(old) = scopes.lookup_place(target_name.value.as_str()) {
+            self.check_discard_mode(stmt.target.span, old.mode);
+        }
+        let source_mode = self.expr_mode(&stmt.value, scopes);
+        let transfer = match stmt.transfer {
+            AssignmentTransfer::Copy => TransferContext::Copy,
+            AssignmentTransfer::Move => TransferContext::Move,
+        };
+        self.check_receiving_flow(&stmt.value, source_mode, source_mode, transfer, scopes);
+        scopes.overwrite(target_name.value.as_str(), value_type, source_mode);
+    }
+
+    fn check_discard_flow(&mut self, value: &Expr, source_mode: PlaceMode) {
+        self.check_discard_mode(value.span, source_mode);
+    }
+
+    fn check_discard_mode(&mut self, span: Span, mode: PlaceMode) {
+        if matches!(mode, PlaceMode::Relevant | PlaceMode::Linear) {
+            self.report_discard_of_restrictive_mode(span, mode);
+        }
+    }
+
+    fn check_copy_use(&mut self, expr: &Expr, scopes: &TypeScopeStack) {
+        let source_mode = self.expr_mode(expr, scopes);
+        if expr_place_name(expr).is_some() && !mode_allows_copy(source_mode) {
+            self.report_copy_of_noncopyable_mode(expr.span, source_mode);
         }
     }
 
@@ -2457,6 +2633,31 @@ impl<'a> TypeChecker<'a> {
             TransferContext::Copy
         };
         self.check_receiving_flow(arg, source_mode, expected.mode, transfer, scopes);
+    }
+
+    fn check_assignment_target_type(
+        &mut self,
+        target: &Expr,
+        scopes: &TypeScopeStack,
+    ) -> SemanticType {
+        match &target.kind {
+            ExprKind::Name(name) => {
+                let ty = scopes
+                    .lookup_place(name.value.as_str())
+                    .map(|place| place.ty)
+                    .unwrap_or(SemanticType::Unknown);
+                self.facts.record_expr(target.span, ty)
+            }
+            ExprKind::Grouped(expr) => {
+                let ty = self.check_assignment_target_type(expr, scopes);
+                self.facts.record_expr(target.span, ty.clone());
+                ty
+            }
+            _ => {
+                let mut cloned = scopes.clone();
+                self.check_expr(target, &mut cloned)
+            }
+        }
     }
 
     fn check_receiving_flow(
@@ -2492,24 +2693,52 @@ impl<'a> TypeChecker<'a> {
                 .map(|place| place.mode)
                 .unwrap_or(PlaceMode::Unrestricted),
             ExprKind::Grouped(expr) => self.expr_mode(expr, scopes),
-            ExprKind::Call { callee, .. } => self
-                .callee_return_mode(callee)
-                .unwrap_or(PlaceMode::Unrestricted),
+            ExprKind::Call { callee, args } => {
+                if matches!(
+                    callee_builtin(callee),
+                    Some(HostBuiltin::Some | HostBuiltin::Ok | HostBuiltin::Err)
+                ) {
+                    args.iter()
+                        .map(|arg| self.expr_mode(arg, scopes))
+                        .fold(PlaceMode::Unrestricted, mode_merge)
+                } else {
+                    self.callee_return_mode(callee)
+                        .unwrap_or(PlaceMode::Unrestricted)
+                }
+            }
             ExprKind::Block(block) => block
                 .trailing_expr
                 .as_deref()
                 .map(|expr| self.expr_mode(expr, scopes))
                 .unwrap_or(PlaceMode::Unrestricted),
             ExprKind::Recover { fallback, .. } => self.expr_mode(fallback, scopes),
+            ExprKind::Tuple(elements) | ExprKind::Array(elements) => elements
+                .iter()
+                .map(|expr| self.expr_mode(expr, scopes))
+                .fold(PlaceMode::Unrestricted, mode_merge),
+            ExprKind::UnsafeMarker(construction) => match &construction.operation {
+                TrustedOperation::MarkerMark { marker } => self
+                    .resolve_marker_family(marker.value.as_str())
+                    .map(|family| {
+                        mode_merge(
+                            construction
+                                .args
+                                .first()
+                                .map(|arg| self.expr_mode(arg, scopes))
+                                .unwrap_or(PlaceMode::Unrestricted),
+                            self.marker_family_mode(&family),
+                        )
+                    })
+                    .unwrap_or(PlaceMode::Unrestricted),
+                TrustedOperation::StructuralUse { .. } => PlaceMode::Unrestricted,
+                TrustedOperation::StructuralConsume { .. } => PlaceMode::Affine,
+            },
             ExprKind::Int(_)
             | ExprKind::Bool(_)
-            | ExprKind::Tuple(_)
-            | ExprKind::Array(_)
             | ExprKind::Unary { .. }
             | ExprKind::Binary { .. }
             | ExprKind::Index { .. }
-            | ExprKind::MarkerRefinement { .. }
-            | ExprKind::UnsafeMarker(_) => PlaceMode::Unrestricted,
+            | ExprKind::MarkerRefinement { .. } => PlaceMode::Unrestricted,
         }
     }
 
@@ -2843,6 +3072,66 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
+    fn report_discard_of_restrictive_mode(&mut self, span: Span, mode: PlaceMode) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("cannot discard {} place", mode_name(mode))).with_label(
+                Label::primary(span, "this place must be used, consumed, or moved"),
+            ),
+        );
+    }
+
+    fn report_discard_requires_initializer(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error("discard bindings require an initializer")
+                .with_label(Label::primary(span, "add a value to discard here")),
+        );
+    }
+
+    fn report_unreceived_value(&mut self, span: Span, ty: &SemanticType) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "value of type {} has no receiving place",
+                ty.describe()
+            ))
+            .with_label(Label::primary(
+                span,
+                "assign this value to a place or discard it with `_`",
+            )),
+        );
+    }
+
+    fn report_marker_constructor_target(&mut self, span: Span, name: &str, target_span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("unsafe marker `{name}` must target a place"))
+                .with_label(Label::primary(target_span, "expected a live place here"))
+                .with_label(Label::secondary(span, "marker construction starts here")),
+        );
+    }
+
+    fn report_structural_operation_target(&mut self, span: Span, name: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("{name} must target a place"))
+                .with_label(Label::primary(span, "expected a live place here")),
+        );
+    }
+
+    fn report_structural_operation_mode(
+        &mut self,
+        span: Span,
+        name: &str,
+        expected: PlaceMode,
+        found: PlaceMode,
+    ) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "{name} requires a {} place, found {}",
+                mode_name(expected),
+                mode_name(found)
+            ))
+            .with_label(Label::primary(span, "structural operation mode mismatch")),
+        );
+    }
+
     fn report_use_after_move(&mut self, span: Span, moved_at: Option<Span>) {
         let mut diagnostic = Diagnostic::error("use of moved place")
             .with_label(Label::primary(span, "place was already moved"));
@@ -3069,7 +3358,7 @@ impl<'a> TypeChecker<'a> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct TypeScopeStack {
     scopes: Vec<HashMap<String, TypePlaceState>>,
 }
@@ -3079,8 +3368,8 @@ impl TypeScopeStack {
         self.scopes.push(HashMap::new());
     }
 
-    fn pop(&mut self) {
-        self.scopes.pop();
+    fn pop(&mut self) -> Option<HashMap<String, TypePlaceState>> {
+        self.scopes.pop()
     }
 
     fn insert(&mut self, name: String, ty: SemanticType) {
@@ -3122,6 +3411,71 @@ impl TypeScopeStack {
         {
             place.live = false;
             place.moved_at = Some(moved_at);
+        }
+    }
+
+    fn set_mode(&mut self, name: &str, mode: PlaceMode) {
+        if let Some(place) = self
+            .scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+        {
+            place.mode = mode;
+        }
+    }
+
+    fn merge_mode(&mut self, name: &str, mode: PlaceMode) {
+        if let Some(place) = self
+            .scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+        {
+            place.mode = mode_merge(place.mode, mode);
+        }
+    }
+
+    fn overwrite(&mut self, name: &str, ty: SemanticType, mode: PlaceMode) {
+        if let Some(place) = self
+            .scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+        {
+            place.ty = ty;
+            place.mode = mode;
+            place.live = true;
+            place.moved_at = None;
+        }
+    }
+
+    fn merge_from_branches(&mut self, left: &TypeScopeStack, right: &TypeScopeStack) {
+        for (scope_index, scope) in self.scopes.iter_mut().enumerate() {
+            for (name, place) in scope.iter_mut() {
+                let left_place = left
+                    .scopes
+                    .get(scope_index)
+                    .and_then(|scope| scope.get(name));
+                let right_place = right
+                    .scopes
+                    .get(scope_index)
+                    .and_then(|scope| scope.get(name));
+                match (left_place, right_place) {
+                    (Some(left_place), Some(right_place)) => {
+                        place.mode = mode_merge(left_place.mode, right_place.mode);
+                        place.live = left_place.live && right_place.live;
+                        place.moved_at = if place.live {
+                            None
+                        } else {
+                            left_place.moved_at.or(right_place.moved_at)
+                        };
+                    }
+                    _ => {
+                        place.live = false;
+                    }
+                }
+            }
         }
     }
 }
@@ -3281,7 +3635,7 @@ fn host_builtin_signature(builtin: HostBuiltin) -> FunctionType {
     match builtin {
         HostBuiltin::ReadU32 => FunctionType {
             params: Vec::new(),
-            return_mode: PlaceMode::Unrestricted,
+            return_mode: PlaceMode::Relevant,
             return_type: Box::new(SemanticType::U32),
         },
         HostBuiltin::PrintU32 => FunctionType {
@@ -3355,6 +3709,18 @@ fn mode_compatible(source: PlaceMode, receiving: PlaceMode) -> bool {
             | (PlaceMode::Relevant, PlaceMode::Relevant | PlaceMode::Linear)
             | (PlaceMode::Linear, PlaceMode::Linear)
     )
+}
+
+fn mode_merge(left: PlaceMode, right: PlaceMode) -> PlaceMode {
+    match (left, right) {
+        (PlaceMode::Linear, _) | (_, PlaceMode::Linear) => PlaceMode::Linear,
+        (PlaceMode::Affine, PlaceMode::Relevant) | (PlaceMode::Relevant, PlaceMode::Affine) => {
+            PlaceMode::Linear
+        }
+        (PlaceMode::Affine, _) | (_, PlaceMode::Affine) => PlaceMode::Affine,
+        (PlaceMode::Relevant, _) | (_, PlaceMode::Relevant) => PlaceMode::Relevant,
+        (PlaceMode::Unrestricted, PlaceMode::Unrestricted) => PlaceMode::Unrestricted,
+    }
 }
 
 fn mode_name(mode: PlaceMode) -> &'static str {
@@ -3465,6 +3831,55 @@ fn is_terminal_block(block: &Block, kind: TerminalKind) -> bool {
             .statements
             .last()
             .is_some_and(|statement| is_terminal_statement(statement, kind))
+}
+
+fn block_can_continue(block: &Block) -> bool {
+    block.trailing_expr.is_some()
+        || !block
+            .statements
+            .last()
+            .is_some_and(statement_is_always_terminal)
+}
+
+fn statement_is_always_terminal(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Return(_) | Stmt::Exit(_) | Stmt::Go(_) => true,
+        Stmt::If(stmt) => {
+            !block_can_continue(&stmt.then_block)
+                && stmt
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|branch| !else_branch_can_continue(branch))
+        }
+        Stmt::Match(stmt) => {
+            !stmt.arms.is_empty()
+                && stmt
+                    .arms
+                    .iter()
+                    .all(|arm| !match_body_can_continue(&arm.body))
+        }
+        _ => false,
+    }
+}
+
+fn else_branch_can_continue(branch: &ElseBranch) -> bool {
+    match branch {
+        ElseBranch::Block(block) => block_can_continue(block),
+        ElseBranch::If(stmt) => {
+            block_can_continue(&stmt.then_block)
+                || stmt
+                    .else_branch
+                    .as_ref()
+                    .is_none_or(else_branch_can_continue)
+        }
+    }
+}
+
+fn match_body_can_continue(body: &MatchBody) -> bool {
+    match body {
+        MatchBody::Block(block) => block_can_continue(block),
+        MatchBody::Expr(_) => true,
+    }
 }
 
 fn is_terminal_statement(statement: &Stmt, kind: TerminalKind) -> bool {

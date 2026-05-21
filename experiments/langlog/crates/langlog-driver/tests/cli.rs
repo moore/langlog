@@ -275,7 +275,7 @@ fn requirement_llg_cli_02_prints_check_proof_failures_to_stderr() {
     let broken = TempSource::new(
         r#"
 fn main(values: [u32; 4], index: u32) {
-    values[index];
+    let _ = values[index];
 }
 "#,
     );
@@ -287,7 +287,7 @@ fn main(values: [u32; 4], index: u32) {
     assert!(failure_stdout.is_empty());
     assert!(failure_stderr.contains("error: possible out-of-bounds indexing is not proven safe"));
     assert!(failure_stderr.contains(&broken.path.display().to_string()));
-    assert!(failure_stderr.contains("values[index];"));
+    assert!(failure_stderr.contains("let _ = values[index];"));
 }
 
 //= WASM.md#llg-wasm-01-build-gate-and-entry-point

@@ -58,8 +58,8 @@ The user-visible model is place based:
 - `take` on a function parameter means the call moves the argument into the
   callee, while affine and linear parameter modes imply the same move;
 - `_` is the discard place;
-- `mark`, `use`, and `consume` are trusted checker-state operations on live
-  places.
+- `Marker::mark`, `Structural::use`, and `Structural::consume` are trusted
+  checker-state operations on live places.
 
 Produced values are not source-level places. A function call result,
 constructor result, arithmetic result, or match result can flow into the
@@ -70,8 +70,9 @@ inside expressions are still checked by the context that uses them.
 
 Composite values are handled by compiler-derived summaries. If a struct owns a
 field whose current mode is relevant, the outer place behaves as if it
-contains a relevant obligation until that field value is transformed by `use`
-or otherwise moved out. Users should not have to write those summaries by hand.
+contains a relevant obligation until that field value is transformed by
+`Structural::use` or otherwise moved out. Users should not have to write those
+summaries by hand.
 
 Marker operations do mutate checker state for a live place. That is intentional:
 many useful marker facts are learned by observing a boolean result and then
@@ -126,10 +127,12 @@ affine mode.
   checking.
 - A place's current structural mode MUST NOT affect ordinary marker requirement
   matching.
-- `mark` MUST merge the marker type's base mode into the target place mode.
-- `use` MUST transform a relevant target place mode into unrestricted place
+- `Marker::mark` MUST merge the marker type's base mode into the target place
   mode.
-- `consume` MUST transform a linear target place mode into affine place mode.
+- `Structural::use` MUST transform a relevant target place mode into
+  unrestricted place mode.
+- `Structural::consume` MUST transform a linear target place mode into affine
+  place mode.
 
 A place's structural behavior is current checker state. Local places can infer
 that state from their initializer, while public and separately checked
@@ -367,7 +370,7 @@ moved elsewhere.
 - `let _ <- place` MUST take an existing place and discard it.
 
 ```llg
-let _ = read_u32();
+let _ = 0;
 let _ <- x;
 ```
 

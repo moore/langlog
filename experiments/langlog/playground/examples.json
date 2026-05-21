@@ -13,7 +13,7 @@
   },
   {
     "name": "04 - Input and Output",
-    "source": "// read_u32 consumes one token from the playground stdin field.\ntask main() -> u32 {\n    state start() {\n        let value: u32 = read_u32();\n        let doubled: u32 = value * 2 or(err) 0;\n\n        print_u32(doubled);\n        print_newline();\n        print_bool(doubled > value);\n        print_newline();\n\n        exit doubled;\n    }\n}\n"
+    "source": "// read_u32 consumes one token from the playground stdin field.\ntask main() -> u32 {\n    state start() {\n        let value: u32 = read_u32();\n        unsafe { Structural::use(value); }\n        let doubled: u32 = value * 2 or(err) 0;\n\n        print_u32(doubled);\n        print_newline();\n        print_bool(doubled > value);\n        print_newline();\n\n        exit doubled;\n    }\n}\n"
   },
   {
     "name": "05 - If and Logic",
@@ -25,7 +25,7 @@
   },
   {
     "name": "07 - Checked Arithmetic",
-    "source": "// Ordinary u32 arithmetic returns Result<u32, ArithmeticError>.\ntask main() -> u32 {\n    state start() {\n        let added: u32 = 40 + 2 or(err) 0;\n        let subtracted: u32 = 50 - 8 or(err) 0;\n        let multiplied: u32 = 6 * 7 or(err) 0;\n        let divided: u32 = 84 / 2 or(err) 0;\n        let remainder: u32 = 85 % 43 or(err) 0;\n        let mut failures: u32 = 0;\n\n        4294967295 + 1 or(err) {\n            if err == arithmetic_overflow() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        0 - 1 or(err) {\n            if err == arithmetic_underflow() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        1 / 0 or(err) {\n            if err == divide_by_zero() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        1 % 0 or(err) {\n            if err == remainder_by_zero() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        if added == 42 && subtracted == 42 && multiplied == 42 && divided == 42 && remainder == 42 && failures == 4 {\n            exit 42;\n        }\n\n        exit 0;\n    }\n}\n"
+    "source": "// Ordinary u32 arithmetic returns Result<u32, ArithmeticError>.\ntask main() -> u32 {\n    state start() {\n        let added: u32 = 40 + 2 or(err) 0;\n        let subtracted: u32 = 50 - 8 or(err) 0;\n        let multiplied: u32 = 6 * 7 or(err) 0;\n        let divided: u32 = 84 / 2 or(err) 0;\n        let remainder: u32 = 85 % 43 or(err) 0;\n        let mut failures: u32 = 0;\n\n        let _ = 4294967295 + 1 or(err) {\n            if err == arithmetic_overflow() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        let _ = 0 - 1 or(err) {\n            if err == arithmetic_underflow() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        let _ = 1 / 0 or(err) {\n            if err == divide_by_zero() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        let _ = 1 % 0 or(err) {\n            if err == remainder_by_zero() {\n                failures = failures + 1 or(err) 0;\n            }\n            0\n        };\n\n        if added == 42 && subtracted == 42 && multiplied == 42 && divided == 42 && remainder == 42 && failures == 4 {\n            exit 42;\n        }\n\n        exit 0;\n    }\n}\n"
   },
   {
     "name": "08 - Option Recovery",
@@ -61,23 +61,23 @@
   },
   {
     "name": "16 - Task State Loop",
-    "source": "// Cyclic go paths need fresh Event evidence on each loop.\ntask main() -> u32 {\n    state start() {\n        go count(0);\n    }\n\n    state count(value: u32) {\n        if value == 42 {\n            exit value;\n        }\n\n        let pulse: u32 with Event = unsafe { Event::mark(value) };\n        go count(pulse + 1 or(err) 0);\n    }\n}\n"
+    "source": "// Cyclic go paths need fresh Event evidence on each loop.\ntask main() -> u32 {\n    state start() {\n        go count(0);\n    }\n\n    state count(value: u32) {\n        if value == 42 {\n            exit value;\n        }\n\n        unsafe { Event::mark(value); }\n        unsafe { Structural::use(value); }\n        go count(value + 1 or(err) 0);\n    }\n}\n"
   },
   {
     "name": "17 - Go Argument State",
-    "source": "// go arguments are evaluated before active state arguments are replaced.\ntask main() -> u32 {\n    state start() {\n        go swap(7, 42);\n    }\n\n    state swap(first: u32, second: u32) {\n        if first == 42 {\n            exit second;\n        } else {\n            let fresh_first: u32 with Event = unsafe { Event::mark(first) };\n            go swap(second, fresh_first);\n        }\n    }\n}\n"
+    "source": "// go arguments are evaluated before active state arguments are replaced.\ntask main() -> u32 {\n    state start() {\n        go swap(7, 42);\n    }\n\n    state swap(first: u32, second: u32) {\n        if first == 42 {\n            exit second;\n        } else {\n            unsafe { Event::mark(first); }\n            unsafe { Structural::use(first); }\n            go swap(second, first);\n        }\n    }\n}\n"
   },
   {
     "name": "18 - Marker Qualified Values",
-    "source": "// Markers are compile-time facts attached to value places.\nmarker Trusted();\n\nfn accept(value: u32 with Trusted) -> u32 with Trusted {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let raw: u32 = 42;\n        let marked: u32 with Trusted = unsafe { Trusted::mark(raw) };\n        let copied: u32 with Trusted = marked;\n        exit accept(copied);\n    }\n}\n"
+    "source": "// Markers are compile-time facts attached to value places.\nmarker Trusted();\n\nfn accept(value: u32 with Trusted) -> u32 with Trusted {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let raw: u32 = 42;\n        let marked: u32 = raw;\n        unsafe { Trusted::mark(marked); }\n        let copied: u32 with Trusted = marked;\n        exit accept(copied);\n    }\n}\n"
   },
   {
     "name": "19 - Marker Companion Rules",
-    "source": "// Companion rules preserve user marker facts through operators.\nmarker UpperBound(value: place, bound: place);\n\nmark Sub(a: place, amount: place, result: place) {\n    if a with UpperBound(a, ?bound) {\n        implies UpperBound(result, bound) for result;\n    }\n}\n\nfn keep_upper_bound(value: u32 with UpperBound(4)) -> u32 with UpperBound(4) {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let index: u32 with UpperBound(4) = unsafe { UpperBound::mark(3, 4) };\n        let fallback: u32 with UpperBound(4) = unsafe { UpperBound::mark(0, 4) };\n        let smaller: u32 with UpperBound(4) = index - 1 or(err) fallback;\n        exit keep_upper_bound(smaller) + 40 or(err) 0;\n    }\n}\n"
+    "source": "// Companion rules preserve user marker facts through operators.\nmarker UpperBound(value: place, bound: place);\n\nmark Sub(a: place, amount: place, result: place) {\n    if a with UpperBound(a, ?bound) {\n        implies UpperBound(result, bound) for result;\n    }\n}\n\nfn keep_upper_bound(value: u32 with UpperBound(4)) -> u32 with UpperBound(4) {\n    return value;\n}\n\ntask main() -> u32 {\n    state start() {\n        let index: u32 = 3;\n        unsafe { UpperBound::mark(index, 4); }\n        let fallback: u32 = 0;\n        unsafe { UpperBound::mark(fallback, 4); }\n        let smaller: u32 with UpperBound(4) = index - 1 or(err) fallback;\n        exit keep_upper_bound(smaller) + 40 or(err) 0;\n    }\n}\n"
   },
   {
     "name": "20 - Builtin Operator Facts",
-    "source": "// Built-in companion rules attach facts to checked operator results.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [7, 14, 21, 42];\n        let raw: u32 = 19;\n        let fallback: u32 with LessThan(4) = unsafe { LessThan::mark(0, 4) };\n        let index: u32 with LessThan(4) = raw % 4 or(err) fallback;\n\n        exit values[index];\n    }\n}\n"
+    "source": "// Built-in companion rules attach facts to checked operator results.\ntask main() -> u32 {\n    state start() {\n        let values: [u32; 4] = [7, 14, 21, 42];\n        let raw: u32 = 19;\n        let fallback: u32 = 0;\n        unsafe { LessThan::mark(fallback, 4); }\n        let index: u32 with LessThan(4) = raw % 4 or(err) fallback;\n\n        exit values[index];\n    }\n}\n"
   },
   {
     "name": "21 - Relevant Mode Copies",
@@ -93,6 +93,6 @@
   },
   {
     "name": "24 - Structural Trusted Operations",
-    "source": "// Structural trusted operations discharge place-mode obligations.\ntask main() -> u32 {\n    state start() {\n        let event: relevant u32 = 40;\n        let handle: linear u32 = 2;\n\n        unsafe { Structural::use(event); }\n        unsafe { Structural::consume(handle); }\n\n        exit event + handle or(err) 0;\n    }\n}\n"
+    "source": "// Structural trusted operations discharge place-mode obligations.\ntask main() -> u32 {\n    state start() {\n        let event: relevant u32 = 40;\n        let handle: linear u32 = 2;\n\n        unsafe { Structural::use(event); }\n        unsafe { Structural::consume(handle); }\n\n        exit 42;\n    }\n}\n"
   }
 ]
