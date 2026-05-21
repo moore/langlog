@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, Item, MarkerAnnotation, MarkerArg,
     MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt, MarkerRefinement,
-    MarkerRule, MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt,
-    Task, Type, TypeKind, UnaryOp,
+    MarkerRule, MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, ParamTransfer, Pattern,
+    PatternKind, PlaceMode, Stmt, Task, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{ParsedModule, Span, Spanned};
 
@@ -55,6 +55,7 @@ pub struct HirFunction {
     pub id: HirItemId,
     pub name: String,
     pub params: Vec<HirBinding>,
+    pub return_mode: HirPlaceMode,
     pub return_type: HirType,
     pub return_markers: Vec<HirMarkerRequirement>,
     pub body: HirBlock,
@@ -74,6 +75,7 @@ pub struct HirTask {
     pub params: Vec<HirBinding>,
     pub fields: Vec<HirTaskField>,
     pub states: Vec<HirTaskState>,
+    pub return_mode: HirPlaceMode,
     pub return_type: HirType,
     pub return_markers: Vec<HirMarkerRequirement>,
     pub span: Span,
@@ -101,9 +103,25 @@ pub struct HirBinding {
     pub name: String,
     pub kind: BindingKind,
     pub mutable: bool,
+    pub place_mode: Option<HirPlaceMode>,
+    pub param_transfer: Option<HirParamTransfer>,
     pub ty: HirType,
     pub markers: Vec<HirMarkerRequirement>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirParamTransfer {
+    Copy,
+    Take,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirPlaceMode {
+    Unrestricted,
+    Affine,
+    Relevant,
+    Linear,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,8 +462,16 @@ pub enum HirType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirFunctionType {
-    pub params: Vec<HirType>,
+    pub params: Vec<HirFunctionParamType>,
+    pub return_mode: HirPlaceMode,
     pub return_type: Box<HirType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirFunctionParamType {
+    pub ty: HirType,
+    pub mode: HirPlaceMode,
+    pub transfer: HirParamTransfer,
 }
 
 pub(crate) fn lower_program(
@@ -565,9 +591,12 @@ impl<'a> HirLowerer<'a> {
                         BindingKind::Param,
                         false,
                         Some(&param.ty),
+                        Some(param.mode.unwrap_or(PlaceMode::Unrestricted)),
+                        Some(param.transfer),
                     )
                 })
                 .collect(),
+            return_mode: lower_place_mode(function.return_mode.unwrap_or(PlaceMode::Unrestricted)),
             return_type: function
                 .return_type
                 .as_ref()
@@ -612,6 +641,8 @@ impl<'a> HirLowerer<'a> {
                         BindingKind::Param,
                         false,
                         Some(&param.ty),
+                        Some(param.mode.unwrap_or(PlaceMode::Unrestricted)),
+                        Some(param.transfer),
                     )
                 })
                 .collect(),
@@ -624,6 +655,8 @@ impl<'a> HirLowerer<'a> {
                         BindingKind::Local,
                         field.mutable,
                         Some(&field.ty),
+                        Some(field.mode.unwrap_or(PlaceMode::Unrestricted)),
+                        None,
                     ),
                     value: self.lower_expr(&field.value),
                     span: field.span,
@@ -646,6 +679,8 @@ impl<'a> HirLowerer<'a> {
                                 BindingKind::Param,
                                 false,
                                 Some(&param.ty),
+                                Some(param.mode.unwrap_or(PlaceMode::Unrestricted)),
+                                Some(param.transfer),
                             )
                         })
                         .collect(),
@@ -653,6 +688,7 @@ impl<'a> HirLowerer<'a> {
                     span: state.span,
                 })
                 .collect(),
+            return_mode: lower_place_mode(task.return_mode.unwrap_or(PlaceMode::Unrestricted)),
             return_type: lower_ast_type(&task.return_type),
             return_markers: self.lower_marker_requirements(&task.return_type),
             span: task.span,
@@ -789,6 +825,8 @@ impl<'a> HirLowerer<'a> {
                     BindingKind::Local,
                     stmt.mutable,
                     stmt.ty.as_ref(),
+                    stmt.mode,
+                    None,
                 ),
                 annotation: stmt.ty.as_ref().map(lower_ast_type),
                 value: stmt.value.as_ref().map(|expr| self.lower_expr(expr)),
@@ -1077,7 +1115,7 @@ impl<'a> HirLowerer<'a> {
         kind: BindingKind,
         mutable: bool,
     ) -> HirBinding {
-        self.lower_named_binding_with_type(name, kind, mutable, None)
+        self.lower_named_binding_with_type(name, kind, mutable, None, None, None)
     }
 
     fn lower_named_binding_with_type(
@@ -1086,6 +1124,8 @@ impl<'a> HirLowerer<'a> {
         kind: BindingKind,
         mutable: bool,
         ty: Option<&Type>,
+        place_mode: Option<PlaceMode>,
+        param_transfer: Option<ParamTransfer>,
     ) -> HirBinding {
         HirBinding {
             id: HirBindingId {
@@ -1094,6 +1134,8 @@ impl<'a> HirLowerer<'a> {
             name: name.value.clone(),
             kind,
             mutable,
+            place_mode: place_mode.map(lower_place_mode),
+            param_transfer: param_transfer.map(lower_param_transfer),
             ty: self.lower_binding_type(name.span),
             markers: ty
                 .map(|ty| self.lower_marker_requirements(ty))
@@ -1306,10 +1348,33 @@ fn lower_function_type(signature: &FunctionType) -> Option<HirFunctionType> {
         params: signature
             .params
             .iter()
-            .map(lower_semantic_type)
+            .map(|param| {
+                Some(HirFunctionParamType {
+                    ty: lower_semantic_type(&param.ty)?,
+                    mode: lower_place_mode(param.mode),
+                    transfer: lower_param_transfer(param.transfer),
+                })
+            })
             .collect::<Option<Vec<_>>>()?,
+        return_mode: lower_place_mode(signature.return_mode),
         return_type: Box::new(lower_semantic_type(&signature.return_type)?),
     })
+}
+
+fn lower_place_mode(mode: PlaceMode) -> HirPlaceMode {
+    match mode {
+        PlaceMode::Unrestricted => HirPlaceMode::Unrestricted,
+        PlaceMode::Affine => HirPlaceMode::Affine,
+        PlaceMode::Relevant => HirPlaceMode::Relevant,
+        PlaceMode::Linear => HirPlaceMode::Linear,
+    }
+}
+
+fn lower_param_transfer(transfer: ParamTransfer) -> HirParamTransfer {
+    match transfer {
+        ParamTransfer::Copy => HirParamTransfer::Copy,
+        ParamTransfer::Take => HirParamTransfer::Take,
+    }
 }
 
 #[cfg(test)]

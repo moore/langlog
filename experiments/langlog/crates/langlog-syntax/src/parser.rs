@@ -3,9 +3,9 @@ use crate::ast::{
     ForStmt, ForeverStmt, Function, GenericArg, GoStmt, IfStmt, Item, LetStmt, MarkerAnnotation,
     MarkerArg, MarkerArgKind, MarkerFamily, MarkerFamilyParam, MarkerImplicationStmt,
     MarkerRefinement, MarkerRule, MarkerRuleBlock, MarkerRuleIfStmt, MarkerRuleParam,
-    MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param, Pattern,
-    PatternKind, ReturnStmt, Stmt, Task, TaskField, TaskState, Type, TypeKind, UnaryOp,
-    UnsafeMarkerConstruction, UnsafeMarkerStmt,
+    MarkerRuleStmt, MatchArm, MatchBody, MatchStmt, Module, ObserveOp, ObserveStmt, Param,
+    ParamTransfer, Pattern, PatternKind, PlaceMode, ReturnStmt, Stmt, Task, TaskField, TaskState,
+    Type, TypeKind, UnaryOp, UnsafeMarkerConstruction, UnsafeMarkerStmt,
 };
 use crate::diagnostic::{Diagnostic, Label};
 use crate::lexer::LexedSource;
@@ -111,10 +111,11 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("expected a function name")?;
         self.expect_tag(TokenTag::LParen, "expected `(` after function name")?;
         let params = self.parse_params()?;
-        let return_type = if self.bump_if(TokenTag::Arrow) {
-            Some(self.parse_type()?)
+        let (return_mode, return_type) = if self.bump_if(TokenTag::Arrow) {
+            let (mode, ty) = self.parse_place_type()?;
+            (mode, Some(ty))
         } else {
-            None
+            (None, None)
         };
         let body = self.parse_block()?;
         let span = start.span.cover(body.span).unwrap_or(body.span);
@@ -123,6 +124,7 @@ impl<'a> Parser<'a> {
             span,
             name,
             params,
+            return_mode,
             return_type,
             body,
         })
@@ -134,7 +136,7 @@ impl<'a> Parser<'a> {
         self.expect_tag(TokenTag::LParen, "expected `(` after task name")?;
         let params = self.parse_params()?;
         self.expect_tag(TokenTag::Arrow, "expected `->` before task return type")?;
-        let return_type = self.parse_type()?;
+        let (return_mode, return_type) = self.parse_place_type()?;
         let (body_span, fields, states) = self.parse_task_body()?;
         let span = start.span.cover(body_span).unwrap_or(body_span);
 
@@ -142,6 +144,7 @@ impl<'a> Parser<'a> {
             span,
             name,
             params,
+            return_mode,
             return_type,
             body_span,
             fields,
@@ -193,7 +196,7 @@ impl<'a> Parser<'a> {
         let mutable = self.bump_if(TokenTag::Mut);
         let name = self.expect_identifier("expected a task field name")?;
         self.expect_tag(TokenTag::Colon, "expected `:` after task field name")?;
-        let ty = self.parse_type()?;
+        let (mode, ty) = self.parse_place_type()?;
         self.expect_tag(TokenTag::Eq, "expected `=` after task field type")?;
         let value = self.parse_expression(0)?;
         let end = self.expect_tag(TokenTag::Semi, "expected `;` after task field")?;
@@ -203,6 +206,7 @@ impl<'a> Parser<'a> {
             span,
             mutable,
             name,
+            mode,
             ty,
             value,
         })
@@ -414,11 +418,25 @@ impl<'a> Parser<'a> {
         }
 
         loop {
+            let transfer = if self.at_contextual_keyword("take")
+                && matches!(self.next_tag(), TokenTag::Identifier)
+            {
+                self.bump();
+                ParamTransfer::Take
+            } else {
+                ParamTransfer::Copy
+            };
             let name = self.expect_identifier("expected a parameter name")?;
             self.expect_tag(TokenTag::Colon, "expected `:` after parameter name")?;
-            let ty = self.parse_type()?;
+            let (mode, ty) = self.parse_place_type()?;
             let span = name.span.cover(ty.span).unwrap_or(name.span);
-            params.push(Param { span, name, ty });
+            params.push(Param {
+                span,
+                transfer,
+                name,
+                mode,
+                ty,
+            });
 
             if self.bump_if(TokenTag::Comma) {
                 if self.bump_if(TokenTag::RParen) {
@@ -431,6 +449,24 @@ impl<'a> Parser<'a> {
         }
 
         Some(params)
+    }
+
+    fn parse_place_type(&mut self) -> Option<(Option<PlaceMode>, Type)> {
+        let mode = self.parse_place_mode();
+        let ty = self.parse_type()?;
+        Some((mode, ty))
+    }
+
+    fn parse_place_mode(&mut self) -> Option<PlaceMode> {
+        let mode = match self.current_identifier() {
+            Some("unrestricted") if self.next_starts_type() => PlaceMode::Unrestricted,
+            Some("affine") if self.next_starts_type() => PlaceMode::Affine,
+            Some("relevant") if self.next_starts_type() => PlaceMode::Relevant,
+            Some("linear") if self.next_starts_type() => PlaceMode::Linear,
+            _ => return None,
+        };
+        self.bump();
+        Some(mode)
     }
 
     fn parse_type(&mut self) -> Option<Type> {
@@ -821,10 +857,11 @@ impl<'a> Parser<'a> {
         let start = self.expect_tag(TokenTag::Let, "expected `let`")?;
         let mutable = self.bump_if(TokenTag::Mut);
         let name = self.expect_identifier("expected a binding name")?;
-        let ty = if self.bump_if(TokenTag::Colon) {
-            Some(self.parse_type()?)
+        let (mode, ty) = if self.bump_if(TokenTag::Colon) {
+            let (mode, ty) = self.parse_place_type()?;
+            (mode, Some(ty))
         } else {
-            None
+            (None, None)
         };
         let value = if self.bump_if(TokenTag::Eq) {
             Some(self.parse_expression(0)?)
@@ -838,6 +875,7 @@ impl<'a> Parser<'a> {
             span,
             mutable,
             name,
+            mode,
             ty,
             value,
         })
@@ -1652,6 +1690,20 @@ impl<'a> Parser<'a> {
         self.current().tag()
     }
 
+    fn next_tag(&self) -> TokenTag {
+        self.tokens
+            .get(self.cursor + 1)
+            .map(Token::tag)
+            .unwrap_or(TokenTag::Eof)
+    }
+
+    fn current_identifier(&self) -> Option<&str> {
+        match &self.current().kind {
+            TokenKind::Identifier(name) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
     fn previous_span(&self) -> Span {
         self.tokens[self.cursor.saturating_sub(1)].span
     }
@@ -1662,6 +1714,13 @@ impl<'a> Parser<'a> {
 
     fn at_contextual_keyword(&self, keyword: &str) -> bool {
         matches!(&self.current().kind, TokenKind::Identifier(name) if name == keyword)
+    }
+
+    fn next_starts_type(&self) -> bool {
+        matches!(
+            self.next_tag(),
+            TokenTag::Identifier | TokenTag::LParen | TokenTag::LBracket
+        )
     }
 
     fn bump_if(&mut self, tag: TokenTag) -> bool {

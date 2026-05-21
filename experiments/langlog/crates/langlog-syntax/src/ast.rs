@@ -29,6 +29,7 @@ pub struct Function {
     pub span: Span,
     pub name: Spanned<String>,
     pub params: Vec<Param>,
+    pub return_mode: Option<PlaceMode>,
     pub return_type: Option<Type>,
     pub body: Block,
 }
@@ -38,6 +39,7 @@ pub struct Task {
     pub span: Span,
     pub name: Spanned<String>,
     pub params: Vec<Param>,
+    pub return_mode: Option<PlaceMode>,
     pub return_type: Type,
     pub body_span: Span,
     pub fields: Vec<TaskField>,
@@ -49,6 +51,7 @@ pub struct TaskField {
     pub span: Span,
     pub mutable: bool,
     pub name: Spanned<String>,
+    pub mode: Option<PlaceMode>,
     pub ty: Type,
     pub value: Expr,
 }
@@ -133,8 +136,24 @@ pub struct MarkerImplicationStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub span: Span,
+    pub transfer: ParamTransfer,
     pub name: Spanned<String>,
+    pub mode: Option<PlaceMode>,
     pub ty: Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamTransfer {
+    Copy,
+    Take,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceMode {
+    Unrestricted,
+    Affine,
+    Relevant,
+    Linear,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +205,7 @@ pub struct LetStmt {
     pub span: Span,
     pub mutable: bool,
     pub name: Spanned<String>,
+    pub mode: Option<PlaceMode>,
     pub ty: Option<Type>,
     pub value: Option<Expr>,
 }

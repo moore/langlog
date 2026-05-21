@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use langlog_syntax::ast::{
     BinaryOp, Block, ElseBranch, Expr, ExprKind, Function, GenericArg, Item, MarkerAnnotation,
     MarkerArg, MarkerArgKind, MarkerFamily, MarkerImplicationStmt, MarkerRefinement, MarkerRule,
-    MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, Pattern, PatternKind, Stmt, Task, Type,
-    TypeKind, UnaryOp,
+    MarkerRuleBlock, MarkerRuleStmt, MatchBody, ObserveOp, ParamTransfer, Pattern, PatternKind,
+    PlaceMode, Stmt, Task, Type, TypeKind, UnaryOp,
 };
 use langlog_syntax::{Diagnostic, Label, ParsedModule, Severity, Span, Spanned};
 
@@ -48,7 +48,7 @@ struct ItemSignature {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TaskStateSignature {
-    params: Vec<SemanticType>,
+    params: Vec<FunctionParamType>,
     span: Span,
 }
 
@@ -233,8 +233,16 @@ enum SemanticType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FunctionType {
-    params: Vec<SemanticType>,
+    params: Vec<FunctionParamType>,
+    return_mode: PlaceMode,
     return_type: Box<SemanticType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionParamType {
+    ty: SemanticType,
+    mode: PlaceMode,
+    transfer: ParamTransfer,
 }
 
 impl SemanticType {
@@ -285,7 +293,10 @@ impl SemanticType {
             | Self::Named(_)
             | Self::Unknown => matches!(self, Self::Unknown),
             Self::Function(signature) => {
-                signature.params.iter().any(SemanticType::contains_unknown)
+                signature
+                    .params
+                    .iter()
+                    .any(|param| param.ty.contains_unknown())
                     || signature.return_type.contains_unknown()
             }
             Self::Tuple(elements) => elements.iter().any(SemanticType::contains_unknown),
@@ -1149,6 +1160,12 @@ struct TypeChecker<'a> {
     facts: TypeFacts,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferContext {
+    Copy,
+    Move,
+}
+
 impl<'a> TypeChecker<'a> {
     fn new(parsed: &'a ParsedModule) -> Self {
         let host_signatures: HashMap<String, FunctionType> = HostBuiltin::ALL
@@ -1267,7 +1284,11 @@ impl<'a> TypeChecker<'a> {
             let param_type = lower_type(&param.ty);
             self.facts
                 .record_binding(param.name.span, param_type.clone());
-            scopes.insert(param.name.value.clone(), param_type);
+            scopes.insert_with_mode(
+                param.name.value.clone(),
+                param_type,
+                param.mode.unwrap_or(PlaceMode::Unrestricted),
+            );
         }
         for param in &function.params {
             self.check_marker_qualified_type(&param.ty, &scopes, true);
@@ -1278,10 +1299,16 @@ impl<'a> TypeChecker<'a> {
             .as_ref()
             .map(lower_type)
             .unwrap_or(SemanticType::Unit);
+        let expected_return_mode = function.return_mode.unwrap_or(PlaceMode::Unrestricted);
         if let Some(return_type) = &function.return_type {
             self.check_marker_qualified_type(return_type, &scopes, true);
         }
-        let body_type = self.check_block(&function.body, &mut scopes, &expected_return);
+        let body_type = self.check_block(
+            &function.body,
+            &mut scopes,
+            &expected_return,
+            expected_return_mode,
+        );
 
         if let Some(expr) = &function.body.trailing_expr {
             self.require_same_type(expr.span, &expected_return, &body_type);
@@ -1299,13 +1326,18 @@ impl<'a> TypeChecker<'a> {
             let param_type = lower_type(&param.ty);
             self.facts
                 .record_binding(param.name.span, param_type.clone());
-            scopes.insert(param.name.value.clone(), param_type);
+            scopes.insert_with_mode(
+                param.name.value.clone(),
+                param_type,
+                param.mode.unwrap_or(PlaceMode::Unrestricted),
+            );
         }
         for param in &task.params {
             self.check_marker_qualified_type(&param.ty, &scopes, true);
         }
 
         let expected_return = lower_type(&task.return_type);
+        let expected_return_mode = task.return_mode.unwrap_or(PlaceMode::Unrestricted);
         self.check_marker_qualified_type(&task.return_type, &scopes, true);
 
         let mut field_names = HashMap::new();
@@ -1318,9 +1350,18 @@ impl<'a> TypeChecker<'a> {
             let value_type =
                 self.check_expr_with_expected(&field.value, &mut scopes, Some(&field_type));
             self.require_same_type(field.value.span, &field_type, &value_type);
+            let field_mode = field.mode.unwrap_or(PlaceMode::Unrestricted);
+            let value_mode = self.expr_mode(&field.value, &scopes);
+            self.check_receiving_flow(
+                &field.value,
+                value_mode,
+                field_mode,
+                TransferContext::Copy,
+                &mut scopes,
+            );
             self.facts
                 .record_binding(field.name.span, field_type.clone());
-            scopes.insert(field.name.value.clone(), field_type);
+            scopes.insert_with_mode(field.name.value.clone(), field_type, field_mode);
         }
 
         let mut state_signatures = HashMap::new();
@@ -1333,7 +1374,11 @@ impl<'a> TypeChecker<'a> {
                 params: state
                     .params
                     .iter()
-                    .map(|param| lower_type(&param.ty))
+                    .map(|param| FunctionParamType {
+                        ty: lower_type(&param.ty),
+                        mode: param.mode.unwrap_or(PlaceMode::Unrestricted),
+                        transfer: param.transfer,
+                    })
                     .collect(),
                 span: state.name.span,
             };
@@ -1353,7 +1398,11 @@ impl<'a> TypeChecker<'a> {
             let task_params: Vec<_> = task
                 .params
                 .iter()
-                .map(|param| lower_type(&param.ty))
+                .map(|param| FunctionParamType {
+                    ty: lower_type(&param.ty),
+                    mode: param.mode.unwrap_or(PlaceMode::Unrestricted),
+                    transfer: param.transfer,
+                })
                 .collect();
             self.require_state_signature_matches_task(task.name.span, &task_params, &start.params);
         }
@@ -1368,12 +1417,21 @@ impl<'a> TypeChecker<'a> {
                 let param_type = lower_type(&param.ty);
                 self.facts
                     .record_binding(param.name.span, param_type.clone());
-                scopes.insert(param.name.value.clone(), param_type);
+                scopes.insert_with_mode(
+                    param.name.value.clone(),
+                    param_type,
+                    param.mode.unwrap_or(PlaceMode::Unrestricted),
+                );
             }
             for param in &state.params {
                 self.check_marker_qualified_type(&param.ty, &scopes, true);
             }
-            self.check_block(&state.body, &mut scopes, &expected_return);
+            self.check_block(
+                &state.body,
+                &mut scopes,
+                &expected_return,
+                expected_return_mode,
+            );
             if !is_terminal_block(&state.body, TerminalKind::TaskState) {
                 self.report_task_state_fallthrough(state.body.span);
             }
@@ -1539,15 +1597,20 @@ impl<'a> TypeChecker<'a> {
         block: &Block,
         scopes: &mut TypeScopeStack,
         expected_return: &SemanticType,
+        expected_return_mode: PlaceMode,
     ) -> SemanticType {
         scopes.push();
         for statement in &block.statements {
-            self.check_statement(statement, scopes, expected_return);
+            self.check_statement(statement, scopes, expected_return, expected_return_mode);
         }
         let result = block
             .trailing_expr
             .as_deref()
-            .map(|expr| self.check_expr_with_expected(expr, scopes, Some(expected_return)))
+            .map(|expr| {
+                let result = self.check_expr_with_expected(expr, scopes, Some(expected_return));
+                self.check_return_flow(expr, expected_return_mode, scopes);
+                result
+            })
             .unwrap_or(SemanticType::Unit);
         scopes.pop();
         result
@@ -1558,6 +1621,7 @@ impl<'a> TypeChecker<'a> {
         statement: &Stmt,
         scopes: &mut TypeScopeStack,
         expected_return: &SemanticType,
+        expected_return_mode: PlaceMode,
     ) {
         match statement {
             Stmt::Let(stmt) => {
@@ -1579,7 +1643,8 @@ impl<'a> TypeChecker<'a> {
                     .unwrap_or(SemanticType::Unknown);
                 self.facts
                     .record_binding(stmt.name.span, binding_type.clone());
-                scopes.insert(stmt.name.value.clone(), binding_type);
+                let binding_mode = self.let_binding_mode(stmt, scopes);
+                scopes.insert_with_mode(stmt.name.value.clone(), binding_type, binding_mode);
                 if let Some(ty) = &stmt.ty {
                     self.check_marker_qualified_type(ty, scopes, true);
                 }
@@ -1595,9 +1660,19 @@ impl<'a> TypeChecker<'a> {
             Stmt::If(stmt) => {
                 let condition_type = self.check_expr(&stmt.condition, scopes);
                 self.require_bool(stmt.condition.span, &condition_type, "if conditions");
-                self.check_block(&stmt.then_block, scopes, expected_return);
+                self.check_block(
+                    &stmt.then_block,
+                    scopes,
+                    expected_return,
+                    expected_return_mode,
+                );
                 if let Some(else_branch) = &stmt.else_branch {
-                    self.check_else_branch(else_branch, scopes, expected_return);
+                    self.check_else_branch(
+                        else_branch,
+                        scopes,
+                        expected_return,
+                        expected_return_mode,
+                    );
                 }
             }
             Stmt::Match(stmt) => {
@@ -1607,7 +1682,7 @@ impl<'a> TypeChecker<'a> {
                     self.bind_pattern_type(&arm.pattern, scopes, &scrutinee_type);
                     match &arm.body {
                         MatchBody::Block(block) => {
-                            self.check_block(block, scopes, expected_return);
+                            self.check_block(block, scopes, expected_return, expected_return_mode);
                         }
                         MatchBody::Expr(expr) => {
                             self.check_expr(expr, scopes);
@@ -1624,7 +1699,7 @@ impl<'a> TypeChecker<'a> {
                     scopes,
                     &iterable_item_type(&iterable_type).unwrap_or(SemanticType::Unknown),
                 );
-                self.check_block(&stmt.body, scopes, expected_return);
+                self.check_block(&stmt.body, scopes, expected_return, expected_return_mode);
                 scopes.pop();
             }
             Stmt::Return(stmt) => {
@@ -1635,15 +1710,19 @@ impl<'a> TypeChecker<'a> {
                         self.check_expr_with_expected(value, scopes, Some(expected_return))
                     })
                     .unwrap_or(SemanticType::Unit);
+                if let Some(value) = &stmt.value {
+                    self.check_return_flow(value, expected_return_mode, scopes);
+                }
                 self.require_same_type(stmt.span, expected_return, &value_type);
             }
             Stmt::Forever(stmt) => {
                 self.report_legacy_task_statement(stmt.span, "`forever`", "`go` state cycles");
-                self.check_block(&stmt.body, scopes, expected_return);
+                self.check_block(&stmt.body, scopes, expected_return, expected_return_mode);
             }
             Stmt::Exit(stmt) => {
                 let value_type =
                     self.check_expr_with_expected(&stmt.value, scopes, Some(expected_return));
+                self.check_return_flow(&stmt.value, expected_return_mode, scopes);
                 self.require_same_type(stmt.span, expected_return, &value_type);
             }
             Stmt::Delegate(stmt) => {
@@ -1659,7 +1738,12 @@ impl<'a> TypeChecker<'a> {
                 let left = self.check_expr(&stmt.left, scopes);
                 let right = self.check_expr(&stmt.right, scopes);
                 self.require_observe_types(stmt.span, stmt.op, &left, &right);
-                self.check_block(&stmt.else_block, scopes, expected_return);
+                self.check_block(
+                    &stmt.else_block,
+                    scopes,
+                    expected_return,
+                    expected_return_mode,
+                );
             }
             Stmt::UnsafeMarker(stmt) => {
                 self.check_unsafe_marker_construction(
@@ -1677,13 +1761,19 @@ impl<'a> TypeChecker<'a> {
         branch: &ElseBranch,
         scopes: &mut TypeScopeStack,
         expected_return: &SemanticType,
+        expected_return_mode: PlaceMode,
     ) {
         match branch {
             ElseBranch::Block(block) => {
-                self.check_block(block, scopes, expected_return);
+                self.check_block(block, scopes, expected_return, expected_return_mode);
             }
             ElseBranch::If(stmt) => {
-                self.check_statement(&Stmt::If(*stmt.clone()), scopes, expected_return);
+                self.check_statement(
+                    &Stmt::If(*stmt.clone()),
+                    scopes,
+                    expected_return,
+                    expected_return_mode,
+                );
             }
         }
     }
@@ -1716,24 +1806,27 @@ impl<'a> TypeChecker<'a> {
         let ty = match &expr.kind {
             ExprKind::Int(_) => SemanticType::U32,
             ExprKind::Bool(_) => SemanticType::Bool,
-            ExprKind::Name(name) => scopes
-                .lookup(name.value.as_str())
-                .or_else(|| {
-                    let item = self.item_signatures.get(name.value.as_str())?.clone();
+            ExprKind::Name(name) => {
+                if let Some(place) = scopes.lookup_place(name.value.as_str()) {
+                    if !place.live {
+                        self.report_use_after_move(name.span, place.moved_at);
+                    }
+                    place.ty
+                } else if let Some(item) = self.item_signatures.get(name.value.as_str()).cloned() {
                     if item.kind == ItemKind::Task {
                         self.report_task_item_used_as_expression(name.span);
-                        Some(SemanticType::Unknown)
+                        SemanticType::Unknown
                     } else {
-                        Some(SemanticType::Function(item.signature))
+                        SemanticType::Function(item.signature)
                     }
-                })
-                .or_else(|| {
+                } else {
                     self.host_signatures
                         .get(name.value.as_str())
                         .cloned()
                         .map(SemanticType::Function)
-                })
-                .unwrap_or(SemanticType::Unknown),
+                        .unwrap_or(SemanticType::Unknown)
+                }
+            }
             ExprKind::Tuple(elements) => SemanticType::Tuple(
                 elements
                     .iter()
@@ -1741,7 +1834,12 @@ impl<'a> TypeChecker<'a> {
                     .collect(),
             ),
             ExprKind::Array(elements) => self.check_array_expr(expr.span, elements, scopes),
-            ExprKind::Block(block) => self.check_block(block, scopes, &SemanticType::Unknown),
+            ExprKind::Block(block) => self.check_block(
+                block,
+                scopes,
+                &SemanticType::Unknown,
+                PlaceMode::Unrestricted,
+            ),
             ExprKind::Unary { op, expr } => {
                 let operand = self.check_expr(expr, scopes);
                 match op {
@@ -2065,7 +2163,11 @@ impl<'a> TypeChecker<'a> {
                 };
                 let value = self.check_expr_with_expected(&args[0], scopes, expected_inner);
                 let return_type = SemanticType::Option(Box::new(value.clone()));
-                self.record_builtin_callee_type(callee, vec![value], return_type.clone());
+                self.record_builtin_callee_type(
+                    callee,
+                    vec![function_param(value)],
+                    return_type.clone(),
+                );
                 return_type
             }
             HostBuiltin::None => {
@@ -2112,7 +2214,11 @@ impl<'a> TypeChecker<'a> {
                     ok: Box::new(value.clone()),
                     err: Box::new(result_err),
                 };
-                self.record_builtin_callee_type(callee, vec![value], return_type.clone());
+                self.record_builtin_callee_type(
+                    callee,
+                    vec![function_param(value)],
+                    return_type.clone(),
+                );
                 return_type
             }
             HostBuiltin::Err => {
@@ -2139,7 +2245,11 @@ impl<'a> TypeChecker<'a> {
                     ok: Box::new(result_ok.unwrap_or(SemanticType::Unknown)),
                     err: Box::new(err_type.clone()),
                 };
-                self.record_builtin_callee_type(callee, vec![err_type], return_type.clone());
+                self.record_builtin_callee_type(
+                    callee,
+                    vec![function_param(err_type)],
+                    return_type.clone(),
+                );
                 return_type
             }
             HostBuiltin::ArithmeticOverflow
@@ -2176,11 +2286,12 @@ impl<'a> TypeChecker<'a> {
     fn record_builtin_callee_type(
         &mut self,
         callee: &Expr,
-        params: Vec<SemanticType>,
+        params: Vec<FunctionParamType>,
         return_type: SemanticType,
     ) {
         let ty = SemanticType::Function(FunctionType {
             params,
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(return_type),
         });
         self.facts.record_expr(callee.span, ty.clone());
@@ -2260,6 +2371,124 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn let_binding_mode(
+        &mut self,
+        stmt: &langlog_syntax::ast::LetStmt,
+        scopes: &mut TypeScopeStack,
+    ) -> PlaceMode {
+        let source_mode = stmt
+            .value
+            .as_ref()
+            .map(|value| self.expr_mode(value, scopes))
+            .unwrap_or(PlaceMode::Unrestricted);
+        let receiving_mode = stmt.mode.unwrap_or(source_mode);
+
+        if let Some(value) = &stmt.value {
+            self.check_receiving_flow(
+                value,
+                source_mode,
+                receiving_mode,
+                TransferContext::Copy,
+                scopes,
+            );
+        }
+
+        receiving_mode
+    }
+
+    fn check_return_flow(
+        &mut self,
+        value: &Expr,
+        receiving_mode: PlaceMode,
+        scopes: &mut TypeScopeStack,
+    ) {
+        let source_mode = self.expr_mode(value, scopes);
+        if !mode_compatible(source_mode, receiving_mode) {
+            self.report_mode_incompatible(value.span, source_mode, receiving_mode);
+        }
+    }
+
+    fn check_argument_flow(
+        &mut self,
+        arg: &Expr,
+        expected: &FunctionParamType,
+        scopes: &mut TypeScopeStack,
+    ) {
+        let source_mode = self.expr_mode(arg, scopes);
+        let transfer = if parameter_moves(expected) {
+            TransferContext::Move
+        } else {
+            TransferContext::Copy
+        };
+        self.check_receiving_flow(arg, source_mode, expected.mode, transfer, scopes);
+    }
+
+    fn check_receiving_flow(
+        &mut self,
+        expr: &Expr,
+        source_mode: PlaceMode,
+        receiving_mode: PlaceMode,
+        transfer: TransferContext,
+        scopes: &mut TypeScopeStack,
+    ) {
+        if !mode_compatible(source_mode, receiving_mode) {
+            self.report_mode_incompatible(expr.span, source_mode, receiving_mode);
+        }
+
+        if transfer == TransferContext::Copy
+            && expr_place_name(expr).is_some()
+            && !mode_allows_copy(source_mode)
+        {
+            self.report_copy_of_noncopyable_mode(expr.span, source_mode);
+        }
+
+        if transfer == TransferContext::Move {
+            if let Some(name) = expr_place_name(expr) {
+                scopes.mark_moved(name.value.as_str(), expr.span);
+            }
+        }
+    }
+
+    fn expr_mode(&self, expr: &Expr, scopes: &TypeScopeStack) -> PlaceMode {
+        match &expr.kind {
+            ExprKind::Name(name) => scopes
+                .lookup_place(name.value.as_str())
+                .map(|place| place.mode)
+                .unwrap_or(PlaceMode::Unrestricted),
+            ExprKind::Grouped(expr) => self.expr_mode(expr, scopes),
+            ExprKind::Call { callee, .. } => self
+                .callee_return_mode(callee)
+                .unwrap_or(PlaceMode::Unrestricted),
+            ExprKind::Block(block) => block
+                .trailing_expr
+                .as_deref()
+                .map(|expr| self.expr_mode(expr, scopes))
+                .unwrap_or(PlaceMode::Unrestricted),
+            ExprKind::Recover { fallback, .. } => self.expr_mode(fallback, scopes),
+            ExprKind::Int(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Tuple(_)
+            | ExprKind::Array(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::MarkerRefinement { .. }
+            | ExprKind::UnsafeMarker(_) => PlaceMode::Unrestricted,
+        }
+    }
+
+    fn callee_return_mode(&self, callee: &Expr) -> Option<PlaceMode> {
+        let name = expr_place_name(callee)?;
+        self.item_signatures
+            .get(name.value.as_str())
+            .map(|item| item.signature.return_mode)
+            .or_else(|| {
+                self.host_signatures
+                    .get(name.value.as_str())
+                    .map(|signature| signature.return_mode)
+            })
+    }
+
     fn check_call_expr(
         &mut self,
         callee_span: Span,
@@ -2280,8 +2509,9 @@ impl<'a> TypeChecker<'a> {
         }
 
         for (arg, expected) in args.iter().zip(signature.params.iter()) {
-            let found = self.check_expr_with_expected(arg, scopes, Some(expected));
-            self.require_same_type(arg.span, expected, &found);
+            let found = self.check_expr_with_expected(arg, scopes, Some(&expected.ty));
+            self.require_same_type(arg.span, &expected.ty, &found);
+            self.check_argument_flow(arg, expected, scopes);
         }
 
         (*signature.return_type).clone()
@@ -2312,8 +2542,9 @@ impl<'a> TypeChecker<'a> {
         }
 
         for (arg, expected) in stmt.args.iter().zip(target.params.iter()) {
-            let found = self.check_expr_with_expected(arg, scopes, Some(expected));
-            self.require_same_type(arg.span, expected, &found);
+            let found = self.check_expr_with_expected(arg, scopes, Some(&expected.ty));
+            self.require_same_type(arg.span, &expected.ty, &found);
+            self.check_argument_flow(arg, expected, scopes);
         }
     }
 
@@ -2508,8 +2739,8 @@ impl<'a> TypeChecker<'a> {
     fn require_state_signature_matches_task(
         &mut self,
         span: Span,
-        task_params: &[SemanticType],
-        start_params: &[SemanticType],
+        task_params: &[FunctionParamType],
+        start_params: &[FunctionParamType],
     ) {
         if task_params.len() != start_params.len() {
             self.diagnostics.push(
@@ -2526,17 +2757,63 @@ impl<'a> TypeChecker<'a> {
         for (index, (task_param, start_param)) in
             task_params.iter().zip(start_params.iter()).enumerate()
         {
-            if task_param != start_param {
+            if task_param.ty != start_param.ty {
                 self.diagnostics.push(
                     Diagnostic::error(format!(
                         "`start` state parameter {index} has type {}, expected {}",
-                        start_param.describe(),
-                        task_param.describe()
+                        start_param.ty.describe(),
+                        task_param.ty.describe()
+                    ))
+                    .with_label(Label::primary(span, "`start` must mirror task parameters")),
+                );
+            } else if task_param.mode != start_param.mode
+                || task_param.transfer != start_param.transfer
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "`start` state parameter {index} has signature {}, expected {}",
+                        describe_function_param(start_param),
+                        describe_function_param(task_param)
                     ))
                     .with_label(Label::primary(span, "`start` must mirror task parameters")),
                 );
             }
         }
+    }
+
+    fn report_mode_incompatible(
+        &mut self,
+        span: Span,
+        source_mode: PlaceMode,
+        receiving_mode: PlaceMode,
+    ) {
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "cannot place {} value into {} place",
+                mode_name(source_mode),
+                mode_name(receiving_mode)
+            ))
+            .with_label(Label::primary(
+                span,
+                "receiving place mode would weaken the source restrictions",
+            )),
+        );
+    }
+
+    fn report_copy_of_noncopyable_mode(&mut self, span: Span, source_mode: PlaceMode) {
+        self.diagnostics.push(
+            Diagnostic::error(format!("cannot copy {} place", mode_name(source_mode)))
+                .with_label(Label::primary(span, "this place must be moved")),
+        );
+    }
+
+    fn report_use_after_move(&mut self, span: Span, moved_at: Option<Span>) {
+        let mut diagnostic = Diagnostic::error("use of moved place")
+            .with_label(Label::primary(span, "place was already moved"));
+        if let Some(moved_at) = moved_at {
+            diagnostic = diagnostic.with_label(Label::secondary(moved_at, "place moved here"));
+        }
+        self.diagnostics.push(diagnostic);
     }
 
     fn report_non_indexable_target(&mut self, span: Span) {
@@ -2737,7 +3014,7 @@ impl<'a> TypeChecker<'a> {
 
 #[derive(Debug, Default)]
 struct TypeScopeStack {
-    scopes: Vec<HashMap<String, SemanticType>>,
+    scopes: Vec<HashMap<String, TypePlaceState>>,
 }
 
 impl TypeScopeStack {
@@ -2750,18 +3027,54 @@ impl TypeScopeStack {
     }
 
     fn insert(&mut self, name: String, ty: SemanticType) {
+        self.insert_with_mode(name, ty, PlaceMode::Unrestricted);
+    }
+
+    fn insert_with_mode(&mut self, name: String, ty: SemanticType, mode: PlaceMode) {
         self.scopes
             .last_mut()
             .expect("type scope stack must not be empty")
-            .insert(name, ty);
+            .insert(
+                name,
+                TypePlaceState {
+                    ty,
+                    mode,
+                    live: true,
+                    moved_at: None,
+                },
+            );
     }
 
     fn lookup(&self, name: &str) -> Option<SemanticType> {
+        self.lookup_place(name).map(|place| place.ty)
+    }
+
+    fn lookup_place(&self, name: &str) -> Option<TypePlaceState> {
         self.scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
     }
+
+    fn mark_moved(&mut self, name: &str, moved_at: Span) {
+        if let Some(place) = self
+            .scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+        {
+            place.live = false;
+            place.moved_at = Some(moved_at);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TypePlaceState {
+    ty: SemanticType,
+    mode: PlaceMode,
+    live: bool,
+    moved_at: Option<Span>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2801,6 +3114,14 @@ fn name_span(expr: &Expr) -> Span {
         ExprKind::Name(name) => name.span,
         ExprKind::Grouped(expr) => name_span(expr),
         other => panic!("expected name-like callee expression, got {other:?}"),
+    }
+}
+
+fn expr_place_name(expr: &Expr) -> Option<&Spanned<String>> {
+    match &expr.kind {
+        ExprKind::Name(name) => Some(name),
+        ExprKind::Grouped(expr) => expr_place_name(expr),
+        _ => None,
     }
 }
 
@@ -2866,8 +3187,13 @@ fn function_signature(function: &Function) -> FunctionType {
         params: function
             .params
             .iter()
-            .map(|param| lower_type(&param.ty))
+            .map(|param| FunctionParamType {
+                ty: lower_type(&param.ty),
+                mode: param.mode.unwrap_or(PlaceMode::Unrestricted),
+                transfer: param.transfer,
+            })
             .collect(),
+        return_mode: function.return_mode.unwrap_or(PlaceMode::Unrestricted),
         return_type: Box::new(
             function
                 .return_type
@@ -2883,8 +3209,13 @@ fn task_signature(task: &Task) -> FunctionType {
         params: task
             .params
             .iter()
-            .map(|param| lower_type(&param.ty))
+            .map(|param| FunctionParamType {
+                ty: lower_type(&param.ty),
+                mode: param.mode.unwrap_or(PlaceMode::Unrestricted),
+                transfer: param.transfer,
+            })
             .collect(),
+        return_mode: task.return_mode.unwrap_or(PlaceMode::Unrestricted),
         return_type: Box::new(lower_type(&task.return_type)),
     }
 }
@@ -2893,34 +3224,42 @@ fn host_builtin_signature(builtin: HostBuiltin) -> FunctionType {
     match builtin {
         HostBuiltin::ReadU32 => FunctionType {
             params: Vec::new(),
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::U32),
         },
         HostBuiltin::PrintU32 => FunctionType {
-            params: vec![SemanticType::U32],
+            params: vec![function_param(SemanticType::U32)],
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::Unit),
         },
         HostBuiltin::PrintBool => FunctionType {
-            params: vec![SemanticType::Bool],
+            params: vec![function_param(SemanticType::Bool)],
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::Unit),
         },
         HostBuiltin::PrintNewline => FunctionType {
             params: Vec::new(),
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::Unit),
         },
         HostBuiltin::Some => FunctionType {
-            params: vec![SemanticType::Unknown],
+            params: vec![function_param(SemanticType::Unknown)],
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::Option(Box::new(SemanticType::Unknown))),
         },
         HostBuiltin::None => FunctionType {
             params: Vec::new(),
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::Option(Box::new(SemanticType::Unknown))),
         },
         HostBuiltin::Ok => FunctionType {
-            params: vec![SemanticType::Unknown],
+            params: vec![function_param(SemanticType::Unknown)],
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(arithmetic_result(SemanticType::Unknown)),
         },
         HostBuiltin::Err => FunctionType {
-            params: vec![SemanticType::ArithmeticError],
+            params: vec![function_param(SemanticType::ArithmeticError)],
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(arithmetic_result(SemanticType::Unknown)),
         },
         HostBuiltin::ArithmeticOverflow
@@ -2928,9 +3267,60 @@ fn host_builtin_signature(builtin: HostBuiltin) -> FunctionType {
         | HostBuiltin::DivideByZero
         | HostBuiltin::RemainderByZero => FunctionType {
             params: Vec::new(),
+            return_mode: PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::ArithmeticError),
         },
     }
+}
+
+fn function_param(ty: SemanticType) -> FunctionParamType {
+    FunctionParamType {
+        ty,
+        mode: PlaceMode::Unrestricted,
+        transfer: ParamTransfer::Copy,
+    }
+}
+
+fn parameter_moves(param: &FunctionParamType) -> bool {
+    param.transfer == ParamTransfer::Take
+        || matches!(param.mode, PlaceMode::Affine | PlaceMode::Linear)
+}
+
+fn mode_allows_copy(mode: PlaceMode) -> bool {
+    matches!(mode, PlaceMode::Unrestricted | PlaceMode::Relevant)
+}
+
+fn mode_compatible(source: PlaceMode, receiving: PlaceMode) -> bool {
+    matches!(
+        (source, receiving),
+        (PlaceMode::Unrestricted, _)
+            | (PlaceMode::Affine, PlaceMode::Affine | PlaceMode::Linear)
+            | (PlaceMode::Relevant, PlaceMode::Relevant | PlaceMode::Linear)
+            | (PlaceMode::Linear, PlaceMode::Linear)
+    )
+}
+
+fn mode_name(mode: PlaceMode) -> &'static str {
+    match mode {
+        PlaceMode::Unrestricted => "unrestricted",
+        PlaceMode::Affine => "affine",
+        PlaceMode::Relevant => "relevant",
+        PlaceMode::Linear => "linear",
+    }
+}
+
+fn describe_function_param(param: &FunctionParamType) -> String {
+    let transfer = if param.transfer == ParamTransfer::Take {
+        "take "
+    } else {
+        ""
+    };
+    format!(
+        "{}{} {}",
+        transfer,
+        mode_name(param.mode),
+        param.ty.describe()
+    )
 }
 
 fn lower_type(ty: &Type) -> SemanticType {

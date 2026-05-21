@@ -1,7 +1,7 @@
 use langlog_sema::{
     analyze, BindingKind, CheckedProgram, HirBlock, HirExpr, HirExprKind, HirFunction,
-    HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirStmt, HirTask, HirType,
-    HostBuiltin,
+    HirMarkerFamily, HirMarkerRuleStmt, HirMarkerTemplateArg, HirParamTransfer, HirPlaceMode,
+    HirStmt, HirTask, HirType, HostBuiltin,
 };
 use langlog_syntax::ast::{Block, Expr, ExprKind, ForStmt, Item, LetStmt, Stmt, Task};
 use langlog_syntax::{parse, LabelStyle, Span};
@@ -2895,6 +2895,208 @@ fn main(flag: bool, input: u32) {
     assert_eq!(
         hir_expr_stmt(&hir_main.body, 2).ty,
         HirType::Tuple(vec![HirType::U32, HirType::Bool])
+    );
+}
+
+//= HIR.md#llg-hir-03-types-and-mutability
+//= type=test
+//# HIR bindings and return slots MUST record structural place modes separately from concrete types.
+#[test]
+fn requirement_llg_hir_03_records_place_modes_separately_from_types() {
+    let checked = analyze_ok(
+        r#"
+fn close(take handle: linear Handle) -> affine u32 {
+    let token: relevant u32 = 1;
+    0
+}
+
+task main(seed: relevant u32) -> linear u32 {
+    let field: affine u32 = 1;
+
+    state start(seed: relevant u32) {
+        exit 0;
+    }
+}
+"#,
+    );
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+
+    let close = hir_function(&checked, "close");
+    assert_eq!(close.params[0].ty, HirType::Named("Handle".to_owned()));
+    assert_eq!(close.params[0].place_mode, Some(HirPlaceMode::Linear));
+    assert_eq!(close.params[0].param_transfer, Some(HirParamTransfer::Take));
+    assert_eq!(close.return_mode, HirPlaceMode::Affine);
+    assert_eq!(close.return_type, HirType::U32);
+    let token = hir_let_stmt(&close.body, 0);
+    assert_eq!(token.binding.place_mode, Some(HirPlaceMode::Relevant));
+    assert_eq!(token.binding.ty, HirType::U32);
+
+    let task = hir_task(&checked, "main");
+    assert_eq!(task.params[0].place_mode, Some(HirPlaceMode::Relevant));
+    assert_eq!(
+        task.fields[0].binding.place_mode,
+        Some(HirPlaceMode::Affine)
+    );
+    assert_eq!(
+        task.states[0].params[0].place_mode,
+        Some(HirPlaceMode::Relevant)
+    );
+    assert_eq!(task.return_mode, HirPlaceMode::Linear);
+}
+
+//= SPEC.md#llg-type-04-place-mode-annotations
+//= type=test
+//# Explicit modes MUST NOT weaken an incoming restrictive source place.
+#[test]
+fn requirement_llg_type_04_rejects_explicit_mode_weakening() {
+    let checked = analyze_ok(
+        r#"
+fn main() {
+    let event: relevant u32 = 1;
+    let plain: unrestricted u32 = event;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "cannot place relevant value into unrestricted place",
+    );
+}
+
+//= MARKER_MODES.md#llg-mm-06-function-parameters
+//= type=test
+//# A parameter whose mode is affine or linear MUST receive a moved argument, even when `take` is omitted.
+#[test]
+fn requirement_llg_mm_06_linear_parameter_implies_move_without_take() {
+    let checked = analyze_ok(
+        r#"
+fn close(handle: linear u32) {}
+
+fn main() {
+    let handle: linear u32 = 1;
+    close(handle);
+    handle;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "use of moved place");
+}
+
+//= MARKER_MODES.md#llg-mm-06-function-parameters
+//= type=test
+//# Passing an unrestricted argument to a linear parameter MUST be accepted and must move the source into a linear receiving place.
+#[test]
+fn requirement_llg_mm_06_unrestricted_argument_can_move_to_linear_parameter() {
+    let checked = analyze_ok(
+        r#"
+fn close(handle: linear u32) {}
+
+fn main() {
+    let handle = 1;
+    close(handle);
+    handle;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "use of moved place");
+    assert_no_diagnostic_message(
+        &checked,
+        "cannot place unrestricted value into linear place",
+    );
+}
+
+//= MARKER_MODES.md#llg-mm-06-function-parameters
+//= type=test
+//# Passing an argument whose current mode is affine or linear to a copying parameter MUST be rejected because affine and linear places cannot be copied.
+#[test]
+fn requirement_llg_mm_06_rejects_linear_argument_for_unrestricted_parameter() {
+    let checked = analyze_ok(
+        r#"
+fn inspect(value: u32) {}
+
+fn main() {
+    let handle: linear u32 = 1;
+    inspect(handle);
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "cannot place linear value into unrestricted place",
+    );
+    assert_diagnostic_message_contains(&checked, "cannot copy linear place");
+}
+
+//= MARKER_MODES.md#llg-mm-06-function-parameters
+//= type=test
+//# A parameter whose mode is unrestricted or relevant and which is not written with `take` MUST receive a copied argument.
+#[test]
+fn requirement_llg_mm_06_relevant_parameter_copies_without_take() {
+    let checked = analyze_ok(
+        r#"
+fn remember(value: relevant u32) {}
+
+fn main() {
+    let event: relevant u32 = 1;
+    remember(event);
+    event;
+}
+"#,
+    );
+
+    assert!(!checked.has_errors(), "{:#?}", checked.diagnostics);
+}
+
+//= MARKER_MODES.md#llg-mm-06-function-parameters
+//= type=test
+//# A parameter written with `take` MUST receive a moved argument.
+#[test]
+fn requirement_llg_mm_06_take_relevant_parameter_moves() {
+    let checked = analyze_ok(
+        r#"
+fn handle(take event: relevant u32) {}
+
+fn main() {
+    let event: relevant u32 = 1;
+    handle(event);
+    event;
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(&checked, "use of moved place");
+}
+
+//= SPEC.md#llg-type-04-place-mode-annotations
+//= type=test
+//# Local `let` annotations MAY omit the structural mode so mode can be inferred from the initializer.
+#[test]
+fn requirement_llg_type_04_omitted_local_mode_infers_from_initializer() {
+    let checked = analyze_ok(
+        r#"
+fn inspect(value: u32) {}
+
+fn main() {
+    let event: relevant u32 = 1;
+    let copy = event;
+    inspect(copy);
+}
+"#,
+    );
+
+    assert!(checked.has_errors());
+    assert_diagnostic_message_contains(
+        &checked,
+        "cannot place relevant value into unrestricted place",
     );
 }
 

@@ -13,6 +13,8 @@ This document complements, but does not replace, the main language spec:
   user-visible behavior spec.
 - [SEMANTICS.md](./SEMANTICS.md) defines normative static and dynamic language
   semantics that sit above HIR.
+- [TYPE_SYSTEM.md](./TYPE_SYSTEM.md) defines concrete types, places, produced
+  values, marker facts, and structural modes.
 - [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific lowering boundary and
   proof-facing invariants that sit after HIR.
 - [PLAN.md](./PLAN.md) tracks implementation sequencing and milestone status.
@@ -34,6 +36,12 @@ This document complements, but does not replace, the main language spec:
 
 - Every HIR binding MUST record its mutability and type directly, and every
   HIR expression MUST record its type directly.
+- HIR bindings and return slots MUST record structural place modes separately
+  from concrete types.
+- HIR function, task, and state parameters MUST record parameter transfer
+  behavior separately from structural place mode and concrete type.
+- HIR task fields MUST record structural place modes separately from concrete
+  types.
 
 ## LLG-HIR-04 Normalization Boundary
 
@@ -132,6 +140,7 @@ Function {
     id: ItemId,
     name: String,
     params: Vec<Binding>,
+    return_mode: PlaceMode,
     return_type: Type,
     body: Block,
     span: Span,
@@ -142,6 +151,8 @@ Binding {
     name: String,
     kind: BindingKind,
     mutable: bool,
+    place_mode: Option<PlaceMode>,
+    param_transfer: Option<ParamTransfer>,
     ty: Type,
     span: Span,
 }
@@ -154,7 +165,7 @@ Block {
 
 Stmt::Let {
     binding: Binding,
-    annotation: Option<Type>,
+    annotation: Option<PlaceType>,
     value: Option<Expr>,
     span: Span,
 }
@@ -257,9 +268,11 @@ empty array literals without a contextual element type.
 The first HIR elaboration is expected to follow these rules:
 
 - A parsed function item lowers to one HIR function with an explicit return
-  type. If the surface omitted the return type, HIR uses `()`.
+  type and return place mode. If the surface omitted the return type, HIR uses
+  `()` with unrestricted return mode.
 - A surface parameter or local binding lowers to one HIR binding with a stable
-  `BindingId`, mutability flag, type, and declaration span.
+  `BindingId`, mutability flag, concrete type, place mode when known, parameter
+  transfer behavior when applicable, and declaration span.
 - A surface name expression lowers to either `ExprKind::Binding` or
   `ExprKind::Item` depending on semantic resolution.
 - A block lowers to a list of HIR statements plus an optional trailing result

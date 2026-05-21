@@ -1031,21 +1031,23 @@ let y = match x {
 }; // rejected for linear branch results
 ```
 
-Function parameters should also say whether they copy or take an argument.
-This is better than putting `consumes` in ordinary function signatures:
+Function parameters should say both what mode the receiving place has and
+whether the argument is copied or moved. This is better than putting
+`consumes` in ordinary function signatures:
 
 ```llg
 fn inspect(value: Message) -> u32;
-fn handle(take value: Message with Event) -> ();
+fn remember(value: relevant Message with Event) -> ();
+fn handle(take value: relevant Message with Event) -> ();
+fn close(handle: linear Handle) -> ();
 ```
 
-A normal parameter receives a copied argument. Passing a relevant argument to a
-normal parameter therefore leaves the caller's place live and creates a
-relevant parameter place inside the callee. A normal parameter cannot receive a
-linear argument, because linear markers are not copyable. A `take` parameter
-moves the argument into the callee, so the caller's place is no longer live.
+A parameter whose mode is omitted defaults to unrestricted. `take` moves the
+argument into the callee. Affine and linear parameters also imply move, even if
+`take` is omitted, so `take` on those parameters is redundant but acceptable.
+Unrestricted and relevant parameters copy by default unless `take` is written.
 The call site should not need an additional `take` marker. The function
-signature already says whether the argument is copied or taken:
+signature already says whether the argument is copied or moved:
 
 ```llg
 handle(message);
@@ -1095,19 +1097,19 @@ let y = x;   // copy x
 let z <- x;  // take x
 ```
 
-To avoid silently losing produced values, every produced value must have a
-destination. A destination can be an assignable place, a function argument, a
-returned value, a stored field, the discard place `_`, or an explicit marker
-`consume`. An assignable place includes a place being initialized and a place
-declared mutable that can receive a replacement value. A bare expression
-statement has no destination, so it is accepted only when it produces unit:
+To avoid silently losing produced values, every produced value must flow into a
+receiving place. A receiving place can be an assignable place, a function
+argument, a return slot, a stored field, or the discard place `_`. An
+assignable place includes a place being initialized and a place declared
+mutable that can receive a replacement value. A bare expression statement has
+no receiving place, so it is accepted only when it produces unit:
 
 ```llg
 read_u32();  // rejected: unused non-unit value
 log("done"); // accepted if log returns ()
 ```
 
-`_` is the discard place. It is a valid destination, but it does not bind a
+`_` is the discard place. It is a valid receiving place, but it does not bind a
 name and cannot be read from later. Sending a value to `_` is an explicit
 discard:
 
@@ -1136,7 +1138,7 @@ does not make `x + 7` a place and does not make the result inherit placeness
 from `x`. Instead, the place occurrence `x` is checked as an operand to `+`.
 Because `+` copies its operands, this expression is rejected if `x` has a
 linear or affine marker. If the operand checks succeed, the result of `x + 7`
-is a produced value and may flow to an ordinary destination such as `y`.
+is a produced value and may flow to an ordinary receiving place such as `y`.
 
 Any marker relationship between copied operands and a produced result should be
 expressed by that function or operator's marker implementation, not inferred
@@ -1238,19 +1240,20 @@ This mode merge is the high-water mark of structural restrictions. Affine
 contributes "cannot copy"; relevant contributes "cannot discard"; together
 they behave as linear. Unrestricted contributes no restriction.
 
-`mark`, `use`, and `consume` are value-transforming trusted operations rather
-than side effects on an existing place:
+`mark`, `use`, and `consume` are trusted checker-state operations on existing
+places. This lets observations and companion rules mark the inputs of an
+operation, not only the operation's result:
 
 ```llg
-let marked = unsafe { Event::mark(value) };
-let used = unsafe { use(marked) };
+unsafe { Event::mark(value); }
+unsafe { use(value); }
 ```
 
-`mark` adds a marking to the returned value. When that value is placed, the
-marker type's mode obligation contributes to the receiving place's mode. `use`
-and `consume` take a placed value and return a new produced value with updated
-mode state. They do not remove or mutate markings. `use` turns a relevant mode
-into unrestricted. `consume` turns a linear mode into affine.
+`mark` adds a marking to the target place and merges the marker type's mode
+obligation into that place's current mode. `use` and `consume` update the
+target place's mode state. They do not remove or mutate markings. `use` turns a
+relevant mode into unrestricted. `consume` turns a linear mode into affine.
+These are checker effects, not runtime mutation.
 
 The hierarchy is:
 
@@ -1282,3 +1285,68 @@ The compiler should only introduce an IR place for an intermediate expression
 result when that intermediate result has to be tracked as storage in its own
 right. Otherwise, intermediate expression results can remain values whose mode
 contribution is computed when they are finally placed.
+
+## Explicit place mode annotations
+
+We decided that `take` alone is not enough information for separately checked
+function and task boundaries. A parameter needs to say both how the argument is
+transferred and what mode the receiving place has. The same applies to return
+slots, task parameters, state parameters, fields, and explicit local
+annotations.
+
+The surface form is:
+
+```text
+PlaceType := Mode? Type
+Mode := unrestricted | affine | relevant | linear
+Param := take? name: PlaceType
+Return := -> PlaceType
+```
+
+For example:
+
+```llg
+let handle: linear Handle = open_handle();
+
+fn inspect(value: Message with Event) -> u32;
+fn handle(value: relevant Message with Event) -> ();
+fn close(handle: linear Handle) -> ();
+fn close2(take handle: linear Handle) -> (); // redundant but accepted
+fn open() -> linear Handle;
+```
+
+The mode annotates the place, not the concrete runtime type. `linear Handle`
+does not create a different runtime representation from `Handle`; it says that
+the place receiving the value is linear. Marker requirements remain separate:
+`Message with Event` requires the `Event` fact but still defaults to an
+unrestricted receiving place unless it is written as `relevant Message with
+Event` or `linear Message with Event`.
+
+Boundary defaults are conservative. Function parameters, task parameters, state
+parameters, task fields, and return slots default omitted modes to
+`unrestricted`. Local `let` bindings can infer the mode from the initializer
+because the initializer is visible in the same analysis unit. A local can also
+explicitly strengthen a value, such as `let x: linear u32 = 7`.
+
+Receiving a value must preserve all restrictions already present on the source
+place, while it may add restrictions:
+
+| source mode | allowed receiving modes |
+| --- | --- |
+| unrestricted | unrestricted, affine, relevant, linear |
+| affine | affine, linear |
+| relevant | relevant, linear |
+| linear | linear |
+
+The transfer rule for function calls is:
+
+- `take` always moves;
+- affine and linear parameters imply move even without `take`;
+- `take` on affine or linear parameters is allowed but redundant;
+- unrestricted and relevant parameters copy by default;
+- `take` on unrestricted or relevant parameters moves.
+
+This keeps per-function checking possible. The callee does not need to inspect
+its callers to know whether a parameter is unrestricted, affine, relevant, or
+linear. The caller checks whether its source place can flow into that receiving
+mode and whether the signature copies or moves the source.

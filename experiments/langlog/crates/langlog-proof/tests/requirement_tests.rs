@@ -163,7 +163,7 @@ fn assert_type_has_no_named_unknown(ty: &HirType) {
         }
         HirType::Function(function) => {
             for param in &function.params {
-                assert_type_has_no_named_unknown(param);
+                assert_type_has_no_named_unknown(&param.ty);
             }
             assert_type_has_no_named_unknown(&function.return_type);
         }

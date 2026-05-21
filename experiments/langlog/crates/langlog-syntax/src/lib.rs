@@ -8,7 +8,8 @@ pub mod span;
 pub mod token;
 
 pub use ast::{
-    Block, Expr, ExprKind, Function, Item, Module, ObserveOp, Stmt, Task, Type, TypeKind,
+    Block, Expr, ExprKind, Function, Item, Module, ObserveOp, ParamTransfer, PlaceMode, Stmt, Task,
+    Type, TypeKind,
 };
 pub use diagnostic::{Diagnostic, Label, LabelStyle, Severity};
 pub use lexer::{lex, lex_source, LexedSource};

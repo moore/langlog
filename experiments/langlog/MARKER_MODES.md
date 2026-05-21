@@ -11,6 +11,8 @@ This document complements, but does not replace, the other Langlog specs:
 - [SPEC.md](./SPEC.md) defines the main surface language and front-end
   behavior.
 - [SEMANTICS.md](./SEMANTICS.md) defines broader static and dynamic semantics.
+- [TYPE_SYSTEM.md](./TYPE_SYSTEM.md) defines the broader type-system hierarchy
+  that marker modes extend.
 - [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific IR boundary.
 
 The prose in this document explains the design intent and motivation. The
@@ -37,11 +39,11 @@ copies and silent discards.
 
 ## Design Overview
 
-The design gives every marker family a base structural mode. Marker facts stay
-ordinary proof facts on SSA places. Structural mode is carried by the place,
-not by each fact. Marking a place adds a fact and merges the marker family's
-base mode into the returned place mode. `use` and `consume` transform the
-returned place mode without adding, removing, or changing marker facts.
+The design gives every marker type a base structural mode. Marker facts stay
+ordinary proof facts on places. Structural mode is carried by the place, not by
+each fact. Marking a place adds a fact and merges the marker type's base mode
+into that place's current mode. `use` and `consume` transform the target
+place's current mode without adding, removing, or changing marker facts.
 
 Place modes control how places behave when copied, moved, discarded, or
 implicitly discarded. Ordinary proof markers are unrestricted. Resource-like
@@ -49,44 +51,46 @@ markers can be affine, relevant, or linear.
 
 The user-visible model is place based:
 
-- `=` assigns into a destination place using a copy context;
-- `<-` assigns into a destination place using a move context;
+- `=` assigns into a receiving place using a copy context;
+- `<-` assigns into a receiving place using a move context;
+- explicit modes in place type annotations declare the receiving place mode at
+  function, task, state, field, return, and explicit local boundaries;
 - `take` on a function parameter means the call moves the argument into the
-  callee;
+  callee, while affine and linear parameter modes imply the same move;
 - `_` is the discard place;
-- `mark`, `use`, and `consume` are trusted value-transforming operations at the
-  boundary of the checker.
+- `mark`, `use`, and `consume` are trusted checker-state operations on live
+  places.
 
 Produced values are not source-level places. A function call result,
 constructor result, arithmetic result, or match result can flow into the
-left-hand destination place, but it does not become an anonymous place that
+left-hand receiving place, but it does not become an anonymous place that
 must itself be copied or taken. If the result of the right-hand side is a
 place, the assignment context applies to that source place. Place occurrences
 inside expressions are still checked by the context that uses them.
 
 Composite values are handled by compiler-derived summaries. If a struct owns a
-field with a relevant marker, the outer place behaves as if it contains a
-relevant obligation until that field value is transformed by `use` or otherwise
-moved out. Users should not have to write those summaries by hand.
+field whose current mode is relevant, the outer place behaves as if it
+contains a relevant obligation until that field value is transformed by `use`
+or otherwise moved out. Users should not have to write those summaries by hand.
 
-Marker operations do not mutate an input place by side effect. They take a
-value and return a produced value with updated marker state. This keeps marker
-state aligned with the rest of the place model: updates produce a new value
-that must flow to a destination place.
+Marker operations do mutate checker state for a live place. That is intentional:
+many useful marker facts are learned by observing a boolean result and then
+marking one of the operation's input places. These operations are not runtime
+mutation; they update the current proof and mode environment for a place/version.
 
 ## LLG-MM-01 Marker Modes
 
 Marker modes are the smallest extension that lets the existing marker system
-express substructural obligations. A marker family declares a base structural
+express substructural obligations. A marker type declares a base structural
 mode, but that mode is not stored on each marker fact. Instead, the checker
-stores a current structural mode on each SSA place. `mark` can make the
-returned place more restrictive by merging the marker family's base mode into
-the current place mode.
+stores a current structural mode on each SSA place. `mark` can make a place
+more restrictive by merging the marker type's base mode into the current place
+mode.
 
 This distinction lets a fact such as `LessThan` stay an ordinary proof fact
 while letting `Event` or future resource markers affect copy and discard
 checks. It also lets `use` and `consume` discharge substructural obligations by
-transforming the returned place mode without deleting marker facts.
+transforming the target place mode without deleting marker facts.
 
 The four place modes correspond to the usual structural permissions:
 unrestricted places may be copied and discarded, affine places may be
@@ -95,7 +99,7 @@ discarded until `use` transforms them to unrestricted mode, and linear places
 may be neither copied nor silently discarded until `consume` transforms them to
 affine mode.
 
-- Every marker family MUST have exactly one base structural mode.
+- Every marker type MUST have exactly one base structural mode.
 - A marker declaration without an explicit structural mode MUST default to
   `unrestricted`.
 - The structural modes are `unrestricted`, `affine`, `relevant`, and `linear`.
@@ -122,15 +126,16 @@ affine mode.
   checking.
 - A place's current structural mode MUST NOT affect ordinary marker requirement
   matching.
-- `mark` MUST merge the marker family's base mode into the returned place mode.
-- `use` MUST transform a relevant place mode into an unrestricted place mode on
-  the returned value.
-- `consume` MUST transform a linear place mode into an affine place mode on the
-  returned value.
+- `mark` MUST merge the marker type's base mode into the target place mode.
+- `use` MUST transform a relevant target place mode into unrestricted place
+  mode.
+- `consume` MUST transform a linear target place mode into affine place mode.
 
-A place's structural behavior is current checker state. The place does not
-need a user-written mode annotation. The checker computes that state by merging
-mode contributions from marker operations and reachable composite parts.
+A place's structural behavior is current checker state. Local places can infer
+that state from their initializer, while public and separately checked
+boundaries state it with place type annotations. In both cases, the checker
+maintains the current mode by merging mode contributions from marker operations
+and reachable composite parts.
 
 The merge operation is the intersection of structural permissions: the result
 may be copied only if both inputs are copyable, and it may be discarded only if
@@ -151,8 +156,8 @@ means any structural mode.
 | `linear` | `M` | `linear` |
 
 - The marker checker MUST maintain each place's current structural mode.
-- The marker checker MUST merge a marker family's base mode into the returned
-  place mode when `mark` adds that marker fact.
+- The marker checker MUST merge a marker type's base mode into the target place
+  mode when `mark` adds that marker fact.
 - The marker checker MUST include reachable composite part modes when deriving
   a composite place's structural mode.
 - A place whose current mode is affine or linear MUST be non-copyable.
@@ -161,11 +166,11 @@ means any structural mode.
   MUST derive linear structural behavior.
 
 For example, marking a place with an affine marker and then a relevant marker
-gives the returned place linear merged behavior: it cannot be copied because of
+gives the target place linear merged behavior: it cannot be copied because of
 the affine contribution, and it cannot be discarded because of the relevant
-contribution. `consume` can then return a value with affine mode, leaving the
+contribution. `consume` can then update the place to affine mode, leaving the
 value non-copyable but discardable. A place that is only relevant can instead
-be passed through `use`, which returns a value with unrestricted mode.
+be passed through `use`, which updates the place to unrestricted mode.
 
 Example marker declarations:
 
@@ -177,11 +182,11 @@ marker Event() : relevant;
 
 ## LLG-MM-02 Places And Produced Values
 
-The design distinguishes places from produced values because marker obligations
-are tracked on storage that the program can refer to again. A variable or field
-can carry an obligation across multiple program points. A produced value is
-only the result of an expression evaluation; it must flow somewhere, but it is
-not a user-visible storage location.
+The design distinguishes places from produced values because marker-mode
+obligations are tracked on storage identities. A variable, argument, field, or
+IR slot can carry a current mode across checker steps. A produced value is the
+result of expression evaluation; it has type and markings, but it is not itself
+a source-level or IR-level storage identity unless lowering materializes one.
 
 This distinction avoids requiring take syntax for ordinary fresh results:
 `let x = read_u32()` is accepted because the right-hand side is not a place.
@@ -190,24 +195,37 @@ because `x` is an existing place. `let z <- read_u32()` is also well-formed:
 the produced value moves directly into `z` without creating an anonymous source
 place.
 
-- A source-level place is a named storage location or projection that can own
-  marker facts.
-- Variables, fields, pattern-bound fields, and other assignable projections MAY
-  be source-level places.
+- A place MUST be a source-level or IR-level storage identity.
+- A place MAY be named or unnamed.
+- A place MAY contain subplaces.
+- A place MUST be able to hold a value and carry a current structural mode.
+- Source-level places include local variables, function arguments, fields,
+  projections, enum payload positions, and pattern bindings that are visible in
+  source.
+- IR-level places include return slots, call or parameter slots, projections,
+  and SSA temporaries materialized by lowering.
+- The compiler SHOULD introduce an IR-level place for an intermediate
+  expression result only when that result must be tracked as storage
+  independently for copy, move, discard, projection, or diagnostics.
+- The discard place `_` MUST be a place.
+- `_` MUST NOT be readable and MUST NOT bind a name.
 - A produced value is the result of evaluating an expression that is not itself
-  a source-level place.
-- Fresh expression results MUST NOT be source-level places.
+  a place.
+- Fresh expression results MUST NOT become places unless lowering materializes
+  an IR-level storage identity for them.
+- A produced value MAY carry runtime payload or storage, a concrete type, and
+  zero or more marker facts.
+- A produced value MUST flow into a place before it can be copied, moved,
+  discarded, projected, or diagnosed as storage.
 - Every `let` MUST initialize a place.
-- A destination place is either an assignable place or the discard place `_`.
 - The left-hand side of a binding or assignment using `=` or `<-` MUST be a
-  destination place, or a pattern whose binding positions are destination
-  places.
+  receiving place, or a pattern whose binding positions are receiving places.
 - When the right-hand side of a binding or assignment is a produced value
   rather than an existing place, `=` MUST be accepted without requiring a take,
   because there is no source place to copy from or take from.
 - When the right-hand side of a `<-` binding or assignment is a produced value
   rather than an existing place, `<-` MUST be accepted because the produced
-  value can move directly into the destination place.
+  value can move directly into the receiving place.
 - Copy and move rules MUST apply when the right-hand side denotes an existing
   place.
 
@@ -224,29 +242,30 @@ let w <- read_u32(); // allowed: RHS is a produced value
 
 ## LLG-MM-03 Copy And Move Assignment
 
-Copy and move assignment are destination-place contexts. They describe how the
-value produced by the right-hand side flows into the left-hand destination
-place. The left-hand side must be a destination place, or a pattern of
-destination places, but the right-hand side need not itself be a place.
+Copy and move assignment are receiving-place contexts. They describe how the
+value produced by the right-hand side flows into the left-hand receiving place.
+The left-hand side must be a receiving place, or a pattern of receiving places,
+but the right-hand side need not itself be a place.
 
 When the right-hand side result is a source place, copy preserves that source
-place and creates whatever destination-place obligations the copied marker modes
-allow. Move assignment takes ownership out of the source place and makes later
-reads of the source invalid until it is assigned again. When the right-hand
-side result is a produced value, the produced value flows directly into the
-destination place and there is no source place to copy from or take from.
+place and copies the source place's current mode to the receiving place. Move
+assignment takes ownership out of the source place and makes later reads of the
+source invalid until it is assigned again. When the right-hand side result is a
+produced value, the produced value flows directly into the receiving place and
+there is no source place to copy from or take from.
 
 Marker facts copy and move as ordinary proof facts. The place mode copies and
 moves separately. If a place is copied while its current mode is relevant, the
-destination receives relevant mode. If the place is copied after `use` returns
-an unrestricted value, the destination receives unrestricted mode. Later marker
-operations on the source do not retroactively update earlier copies. This
-keeps the user model place based: there is no hidden marker-instance identity
-to track in source programs, only live places with modes and facts.
+receiving place receives relevant mode. If the place is copied after `use`
+updates it to unrestricted mode, the receiving place receives unrestricted
+mode. Later marker operations on the source do not retroactively update earlier
+copies. This keeps the user model place based: there is no hidden
+marker-instance identity to track in source programs, only live places with
+modes and facts.
 
-- `=` MUST assign the right-hand side result into the destination place using a
+- `=` MUST assign the right-hand side result into the receiving place using a
   copy context.
-- `<-` MUST assign the right-hand side result into the destination place using
+- `<-` MUST assign the right-hand side result into the receiving place using
   a move context.
 - If the right-hand side result of `=` is an existing place, `=` MUST copy that
   place.
@@ -254,14 +273,14 @@ to track in source programs, only live places with modes and facts.
   that place.
 - Copying a place MUST be allowed only when the source place's current mode
   permits copying.
-- Copying a place MUST copy the source place's marker facts to the destination
+- Copying a place MUST copy the source place's marker facts to the receiving
   place.
-- Copying a place MUST copy the source place's current mode to the destination
+- Copying a place MUST copy the source place's current mode to the receiving
   place.
 - Taking a place MUST transfer all marker facts owned by the source place to
-  the destination place.
+  the receiving place.
 - Taking a place MUST transfer the source place's current mode to the
-  destination place.
+  receiving place.
 - After a place is taken, later use of that source place MUST be rejected unless
   the place has been assigned a new value.
 - Copying a place MUST leave the source place live with its existing mode and
@@ -279,10 +298,10 @@ to track in source programs, only live places with modes and facts.
   branch result.
 
 ```llg
-fn handle(take value: Message with Event) -> ();
+fn handle(take value: relevant Message with Event) -> ();
 
-let x = read_event(); // x has Event
-let y = x;            // y also has Event
+let x = read_event(); // x has relevant Event
+let y = x;            // y also has relevant Event
 
 handle(y);
 go loop();            // rejected: x still has relevant Event
@@ -300,27 +319,26 @@ let y <- match x {
 }; // takes each branch result place
 ```
 
-## LLG-MM-04 Assignable Places And Destinations
+## LLG-MM-04 Produced Values Must Flow To Places
 
-The destination rule prevents values from disappearing accidentally. A
-non-unit expression result should either be stored, passed, returned, placed
-into a field, used or consumed by a marker operation, or explicitly discarded.
-A bare expression statement has no destination, so allowing arbitrary non-unit
-expression statements would create an implicit discard path outside the marker
-checker.
+The flow-to-place rule prevents values from disappearing accidentally. A
+non-unit expression result should flow into a place: a local place, field
+place, argument place, return place, or the discard place `_`. A trusted marker
+operation can then target that place. A bare expression statement flows into no
+place, so allowing arbitrary non-unit expression statements would create an
+implicit discard path outside the marker checker.
 
 This rule is independent of marker modes. Even an unrestricted `u32` result
-needs a destination, because silently throwing away non-unit values is usually a
-bug or a missing effect boundary.
+needs a receiving place, because silently throwing away non-unit values is
+usually a bug or a missing effect boundary.
 
-- Every produced non-unit value MUST have a destination.
-- A destination MAY be an assignable place, a function argument, a returned
-  value, a stored field, the discard place `_`, or an explicit marker
-  `use` or `consume`.
+- Every produced non-unit value MUST flow into a place.
+- A place receiving a produced value MAY be a local place, function argument
+  place, return place, field place, or discard place `_`.
 - An assignable place includes a place being initialized and a mutable place
   receiving a replacement value.
-- A bare expression statement has no destination and MUST be accepted only when
-  the expression produces unit.
+- A bare expression statement flows into no place and MUST be accepted only
+  when the expression produces unit.
 
 ```llg
 read_u32();  // rejected: unused non-unit value
@@ -336,15 +354,15 @@ corresponding component is intentionally sent to the discard place rather than
 bound.
 
 Discard is still checked. `_` is not a loophole around relevant or linear
-obligations. It is only the explicit destination for values whose merged place
+obligations. It is only the explicit place for values whose current place
 mode permits discard, or whose blocking obligations have been transformed or
 moved elsewhere.
 
 - `_` is the discard place.
-- `_` MUST be a valid destination.
+- `_` MUST be a valid receiving place.
 - `_` MUST NOT bind a name.
 - `_` MUST NOT be readable by later code.
-- Sending a value to `_` MUST be treated as an explicit discard.
+- Flowing a value to `_` MUST be treated as an explicit discard.
 - `let _ = expr` MUST discard a produced value.
 - `let _ <- place` MUST take an existing place and discard it.
 
@@ -368,36 +386,78 @@ let Pair(keep, _) <- pair;
 ## LLG-MM-06 Function Parameters
 
 Function calls are another place where copy and take must be visible in the
-static interface. The call site should not need extra syntax to say that an
-argument is moved; the function signature already owns that decision. This is
-similar to how mutability or ownership annotations live on the binding that
-receives the value.
+static interface. The signature has two separate parts: the parameter's
+receiving place mode and the parameter's transfer behavior. The receiving mode
+is written as part of the parameter's place type. The transfer behavior is
+written with `take`, or implied by affine and linear parameter modes.
 
-A normal parameter receives a copied argument. A `take` parameter receives a
-moved argument. Keeping that distinction in signatures also gives the compiler
-a clear diagnostic site: if the caller uses an argument after a taking call,
-the call is where the move happened.
+This separation matters because `Message with Event` is only a marker
+requirement. It says the argument must carry the `Event` fact. It does not say
+that the callee receives a relevant place. A signature that wants that
+structural behavior must say `relevant Message with Event` or
+`linear Message with Event`.
 
-- A normal function parameter MUST receive a copied argument.
-- A `take` function parameter MUST receive a taken argument.
-- Function signatures MUST express whether each parameter is copied or taken.
+The call site should not need extra syntax to say that an argument is moved;
+the function signature already owns that decision. Keeping that distinction in
+signatures also gives the compiler a clear diagnostic site: if the caller uses
+an argument after a moving call, the call is where the move happened.
+
+The parameter syntax is:
+
+```text
+Param := take? name: Mode? Type
+Mode := unrestricted | affine | relevant | linear
+```
+
+- Function signatures MUST express the receiving place mode for each
+  parameter.
+- A parameter whose mode is omitted MUST default to unrestricted mode.
+- A parameter whose mode is affine or linear MUST receive a moved argument,
+  even when `take` is omitted.
+- A parameter written with `take` MUST receive a moved argument.
+- `take` on an affine or linear parameter MUST be accepted as redundant.
+- A parameter whose mode is unrestricted or relevant and which is not written
+  with `take` MUST receive a copied argument.
 - Call sites SHOULD NOT require an additional `take` marker for arguments
-  passed to `take` parameters.
+  passed to moving parameters.
+- Marker requirements MUST NOT imply receiving place mode.
+- A marker-qualified parameter with no explicit mode MUST still have
+  unrestricted receiving mode.
 
 ```llg
 fn inspect(value: Message) -> u32;
-fn handle(take value: Message with Event) -> ();
+fn needs_event(value: Message with Event) -> u32;      // unrestricted, copied
+fn remember(value: relevant Message with Event) -> (); // relevant, copied
+fn handle(take value: relevant Message with Event) -> (); // relevant, moved
+fn close(handle: linear Handle) -> ();       // linear, moved
+fn close2(take handle: linear Handle) -> (); // accepted, redundant take
 
 handle(message);
 ```
 
-- Passing an argument with relevant current mode to a normal parameter MUST
-  leave the caller's place live and create a relevant parameter place inside
-  the callee.
-- Passing an argument with linear or affine current mode to a normal parameter
-  MUST be rejected because normal parameters copy their arguments.
-- Passing an argument to a `take` parameter MUST make the caller's place no
-  longer live.
+The source place mode must be compatible with the receiving parameter mode.
+The receiving mode may add restrictions, but it must not drop restrictions
+already present on the source place:
+
+| source mode | allowed receiving modes |
+| --- | --- |
+| `unrestricted` | `unrestricted`, `affine`, `relevant`, `linear` |
+| `affine` | `affine`, `linear` |
+| `relevant` | `relevant`, `linear` |
+| `linear` | `linear` |
+
+- Passing an argument to a copying parameter MUST leave the caller's place live
+  and copy the caller's current mode into the callee parameter place, subject
+  to receiving-mode compatibility.
+- Passing an argument to a moving parameter MUST make the caller's source place
+  no longer live when the argument denotes a source place.
+- Passing an argument whose current mode is affine or linear to a copying
+  parameter MUST be rejected because affine and linear places cannot be copied.
+- Passing an argument whose current mode is relevant to an unrestricted
+  parameter MUST be rejected while the source remains relevant, because that
+  would weaken a non-discardable source to an unrestricted receiver.
+- Passing an unrestricted argument to a linear parameter MUST be accepted and
+  must move the source into a linear receiving place.
 - If later code tries to use a place taken by a call, the diagnostic SHOULD
   point to the call that took the place.
 
@@ -407,20 +467,26 @@ Marker modes decide whether obligations can be copied, moved, or discarded.
 They do not by themselves prove that an obligation has been semantically
 fulfilled. That semantic boundary is represented by trusted marker operations.
 
-`mark`, `use`, and `consume` are value transformers. Each operation takes an
-input value and returns a produced value with updated marker state. They do not
-mutate the input place by side effect. This makes marker-state changes look
-like the rest of the language: an updated value must flow to a destination.
-Each marker transformer behaves as if its input parameter were declared with
-`take`.
+`mark`, `use`, and `consume` are trusted checker-state operations on places.
+They update the current proof and mode state for a live place/version. This is
+the right default for marker facts because many facts are learned by observing a
+boolean condition or an operation result and then marking an input place. For
+example, observing `index < array.length` should add `LessThan(index,
+array.length)` to the existing `index` place on the continuing path.
 
-`mark` introduces a marker fact into the checker and merges that marker
-family's base mode into the returned place mode. `use` discharges the "must be
-used" part of a relevant place mode by returning a value with unrestricted
-mode. `consume` discharges the "must be consumed" part of a linear place mode
-by returning a value with affine mode. `use` and `consume` do not add, remove,
-or change marker facts. Keeping these operations trusted prevents ordinary safe
-code from simply asserting that important resource obligations were satisfied.
+These operations are side effects in the checker, not runtime mutation. They do
+not create a new runtime value, and they do not change older copied places. A
+copy made before a marker operation keeps the facts and mode it had at the copy
+point.
+
+`mark` introduces a marker fact into the checker and merges that marker type's
+base mode into the target place mode. `use` discharges the "must be used" part
+of a relevant place mode by changing the target place to unrestricted mode.
+`consume` discharges the "must be consumed" part of a linear place mode by
+changing the target place to affine mode. `use` and `consume` do not add,
+remove, or change marker facts. Keeping these operations trusted prevents
+ordinary safe code from simply asserting that important resource obligations
+were satisfied.
 
 - Introducing a marker fact MUST be a trusted operation.
 - Transforming a relevant place mode into unrestricted mode MUST be a trusted
@@ -430,62 +496,54 @@ code from simply asserting that important resource obligations were satisfied.
 - Safe code MAY move, copy when allowed, require markers, and pass marker facts
   through checked operations.
 - Safe code MUST NOT introduce or transform marker contracts directly.
-- `Marker::mark(value)` MUST take its input value.
-- `Marker::mark(value)` MUST return a produced value.
-- `Marker::mark(value)` MUST NOT mutate the input place by side effect.
-- `Marker::mark(value)` asserts that the marker contract is true for the
-  returned value.
-- `Marker::mark(value)` MUST add the marker fact to the returned value.
-- `Marker::mark(value)` MUST merge the marker family's base structural mode
-  into the returned value's place mode.
-- `use(value)` MUST take its input value.
-- `use(value)` MUST return a produced value.
-- `use(value)` MUST NOT mutate the input place by side effect.
-- `use(value)` asserts that a relevant obligation represented by the input
+- `Marker::mark(place)` MUST target an existing live place.
+- `Marker::mark(place)` asserts that the marker contract is true for the target
+  place.
+- `Marker::mark(place)` MUST add the marker fact to the target place in the
+  current checker environment.
+- `Marker::mark(place)` MUST merge the marker type's base structural mode into
+  the target place's current mode.
+- `Marker::mark(place)` MUST NOT create a new runtime value.
+- `use(place)` asserts that a relevant obligation represented by the target
   place mode has been meaningfully used.
-- `use(value)` MUST require the input value to have relevant current mode.
-- `use(value)` MUST return a value with unrestricted current mode.
-- `use(value)` MUST preserve the input value's marker facts on the returned
-  value.
-- `use(value)` MUST NOT add, remove, or change any marker fact.
-- `use(value)` MUST be rejected when the input value's current mode is not
+- `use(place)` MUST require the target place to have relevant current mode.
+- `use(place)` MUST update the target place's current mode to unrestricted.
+- `use(place)` MUST preserve the target place's marker facts.
+- `use(place)` MUST NOT add, remove, or change any marker fact.
+- `use(place)` MUST be rejected when the target place's current mode is not
   `relevant`.
-- `consume(value)` MUST take its input value.
-- `consume(value)` MUST return a produced value.
-- `consume(value)` MUST NOT mutate the input place by side effect.
-- `consume(value)` asserts that a linear obligation represented by the input
+- `consume(place)` asserts that a linear obligation represented by the target
   place mode has been meaningfully consumed.
-- `consume(value)` MUST require the input value to have linear current mode.
-- `consume(value)` MUST return a value with affine current mode.
-- `consume(value)` MUST preserve the input value's marker facts on the returned
-  value.
-- `consume(value)` MUST NOT add, remove, or change any marker fact.
-- `consume(value)` MUST be rejected when the input value's current mode is not
+- `consume(place)` MUST require the target place to have linear current mode.
+- `consume(place)` MUST update the target place's current mode to affine.
+- `consume(place)` MUST preserve the target place's marker facts.
+- `consume(place)` MUST NOT add, remove, or change any marker fact.
+- `consume(place)` MUST be rejected when the target place's current mode is not
   `linear`.
-- After `use(value)` or `consume(value)`, the returned value MUST still satisfy
-  ordinary requirements for all marker facts preserved from the input value.
-- After any marker transformer takes an input place, the input place MUST no
-  longer be live unless it is assigned a new value.
-- A caller that wants to keep using the value after a marker transformation
-  MUST use the returned value.
+- After `use(place)` or `consume(place)`, the target place MUST still satisfy
+  ordinary requirements for all marker facts preserved on that place.
+- Trusted marker operations MUST NOT make older copied places inherit the
+  updated facts or mode.
 
 ```llg
-let marked = unsafe { Event::mark(value) };
-let used = unsafe { use(marked) };
+unsafe { Event::mark(value); }
+unsafe { use(value); }
 
-let live = unsafe { Resource::mark(resource) };
-let spent = unsafe { consume(live) };
+unsafe { Resource::mark(resource); }
+unsafe { consume(resource); }
 ```
 
 - Marker implementations for functions and operators MAY use trusted marker
   operations to describe marker relationships between inputs and results.
+- A marker implementation that proves a fact about an input place SHOULD mark
+  that input place directly.
 - A marker implementation that observes a relevant input obligation SHOULD use
-  that input and return the value or result with unrestricted mode.
+  that input place.
 - A marker implementation that consumes a linear input obligation SHOULD
-  consume that input and return the value or result with affine mode.
+  consume that input place.
 - A marker implementation that creates a new obligation on a result SHOULD mark
-  the result, adding the marker fact and merging the marker family's base mode
-  into the returned place mode.
+  the result place, adding the marker fact and merging the marker type's base
+  mode into the result place mode.
 
 ## LLG-MM-08 Composite Structural Summaries
 
@@ -601,8 +659,8 @@ let y = x + 7;
 In this example, `x + 7` is not a place. The place occurrence `x` is checked as
 an operand to `+`. Because `+` copies its operands, this expression is rejected
 if `x` has affine or linear current mode. If the operand checks succeed, the
-result of `x + 7` is a produced value and may flow to an ordinary destination
-such as `y`.
+result of `x + 7` is a produced value and may flow to an ordinary receiving
+place such as `y`.
 
 ## LLG-MM-11 Implicit Discard Points
 

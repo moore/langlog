@@ -27,7 +27,12 @@ fn requirement_llg_hir_05_rejects_compound_semantic_types_with_unknown_component
         },
         SemanticType::Range(Box::new(SemanticType::Unknown)),
         SemanticType::Function(FunctionType {
-            params: vec![SemanticType::Unknown],
+            params: vec![crate::FunctionParamType {
+                ty: SemanticType::Unknown,
+                mode: langlog_syntax::PlaceMode::Unrestricted,
+                transfer: langlog_syntax::ParamTransfer::Copy,
+            }],
+            return_mode: langlog_syntax::PlaceMode::Unrestricted,
             return_type: Box::new(SemanticType::U32),
         }),
     ];

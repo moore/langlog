@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, MarkerRuleStmt, ObserveOp, PatternKind,
-    Stmt, Task, TypeKind, UnaryOp,
+    BinaryOp, Expr, ExprKind, Function, GenericArg, Item, MarkerRuleStmt, ObserveOp, ParamTransfer,
+    PatternKind, PlaceMode, Stmt, Task, TypeKind, UnaryOp,
 };
 use crate::diagnostic::LabelStyle;
 use crate::lexer::lex;
@@ -1537,6 +1537,68 @@ fn requirement_llg_type_03_requires_map_key_value_and_explicit_capacity() {
         &invalid,
         "`Map` requires key type, value type, and explicit capacity",
     );
+}
+
+//= SPEC.md#llg-type-04-place-mode-annotations
+//= type=test
+//# Place type annotations MUST allow an optional structural mode before the concrete type.
+#[test]
+fn requirement_llg_type_04_parses_place_mode_annotations() {
+    let parsed = parse_ok(
+        r#"
+fn f(take handle: linear Handle, event: relevant Message with Event) -> affine Result<u32, ArithmeticError> {
+    let local: linear u32 = 7;
+}
+"#,
+    );
+    let function = first_function(&parsed);
+
+    assert_eq!(function.params[0].transfer, ParamTransfer::Take);
+    assert_eq!(function.params[0].mode, Some(PlaceMode::Linear));
+    assert!(matches!(function.params[0].ty.kind, TypeKind::Named(_)));
+    assert_eq!(function.params[1].transfer, ParamTransfer::Copy);
+    assert_eq!(function.params[1].mode, Some(PlaceMode::Relevant));
+    assert!(matches!(function.params[1].ty.kind, TypeKind::With { .. }));
+    assert_eq!(function.return_mode, Some(PlaceMode::Affine));
+
+    let Stmt::Let(stmt) = &function.body.statements[0] else {
+        panic!("expected let statement");
+    };
+    assert_eq!(stmt.mode, Some(PlaceMode::Linear));
+    assert!(matches!(
+        stmt.ty.as_ref().map(|ty| &ty.kind),
+        Some(TypeKind::Named(_))
+    ));
+}
+
+//= SPEC.md#llg-type-04-place-mode-annotations
+//= type=test
+//# Mode words MUST remain contextual outside place type annotation mode positions.
+#[test]
+fn requirement_llg_type_04_keeps_mode_words_contextual() {
+    let parsed = parse_ok(
+        r#"
+fn main(take: u32, linear: u32) -> linear {
+    let affine: u32 = linear;
+}
+"#,
+    );
+    let function = first_function(&parsed);
+
+    assert_eq!(function.params[0].name.value, "take");
+    assert_eq!(function.params[0].mode, None);
+    assert_eq!(function.params[0].transfer, ParamTransfer::Copy);
+    assert_eq!(function.params[1].name.value, "linear");
+    assert_eq!(function.params[1].mode, None);
+    assert!(matches!(
+        function.return_type.as_ref().map(|ty| &ty.kind),
+        Some(TypeKind::Named(name)) if name.value == "linear"
+    ));
+    let Stmt::Let(stmt) = &function.body.statements[0] else {
+        panic!("expected let statement");
+    };
+    assert_eq!(stmt.name.value, "affine");
+    assert_eq!(stmt.mode, None);
 }
 
 //= SPEC.md#llg-diag-01-source-span-preservation

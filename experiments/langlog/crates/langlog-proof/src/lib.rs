@@ -1501,6 +1501,8 @@ impl ProofLowerer {
             name: info.name,
             kind: langlog_sema::BindingKind::Local,
             mutable: info.mutable,
+            place_mode: None,
+            param_transfer: None,
             ty: info.ty,
             markers: Vec::new(),
             span: info.span,
@@ -3817,7 +3819,7 @@ fn format_hir_type(ty: &HirType) -> String {
             let params = function
                 .params
                 .iter()
-                .map(format_hir_type)
+                .map(|param| format_hir_type(&param.ty))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("fn({params}) -> {}", format_hir_type(&function.return_type))

@@ -10,6 +10,8 @@ This document complements, but does not replace, the other traceable specs:
 
 - [SPEC.md](./SPEC.md) defines surface syntax, diagnostics, and front-end
   behavior.
+- [TYPE_SYSTEM.md](./TYPE_SYSTEM.md) defines concrete types, places, produced
+  values, marker facts, and structural modes.
 - [HIR.md](./HIR.md) defines compiler-facing semantic IR requirements.
 - [PROOF_IR.md](./PROOF_IR.md) defines the proof-specific IR boundary.
 - [MARKER_MODES.md](./MARKER_MODES.md) defines structural marker modes for

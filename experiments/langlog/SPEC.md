@@ -14,6 +14,7 @@ Compiler-facing docs:
 
 - [HIR.md](./HIR.md)
 - [SEMANTICS.md](./SEMANTICS.md)
+- [TYPE_SYSTEM.md](./TYPE_SYSTEM.md)
 - [PROOF_IR.md](./PROOF_IR.md)
 - [MARKER_MODES.md](./MARKER_MODES.md)
 - [WASM.md](./WASM.md)
@@ -89,6 +90,8 @@ properties that should be enforced structurally rather than by convention:
   `place`, `implies`, and `unsafe` in marker syntax positions.
 - Marker syntax words MAY remain contextual outside marker syntax positions
   when doing so is unambiguous.
+- Place-mode words `unrestricted`, `affine`, `relevant`, `linear`, and `take`
+  MUST be contextual in place type annotation and parameter positions.
 - The target task-state syntax MUST recognize `state` and `go` as contextual
   task-syntax words.
 
@@ -105,8 +108,12 @@ properties that should be enforced structurally rather than by convention:
   MUST be rejected with a syntax diagnostic.
 - A function item MUST use Rust-like syntax with `fn`, a name, a parameter list,
   and a block body.
+- A function parameter MUST use the form `take? name: PlaceType`.
+- A function return annotation, when present, MUST use the form
+  `-> PlaceType`.
 - The current parser allows the return type to be omitted in phase 1.
-- A task item MUST use the form `task name(param: Type, ...) -> Type { ... }`.
+- A task item MUST use the form
+  `task name(param: PlaceType, ...) -> PlaceType { ... }`.
 - A task item MUST include an explicit return type.
 - A task item MUST be treated as orchestration code rather than an ordinary
   total function.
@@ -224,6 +231,55 @@ issue direct diagnostics for obsolete source.
 - `Map<K, V, N>` MUST require exactly one key type, one value type, and one
   explicit capacity.
 
+## LLG-TYPE-04 Place Mode Annotations
+
+Place type annotations describe a receiving place. They contain an optional
+structural mode and a concrete type. The mode is not part of the runtime type.
+
+```text
+PlaceType := Mode? Type
+Mode := unrestricted | affine | relevant | linear
+Param := take? name: PlaceType
+Return := -> PlaceType
+```
+
+- Place type annotations MUST allow an optional structural mode before the
+  concrete type.
+- The structural modes in place type annotations are `unrestricted`, `affine`,
+  `relevant`, and `linear`.
+- An omitted structural mode in a function parameter, task parameter, state
+  parameter, task field, or return slot MUST default to `unrestricted`.
+- Local `let` annotations MAY omit the structural mode so mode can be inferred
+  from the initializer.
+- Local `let` annotations MAY include an explicit structural mode.
+- Explicit local modes MAY strengthen an unrestricted initializer.
+- Explicit modes MUST NOT weaken an incoming restrictive source place.
+- Mode words MUST remain contextual outside place type annotation mode
+  positions.
+- Function, task, and state parameters MAY include contextual `take` before the
+  parameter name.
+- `take` MUST be represented separately from the parameter's structural mode.
+- Marker requirements and place modes MUST remain separate. `T with Event`
+  requires the marker fact, while `relevant T with Event` requires the marker
+  fact and declares the receiving place mode.
+
+For every receiving boundary, the source mode and receiving mode MUST satisfy
+this compatibility table:
+
+| source mode | allowed receiving modes |
+| --- | --- |
+| `unrestricted` | `unrestricted`, `affine`, `relevant`, `linear` |
+| `affine` | `affine`, `linear` |
+| `relevant` | `relevant`, `linear` |
+| `linear` | `linear` |
+
+For example:
+
+```llg
+let value: linear u32 = 7;
+fn close(take handle: linear Handle) -> affine u32 { 0 }
+```
+
 ## LLG-MARK-01 Marker Model
 
 The marker-aware language phase replaces ad hoc observations and proof facts
@@ -253,8 +309,19 @@ with marker facts attached to places.
 
 - Function arguments MAY elide unmentioned markers, because ignoring marker
   facts is safe.
+- Function parameter signatures MUST express the receiving place's structural
+  mode independently from marker requirements.
+- A marker-qualified function parameter with no explicit structural mode MUST
+  still have unrestricted parameter mode.
 - A marker-qualified function parameter MUST create a call-site obligation for
   each required marker on the corresponding argument.
+- A parameter written with `take` MUST move the caller's argument into the
+  callee.
+- A parameter with affine or linear mode MUST move the caller's argument into
+  the callee even when `take` is omitted.
+- `take` on an affine or linear parameter MUST be accepted as redundant.
+- A parameter with unrestricted or relevant mode and no `take` MUST copy the
+  caller's argument.
 - Function return values MUST carry only the marker facts named by the function
   signature.
 - A marker-qualified return type MUST require the returned expression to
@@ -290,8 +357,11 @@ in its return type.
 
 ## LLG-MARK-03 Marker Construction
 
-- Safe code MAY consume and require marker facts.
+- Safe code MAY require marker facts and pass marker facts through checked
+  operations.
 - Code that creates a marker fact MUST do so inside an `unsafe` block.
+- Code that transforms a structural marker mode with `use` or `consume` MUST
+  do so inside an `unsafe` block.
 - Marker constructor syntax outside `unsafe` MUST be rejected with a syntax
   diagnostic.
 - Unsafe marker construction MUST assert that the marker contract is true for
@@ -303,7 +373,7 @@ For example:
 
 ```llg
 unsafe {
-    Event::mark(value)
+    Event::mark(value);
 }
 ```
 

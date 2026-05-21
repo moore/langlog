@@ -11,6 +11,8 @@ This document complements, but does not replace, the main language spec:
 
 - [SPEC.md](./SPEC.md) remains the authoritative surface-language and
   user-visible behavior spec.
+- [TYPE_SYSTEM.md](./TYPE_SYSTEM.md) defines the place, value, marker fact, and
+  structural mode hierarchy consumed by proof checking.
 - [HIR.md](./HIR.md) defines the semantic IR and the AST-to-HIR elaboration
   boundary.
 - [PLAN.md](./PLAN.md) tracks implementation sequencing and milestone status.
@@ -30,6 +32,10 @@ This document complements, but does not replace, the main language spec:
   identifier text.
 - A `PlaceId` MUST identify a compiler-visible SSA place that can carry marker
   facts.
+- Proof IR place state MUST have access to boundary-declared structural modes
+  from HIR parameters, return slots, task fields, and state parameters.
+- Proof IR MUST keep structural place mode separate from concrete value type
+  and marker fact requirements.
 - User-defined marker family facts MUST retain the source marker family name and
   instantiated place arguments.
 - Proof IR MUST distinguish ordinary marker facts, immutable marker facts, and
@@ -251,6 +257,9 @@ The first HIR-to-Proof-IR lowering is expected to follow these rules:
 - Assignment lowers as marker identity propagation.
 - Mutation lowers as a new `PlaceId` for the new SSA version of the mutated
   value.
+- Function, task, state, field, and return boundaries lower with their
+  declared structural place modes so copy, move, and discard checks can use the
+  same receiving-mode compatibility rules as source checking.
 - Immutable marker carry-forward lowers as an explicit marker fact source
   rather than as implicit reuse of the old place.
 - Indexing, map-presence checks, and future raw arithmetic operations lower to
